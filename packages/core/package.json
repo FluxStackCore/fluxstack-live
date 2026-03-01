@@ -37,6 +37,14 @@
     "state-sync",
     "framework-agnostic"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FluxStackCore/fluxstack-live",
+    "directory": "packages/core"
+  },
   "license": "MIT",
   "author": "FluxStack Team"
 }

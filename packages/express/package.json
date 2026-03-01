@@ -20,8 +20,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "workspace:*",
-    "@fluxstack/live-client": "workspace:*"
+    "@fluxstack/live": "^0.1.0",
+    "@fluxstack/live-client": "^0.1.0"
   },
   "peerDependencies": {
     "express": ">=4.0.0",
@@ -34,6 +34,14 @@
     "ws": "^8.18.0",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FluxStackCore/fluxstack-live",
+    "directory": "packages/express"
   },
   "license": "MIT"
 }
