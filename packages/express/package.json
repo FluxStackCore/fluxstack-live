@@ -1,0 +1,39 @@
+{
+  "name": "@fluxstack/live-express",
+  "version": "0.1.0",
+  "description": "Express transport adapter for @fluxstack/live",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fluxstack/live": "workspace:*",
+    "@fluxstack/live-client": "workspace:*"
+  },
+  "peerDependencies": {
+    "express": ">=4.0.0",
+    "ws": ">=8.0.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/ws": "^8.5.0",
+    "express": "^4.21.0",
+    "ws": "^8.18.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3"
+  },
+  "license": "MIT"
+}

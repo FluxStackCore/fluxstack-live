@@ -1,0 +1,38 @@
+{
+  "name": "@fluxstack/live-react",
+  "version": "0.1.0",
+  "description": "React bindings for @fluxstack/live-client",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fluxstack/live": "workspace:*",
+    "@fluxstack/live-client": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "zustand": ">=4.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "react": "^19.1.0",
+    "zustand": "^5.0.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3"
+  },
+  "license": "MIT"
+}

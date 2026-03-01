@@ -1,0 +1,21 @@
+{
+  "name": "express-basic-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun run server.ts",
+    "dev": "bun --watch run server.ts"
+  },
+  "dependencies": {
+    "@fluxstack/live": "workspace:*",
+    "@fluxstack/live-express": "workspace:*",
+    "express": "^4.21.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.8.3"
+  }
+}

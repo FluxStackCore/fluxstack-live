@@ -1,0 +1,42 @@
+{
+  "name": "@fluxstack/live",
+  "version": "0.1.0",
+  "description": "Framework-agnostic Live Components for real-time server-client state synchronization",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./build": {
+      "import": "./dist/build/index.js",
+      "types": "./dist/build/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.3",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.1.0"
+  },
+  "peerDependencies": {},
+  "keywords": [
+    "live-components",
+    "real-time",
+    "websocket",
+    "state-sync",
+    "framework-agnostic"
+  ],
+  "license": "MIT",
+  "author": "FluxStack Team"
+}

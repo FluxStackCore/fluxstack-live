@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Express + @fluxstack/live</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <h1>Express + @fluxstack/live</h1>
+  <div class="subtitle">Open multiple tabs to test real-time rooms &mdash; powered by <code>@fluxstack/live-client</code></div>
+  <div class="center"><div id="status" class="status disconnected">Disconnected</div></div>
+
+  <div class="grid">
+    <!-- Left column -->
+    <div>
+      <!-- Counter (local) -->
+      <div class="card">
+        <h2>Counter <span class="badge local">local</span></h2>
+        <div id="count" class="count">-</div>
+        <div class="buttons">
+          <button class="btn-dec" onclick="counterAction('decrement')">-</button>
+          <button class="btn-reset" onclick="counterAction('reset')">Reset</button>
+          <button class="btn-inc" onclick="counterAction('increment')">+</button>
+        </div>
+      </div>
+
+      <!-- Shared Counter -->
+      <div class="card" style="margin-top:16px">
+        <h2>Shared Counter <span class="badge shared">shared</span></h2>
+        <div class="shared-info">
+          <span id="sharedViewers">0</span> viewer(s) connected
+          <span id="sharedLastUser" class="shared-last"></span>
+        </div>
+        <div id="sharedCount" class="count">-</div>
+        <div class="buttons">
+          <button class="btn-dec" onclick="sharedAction('decrement')">-</button>
+          <button class="btn-reset" onclick="sharedAction('reset')">Reset</button>
+          <button class="btn-inc" onclick="sharedAction('increment')">+</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: Chat -->
+    <div>
+      <div class="card">
+        <h2>Chat Rooms</h2>
+
+        <!-- Setup (shown before joining) -->
+        <div id="chatSetup" class="chat-setup">
+          <input id="usernameInput" type="text" placeholder="Your name..." />
+          <div class="rooms-bar">
+            <button class="room-btn" onclick="joinChatRoom('general')">general</button>
+            <button class="room-btn" onclick="joinChatRoom('tech')">tech</button>
+            <button class="room-btn" onclick="joinChatRoom('random')">random</button>
+          </div>
+        </div>
+
+        <!-- Chat UI (shown after joining) -->
+        <div id="chatUI" style="display:none">
+          <div class="rooms-bar" id="roomsBar">
+            <button class="room-btn" onclick="joinChatRoom('general')">general</button>
+            <button class="room-btn" onclick="joinChatRoom('tech')">tech</button>
+            <button class="room-btn" onclick="joinChatRoom('random')">random</button>
+            <button class="btn-danger" style="margin-left:auto;padding:4px 12px;font-size:0.75rem;" onclick="leaveChat()">Leave</button>
+          </div>
+          <div class="users-bar" id="usersBar">Users: <span>-</span></div>
+          <div class="messages" id="messages"></div>
+          <div class="chat-input">
+            <input id="chatInput" type="text" placeholder="Type a message..." onkeydown="if(event.key==='Enter')sendChat()" />
+            <button class="btn-primary" onclick="sendChat()">Send</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="statsBar" class="stats-bar"></div>
+  <div id="log" class="log"></div>
+
+  <!-- Load the @fluxstack/live-client browser bundle -->
+  <script src="/live-client.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

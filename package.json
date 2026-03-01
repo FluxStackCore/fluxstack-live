@@ -1,0 +1,40 @@
+{
+  "name": "fluxstack-live-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "FluxStack Live Components - Framework-agnostic real-time component system",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
+  ],
+  "scripts": {
+    "build": "bun run build:core && bun run build:adapters && bun run build:client && bun run build:react",
+    "build:core": "cd packages/core && bunx tsup",
+    "build:adapters": "cd packages/elysia && bunx tsup & cd packages/express && bunx tsup",
+    "build:client": "cd packages/client && bunx tsup",
+    "build:react": "cd packages/react && bunx tsup",
+    "dev": "bunx tsup --watch",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "lint": "tsc --noEmit",
+    "clean": "rm -rf packages/*/dist node_modules"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/ws": "^8.5.0",
+    "elysia": "^1.4.6",
+    "express": "^4.21.0",
+    "react": "^19.1.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3",
+    "vite": "^7.1.0",
+    "vitest": "^3.2.4",
+    "ws": "^8.18.0",
+    "zustand": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,0 +1,69 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: system-ui, -apple-system, sans-serif; background: #0a0a0a; color: #e5e5e5; min-height: 100vh; padding: 24px; }
+h1 { font-size: 1.5rem; color: #a78bfa; text-align: center; margin-bottom: 8px; }
+.subtitle { text-align: center; color: #525252; font-size: 0.8rem; margin-bottom: 24px; }
+
+.status { text-align: center; padding: 6px 16px; border-radius: 8px; font-size: 0.8rem; display: inline-block; margin: 0 auto 24px; }
+.status.connected { background: #064e3b; color: #6ee7b7; }
+.status.disconnected { background: #7f1d1d; color: #fca5a5; }
+.center { text-align: center; }
+
+.grid { display: grid; grid-template-columns: 320px 1fr; gap: 24px; max-width: 960px; margin: 0 auto; }
+@media (max-width: 768px) { .grid { grid-template-columns: 1fr; } }
+
+.card { background: #171717; border: 1px solid #262626; border-radius: 12px; padding: 24px; }
+.card h2 { font-size: 1rem; color: #a78bfa; margin-bottom: 16px; }
+
+/* Counter */
+.count { font-size: 3.5rem; font-weight: 700; color: #fff; text-align: center; margin: 12px 0; }
+.buttons { display: flex; gap: 8px; justify-content: center; }
+button { padding: 8px 20px; border-radius: 8px; border: none; cursor: pointer; font-weight: 600; font-size: 0.9rem; transition: all 0.15s; }
+button:active { transform: scale(0.97); }
+.btn-dec { background: #dc2626; color: #fff; }
+.btn-inc { background: #16a34a; color: #fff; }
+.btn-reset { background: #262626; color: #a3a3a3; }
+.btn-primary { background: #7c3aed; color: #fff; }
+.btn-primary:hover { background: #8b5cf6; }
+.btn-danger { background: #dc2626; color: #fff; }
+
+/* Chat */
+.chat-setup { display: flex; flex-direction: column; gap: 12px; }
+.chat-setup input { background: #262626; border: 1px solid #404040; border-radius: 8px; padding: 10px 12px; color: #e5e5e5; font-size: 0.9rem; outline: none; }
+.chat-setup input:focus { border-color: #7c3aed; }
+
+.rooms-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.room-btn { padding: 6px 14px; border-radius: 20px; border: 1px solid #404040; background: #262626; color: #a3a3a3; cursor: pointer; font-size: 0.8rem; transition: all 0.15s; }
+.room-btn:hover { border-color: #7c3aed; color: #e5e5e5; }
+.room-btn.active { background: #7c3aed; border-color: #7c3aed; color: #fff; }
+
+.messages { height: 300px; overflow-y: auto; background: #0a0a0a; border-radius: 8px; padding: 12px; margin-bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
+.msg { font-size: 0.85rem; line-height: 1.4; }
+.msg .user { font-weight: 600; color: #a78bfa; }
+.msg .time { color: #525252; font-size: 0.7rem; margin-left: 8px; }
+.msg.system { color: #525252; font-style: italic; font-size: 0.8rem; }
+
+.chat-input { display: flex; gap: 8px; }
+.chat-input input { flex: 1; background: #262626; border: 1px solid #404040; border-radius: 8px; padding: 10px 12px; color: #e5e5e5; font-size: 0.9rem; outline: none; }
+.chat-input input:focus { border-color: #7c3aed; }
+
+.users-bar { font-size: 0.75rem; color: #525252; margin-bottom: 8px; }
+.users-bar span { color: #6ee7b7; }
+
+/* Badges */
+.badge { font-size: 0.6rem; padding: 2px 8px; border-radius: 10px; vertical-align: middle; font-weight: 500; text-transform: uppercase; letter-spacing: 0.5px; }
+.badge.local { background: #262626; color: #737373; }
+.badge.shared { background: #1e1b4b; color: #818cf8; }
+
+/* Shared counter info */
+.shared-info { text-align: center; font-size: 0.75rem; color: #525252; margin-bottom: 4px; }
+.shared-info span:first-child { color: #6ee7b7; font-weight: 600; }
+.shared-last { display: block; font-size: 0.65rem; color: #404040; margin-top: 2px; }
+
+.stats-bar { text-align: center; color: #404040; font-size: 0.7rem; margin-top: 24px; }
+
+/* Log */
+.log { background: #171717; border: 1px solid #262626; border-radius: 8px; padding: 12px; max-width: 960px; margin: 16px auto 0; max-height: 150px; overflow-y: auto; font-family: monospace; font-size: 0.7rem; }
+.log-entry { padding: 1px 0; }
+.log-entry.error { color: #f87171; }
+.log-entry.success { color: #6ee7b7; }
+.log-entry.info { color: #525252; }
