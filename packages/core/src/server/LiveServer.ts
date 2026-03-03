@@ -21,6 +21,7 @@ import { RateLimiterRegistry } from '../connection/RateLimiter'
 import { liveLog, _setLoggerDebugger } from '../debug/LiveLogger'
 import { decodeBinaryChunk } from '../protocol/binary'
 import { DEFAULT_WS_PATH } from '../protocol/constants'
+import { sendImmediate } from '../transport/WsSendBatcher'
 import type { LiveAuthProvider } from '../auth/types'
 
 export interface LiveServerOptions {
@@ -165,7 +166,7 @@ export class LiveServer {
     this.connectionManager.registerConnection(ws, connectionId)
     this.debugger.trackConnection(connectionId)
 
-    ws.send(JSON.stringify({
+    sendImmediate(ws, JSON.stringify({
       type: 'CONNECTION_ESTABLISHED',
       connectionId,
       timestamp: Date.now()
@@ -180,7 +181,7 @@ export class LiveServer {
     if (connectionId) {
       const limiter = this.rateLimiter.get(connectionId)
       if (!limiter.tryConsume()) {
-        ws.send(JSON.stringify({ type: 'ERROR', error: 'Rate limit exceeded', timestamp: Date.now() }))
+        sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Rate limit exceeded', timestamp: Date.now() }))
         return
       }
     }
@@ -192,10 +193,10 @@ export class LiveServer {
         if (header.type === 'FILE_UPLOAD_CHUNK') {
           const chunkMessage = { ...header, data: '' } as any
           const progress = await this.fileUploadManager.receiveChunk(chunkMessage, data)
-          if (progress) ws.send(JSON.stringify(progress))
+          if (progress) sendImmediate(ws, JSON.stringify(progress))
         }
       } catch (error: any) {
-        ws.send(JSON.stringify({ type: 'ERROR', error: error.message, timestamp: Date.now() }))
+        sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: error.message, timestamp: Date.now() }))
       }
       return
     }
@@ -206,7 +207,7 @@ export class LiveServer {
       const str = typeof rawMessage === 'string' ? rawMessage : new TextDecoder().decode(rawMessage as ArrayBuffer)
       message = JSON.parse(str)
     } catch {
-      ws.send(JSON.stringify({ type: 'ERROR', error: 'Invalid JSON', timestamp: Date.now() }))
+      sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Invalid JSON', timestamp: Date.now() }))
       return
     }
 
@@ -215,7 +216,7 @@ export class LiveServer {
       if (message.type === 'AUTH') {
         const authContext = await this.authManager.authenticate(message.payload || {})
         if (ws.data) ws.data.authContext = authContext
-        ws.send(JSON.stringify({
+        sendImmediate(ws, JSON.stringify({
           type: 'AUTH_RESPONSE',
           success: authContext.authenticated,
           payload: authContext.authenticated ? { userId: authContext.user?.id } : { error: 'Authentication failed' },
@@ -226,14 +227,14 @@ export class LiveServer {
 
       // Room messages
       if (message.type === 'ROOM_JOIN' || message.type === 'ROOM_LEAVE' || message.type === 'ROOM_EMIT' || message.type === 'ROOM_STATE_SET' || message.type === 'ROOM_STATE_GET') {
-        await this.handleRoomMessage(ws, message)
+        this.handleRoomMessage(ws, message)
         return
       }
 
       // File upload messages
       if (message.type === 'FILE_UPLOAD_START') {
         const result = await this.fileUploadManager.startUpload(message as any, ws.data?.userId)
-        ws.send(JSON.stringify({
+        sendImmediate(ws, JSON.stringify({
           type: 'FILE_UPLOAD_START_RESPONSE',
           componentId: message.componentId,
           uploadId: message.payload?.uploadId,
@@ -247,13 +248,13 @@ export class LiveServer {
 
       if (message.type === 'FILE_UPLOAD_CHUNK') {
         const progress = await this.fileUploadManager.receiveChunk(message as any)
-        if (progress) ws.send(JSON.stringify(progress))
+        if (progress) sendImmediate(ws, JSON.stringify(progress))
         return
       }
 
       if (message.type === 'FILE_UPLOAD_COMPLETE') {
         const result = await this.fileUploadManager.completeUpload(message as any)
-        ws.send(JSON.stringify(result))
+        sendImmediate(ws, JSON.stringify(result))
         return
       }
 
@@ -266,7 +267,7 @@ export class LiveServer {
           ws,
           { room: message.payload.room, userId: message.userId }
         )
-        ws.send(JSON.stringify({
+        sendImmediate(ws, JSON.stringify({
           type: 'COMPONENT_REHYDRATED',
           componentId: message.componentId,
           success: result.success,
@@ -293,10 +294,10 @@ export class LiveServer {
           responseId: message.responseId,
           timestamp: Date.now()
         }
-        ws.send(JSON.stringify(response))
+        sendImmediate(ws, JSON.stringify(response))
       }
     } catch (error: any) {
-      ws.send(JSON.stringify({
+      sendImmediate(ws, JSON.stringify({
         type: 'ERROR',
         componentId: message.componentId,
         error: error.message,
@@ -327,14 +328,14 @@ export class LiveServer {
 
   // ===== Room Message Router =====
 
-  private async handleRoomMessage(ws: GenericWebSocket, message: LiveMessage): Promise<void> {
+  private handleRoomMessage(ws: GenericWebSocket, message: LiveMessage): void {
     const { componentId } = message
     const roomId = (message as any).roomId || message.payload?.roomId
 
     switch (message.type) {
       case 'ROOM_JOIN': {
         const result = this.roomManager.joinRoom(componentId, roomId, ws, message.payload?.initialState)
-        ws.send(JSON.stringify({
+        sendImmediate(ws, JSON.stringify({
           type: 'ROOM_JOINED',
           componentId,
           payload: { roomId, state: result.state },
@@ -345,7 +346,7 @@ export class LiveServer {
       }
       case 'ROOM_LEAVE':
         this.roomManager.leaveRoom(componentId, roomId)
-        ws.send(JSON.stringify({
+        sendImmediate(ws, JSON.stringify({
           type: 'ROOM_LEFT',
           componentId,
           payload: { roomId },
@@ -361,7 +362,7 @@ export class LiveServer {
         break
       case 'ROOM_STATE_GET': {
         const state = this.roomManager.getRoomState(roomId)
-        ws.send(JSON.stringify({
+        sendImmediate(ws, JSON.stringify({
           type: 'ROOM_STATE',
           componentId,
           payload: { roomId, state },
@@ -380,7 +381,7 @@ export class LiveServer {
       {
         method: 'GET',
         path: `${prefix}/stats`,
-        handler: async () => ({
+        handler: () => ({
           body: {
             components: this.registry.getStats(),
             rooms: this.roomManager.getStats(),
@@ -394,7 +395,7 @@ export class LiveServer {
       {
         method: 'GET',
         path: `${prefix}/components`,
-        handler: async () => ({
+        handler: () => ({
           body: { names: this.registry.getRegisteredComponentNames() }
         }),
         metadata: { summary: 'List registered component names', tags: ['live'] }
@@ -402,7 +403,7 @@ export class LiveServer {
       {
         method: 'POST',
         path: `${prefix}/rooms/:roomId/messages`,
-        handler: async (req) => {
+        handler: (req) => {
           const roomId = req.params.roomId!
           this.roomManager.emitToRoom(roomId, 'message:new', req.body)
           return { body: { success: true, roomId } }
@@ -412,7 +413,7 @@ export class LiveServer {
       {
         method: 'POST',
         path: `${prefix}/rooms/:roomId/emit`,
-        handler: async (req) => {
+        handler: (req) => {
           const roomId = req.params.roomId!
           const { event, data } = req.body as any
           this.roomManager.emitToRoom(roomId, event, data)

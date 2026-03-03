@@ -109,15 +109,22 @@ export class LiveAuthManager {
       }
     }
 
+    const errors: Array<{ provider: string; error: Error }> = []
+
     for (const provider of providersToTry) {
       try {
         const context = await provider.authenticate(credentials)
         if (context && context.authenticated) {
           return context
         }
-      } catch {
-        // Silently continue to next provider
+      } catch (error: any) {
+        console.warn(`[Auth] Provider '${provider.name}' threw during authentication:`, error.message)
+        errors.push({ provider: provider.name, error })
       }
+    }
+
+    if (errors.length > 0) {
+      console.warn(`[Auth] All ${providersToTry.length} provider(s) failed. Errors: ${errors.map(e => `${e.provider}: ${e.error.message}`).join('; ')}`)
     }
 
     return ANONYMOUS_CONTEXT

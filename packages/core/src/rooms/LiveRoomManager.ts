@@ -4,6 +4,7 @@
 
 import type { RoomEventBus } from './RoomEventBus'
 import type { GenericWebSocket } from '../transport/types'
+import { queueWsMessage } from '../transport/WsSendBatcher'
 import { liveLog } from '../debug/LiveLogger'
 import { MAX_ROOM_STATE_SIZE } from '../protocol/constants'
 
@@ -177,8 +178,9 @@ export class LiveRoomManager {
 
     const newState = { ...room.state, ...updates }
 
-    // Validate state size
-    const stateSize = Buffer.byteLength(JSON.stringify(newState), 'utf8')
+    // Validate state size — serialize once and reuse for size check
+    const stateJson = JSON.stringify(newState)
+    const stateSize = Buffer.byteLength(stateJson, 'utf8')
     if (stateSize > MAX_ROOM_STATE_SIZE) {
       throw new Error('Room state exceeds maximum size limit')
     }
@@ -216,10 +218,8 @@ export class LiveRoomManager {
 
       try {
         if (member.ws && member.ws.readyState === 1) {
-          member.ws.send(JSON.stringify({
-            ...message,
-            componentId
-          }))
+          // Queue to batcher — per-client componentId injected as message field
+          queueWsMessage(member.ws, { ...message, componentId })
           sent++
         }
       } catch (error) {

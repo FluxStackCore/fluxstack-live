@@ -1,7 +1,7 @@
 // @fluxstack/live-react - React bindings for Live Components
 //
 // Usage:
-//   import { LiveComponentsProvider, Live, useLiveComponent } from '@fluxstack/live-react'
+//   import { LiveComponentsProvider, Live, useLive } from '@fluxstack/live-react'
 
 // Provider
 export { LiveComponentsProvider, useLiveComponents } from './LiveComponentsProvider'
@@ -14,7 +14,7 @@ export type {
 export { Live } from './components/Live'
 
 // Core Hook
-export { useLiveComponent, createLiveComponent } from './hooks/useLiveComponent'
+export { useLiveComponent, useLiveComponent as useLive, createLiveComponent } from './hooks/useLiveComponent'
 export type {
   LiveComponentProxy,
   LiveComponentProxyWithBroadcasts,

@@ -6,7 +6,7 @@
 export { LiveServer, type LiveServerOptions } from './server/LiveServer'
 
 // ===== LiveComponent Base Class =====
-export { LiveComponent } from './component/LiveComponent'
+export { LiveComponent, EMIT_OVERRIDE_KEY } from './component/LiveComponent'
 
 // ===== Transport Types (for adapter authors) =====
 export type {
@@ -20,6 +20,7 @@ export type {
   HttpRequest,
   HttpResponse,
 } from './transport/types'
+export { queueWsMessage, sendImmediate } from './transport/WsSendBatcher'
 
 // ===== Protocol Messages =====
 export type {

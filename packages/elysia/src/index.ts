@@ -12,6 +12,9 @@
 //   await liveServer.start()
 //   app.listen(3000)
 
+import { readFileSync, existsSync } from 'fs'
+import { dirname, join } from 'path'
+import { fileURLToPath } from 'url'
 import type { Elysia } from 'elysia'
 import type {
   LiveTransport,
@@ -59,6 +62,29 @@ export class ElysiaTransport implements LiveTransport {
     })
   }
 
+  /**
+   * Serve the @fluxstack/live-client IIFE browser bundle.
+   * Defaults to `/live-client.js`. Pass `false` to disable.
+   */
+  registerClientBundle(clientPath?: string | false): void {
+    if (clientPath === false) return
+    const route = clientPath || '/live-client.js'
+
+    const bundlePath = resolveClientBundlePath()
+    if (!bundlePath) return
+
+    const bundle = readFileSync(bundlePath, 'utf-8')
+
+    this.app.get(route, () => {
+      return new Response(bundle, {
+        headers: {
+          'Content-Type': 'application/javascript',
+          'Cache-Control': 'public, max-age=86400',
+        },
+      })
+    })
+  }
+
   registerHttpRoutes(routes: HttpRouteDefinition[]): void {
     for (const route of routes) {
       const handler = async (ctx: any) => {
@@ -95,6 +121,19 @@ export class ElysiaTransport implements LiveTransport {
       }
     }
   }
+}
+
+function resolveClientBundlePath(): string | null {
+  try {
+    const mainUrl = import.meta.resolve('@fluxstack/live-client')
+    const mainPath = fileURLToPath(mainUrl)
+    const distDir = dirname(mainPath)
+    const bundlePath = join(distDir, 'live-client.browser.global.js')
+    if (existsSync(bundlePath)) return bundlePath
+  } catch {
+    // @fluxstack/live-client not installed
+  }
+  return null
 }
 
 /**

@@ -161,9 +161,17 @@ export class LiveConnection {
 
       ws.onmessage = (event) => {
         try {
-          const response: WebSocketResponse = JSON.parse(event.data)
-          this.log('Received', { type: response.type, componentId: response.componentId })
-          this.handleMessage(response)
+          const parsed = JSON.parse(event.data)
+          // Server may send batched messages as a JSON array
+          if (Array.isArray(parsed)) {
+            for (const msg of parsed) {
+              this.log('Received', { type: msg.type, componentId: msg.componentId })
+              this.handleMessage(msg)
+            }
+          } else {
+            this.log('Received', { type: parsed.type, componentId: parsed.componentId })
+            this.handleMessage(parsed)
+          }
         } catch {
           this.log('Failed to parse message')
           this.setState({ error: 'Failed to parse message' })

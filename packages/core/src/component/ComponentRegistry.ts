@@ -6,6 +6,7 @@
 import type { LiveComponent } from './LiveComponent'
 import { _setLiveDebugger, EMIT_OVERRIDE_KEY } from './LiveComponent'
 import type { GenericWebSocket, LiveWSData } from '../transport/types'
+import { queueWsMessage, sendImmediate } from '../transport/WsSendBatcher'
 import type { LiveMessage, BroadcastMessage, ComponentDefinition } from '../protocol/messages'
 import type { LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
@@ -200,12 +201,12 @@ export class ComponentRegistry {
           this.ensureWsData(ws, options?.userId)
           ws.data.components.set(existing.instance.id, existing.instance)
 
-          const signedState = await this.stateSignature.signState(existing.instance.id, {
+          const signedState = this.stateSignature.signState(existing.instance.id, {
             ...existing.instance.getSerializableState(),
             __componentName: componentName
           }, 1, { compress: true, backup: true })
 
-          ws.send(JSON.stringify({
+          sendImmediate(ws, JSON.stringify({
             type: 'STATE_UPDATE',
             componentId: existing.instance.id,
             payload: { state: existing.instance.getSerializableState(), signedState },
@@ -276,7 +277,7 @@ export class ComponentRegistry {
       this.performanceMonitor.recordRenderTime(component.id, renderTime)
 
       // Sign initial state
-      const signedState = await this.stateSignature.signState(component.id, {
+      const signedState = this.stateSignature.signState(component.id, {
         ...component.getSerializableState(),
         __componentName: componentName
       }, 1, { compress: true, backup: true })
@@ -315,7 +316,7 @@ export class ComponentRegistry {
     options?: { room?: string; userId?: string }
   ): Promise<{ success: boolean; newComponentId?: string; error?: string }> {
     try {
-      const validation = await this.stateSignature.validateState(signedState)
+      const validation = this.stateSignature.validateState(signedState)
       if (!validation.valid) return { success: false, error: validation.error || 'Invalid state signature' }
 
       const definition = this.definitions.get(componentName)
@@ -343,9 +344,9 @@ export class ComponentRegistry {
       const authResult = this.authManager.authorizeComponent(authContext, componentAuth)
       if (!authResult.allowed) return { success: false, error: `AUTH_DENIED: ${authResult.reason}` }
 
-      const clientState = await this.stateSignature.extractData(signedState) as Record<string, any>
+      const clientState = this.stateSignature.extractData(signedState) as Record<string, any>
 
-      if (clientState.__componentName && clientState.__componentName !== componentName) {
+      if (!clientState.__componentName || clientState.__componentName !== componentName) {
         return { success: false, error: 'Component class mismatch - state tampering detected' }
       }
 
@@ -361,7 +362,7 @@ export class ComponentRegistry {
       ws.data.components.set(component.id, component)
       registerComponentLogging(component.id, (ComponentClass as any).logging)
 
-      const newSignedState = await this.stateSignature.signState(
+      const newSignedState = this.stateSignature.signState(
         component.id,
         { ...component.getSerializableState(), __componentName: componentName },
         signedState.version + 1
@@ -416,7 +417,7 @@ export class ComponentRegistry {
     return false
   }
 
-  async unmountComponent(componentId: string, ws?: GenericWebSocket) {
+  unmountComponent(componentId: string, ws?: GenericWebSocket) {
     const component = this.components.get(componentId)
     if (!component) return
 
@@ -510,7 +511,7 @@ export class ComponentRegistry {
       const component = this.components.get(componentId)
       if (message.excludeUser && component?.userId === message.excludeUser) continue
       const ws = this.wsConnections.get(componentId)
-      if (ws && ws.send) ws.send(JSON.stringify(broadcastMessage))
+      if (ws) queueWsMessage(ws, broadcastMessage as any)
     }
   }
 
@@ -528,7 +529,7 @@ export class ComponentRegistry {
           return { success: true, result: mountResult }
 
         case 'COMPONENT_UNMOUNT':
-          await this.unmountComponent(message.componentId, ws)
+          this.unmountComponent(message.componentId, ws)
           return { success: true }
 
         case 'CALL_ACTION':
@@ -646,7 +647,7 @@ export class ComponentRegistry {
     }
   }
 
-  private async performHealthChecks(): Promise<void> {
+  private performHealthChecks(): void {
     for (const [componentId, metadata] of this.metadata) {
       if (!this.components.get(componentId)) continue
       if (metadata.metrics.errorCount > 10) metadata.healthStatus = 'unhealthy'

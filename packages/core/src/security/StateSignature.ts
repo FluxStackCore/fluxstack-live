@@ -4,7 +4,7 @@
 // Supports: key rotation, compression (gzip), encryption (AES-256-CBC),
 // anti-replay nonces, state backups, and state migrations.
 
-import { createHmac, createCipheriv, createDecipheriv, randomBytes } from 'crypto'
+import { createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto'
 import { gzipSync, gunzipSync } from 'zlib'
 import { liveLog, liveWarn } from '../debug/LiveLogger'
 
@@ -38,6 +38,8 @@ export interface StateSignatureConfig {
   backupEnabled?: boolean
   /** Max state backups to keep */
   maxBackups?: number
+  /** Maximum number of tracked nonces. When exceeded, new requests are rejected (backpressure). Default: 500000 */
+  maxNonces?: number
 }
 
 interface StateBackup {
@@ -49,10 +51,12 @@ export class StateSignatureManager {
   private secret: Buffer
   private previousSecrets: Buffer[] = []
   private rotationTimer?: ReturnType<typeof setInterval>
-  private usedNonces = new Set<string>()
+  private usedNonces = new Map<string, number>()
   private nonceCleanupTimer?: ReturnType<typeof setInterval>
   private stateBackups = new Map<string, StateBackup[]>()
   private config: Required<StateSignatureConfig>
+  private encryptionSalt: Buffer
+  private cachedEncryptionKey: Buffer | null = null
 
   constructor(config: StateSignatureConfig = {}) {
     const defaultSecret = typeof process !== 'undefined'
@@ -69,6 +73,7 @@ export class StateSignatureManager {
       maxStateAge: config.maxStateAge ?? 7 * 24 * 60 * 60 * 1000,
       backupEnabled: config.backupEnabled ?? true,
       maxBackups: config.maxBackups ?? 3,
+      maxNonces: config.maxNonces ?? 500000,
     }
 
     // Generate random secret if none provided
@@ -78,6 +83,7 @@ export class StateSignatureManager {
     }
 
     this.secret = Buffer.from(this.config.secret, 'utf-8')
+    this.encryptionSalt = randomBytes(16)
 
     if (this.config.rotationEnabled) {
       this.setupKeyRotation()
@@ -88,12 +94,12 @@ export class StateSignatureManager {
     }
   }
 
-  async signState(
+  signState(
     componentId: string,
     state: Record<string, unknown>,
     version: number,
     options?: { compress?: boolean; backup?: boolean }
-  ): Promise<SignedState> {
+  ): SignedState {
     let dataStr = JSON.stringify(state)
     let compressed = false
     let encrypted = false
@@ -143,7 +149,7 @@ export class StateSignatureManager {
     return signedState
   }
 
-  async validateState(signedState: SignedState): Promise<{ valid: boolean; error?: string }> {
+  validateState(signedState: SignedState): { valid: boolean; error?: string } {
     try {
       // Check max age
       const age = Date.now() - signedState.timestamp
@@ -156,12 +162,16 @@ export class StateSignatureManager {
         if (this.usedNonces.has(signedState.nonce)) {
           return { valid: false, error: 'Nonce already used (replay attempt)' }
         }
+        // Backpressure: reject new requests when nonce storage is full
+        if (this.usedNonces.size >= this.config.maxNonces) {
+          return { valid: false, error: 'Nonce storage full - too many concurrent states (backpressure)' }
+        }
       }
 
       // Verify signature with current key
       const expectedSig = this.computeSignature(signedState)
       if (this.timingSafeEqual(signedState.signature, expectedSig)) {
-        if (signedState.nonce) this.usedNonces.add(signedState.nonce)
+        if (signedState.nonce) this.usedNonces.set(signedState.nonce, Date.now())
         return { valid: true }
       }
 
@@ -169,7 +179,7 @@ export class StateSignatureManager {
       for (const prevSecret of this.previousSecrets) {
         const prevSig = this.computeSignatureWithKey(signedState, prevSecret)
         if (this.timingSafeEqual(signedState.signature, prevSig)) {
-          if (signedState.nonce) this.usedNonces.add(signedState.nonce)
+          if (signedState.nonce) this.usedNonces.set(signedState.nonce, Date.now())
           return { valid: true }
         }
       }
@@ -180,7 +190,7 @@ export class StateSignatureManager {
     }
   }
 
-  async extractData(signedState: SignedState): Promise<Record<string, unknown>> {
+  extractData(signedState: SignedState): Record<string, unknown> {
     let dataStr = signedState.data
 
     // Decrypt
@@ -248,7 +258,9 @@ export class StateSignatureManager {
   }
 
   private deriveEncryptionKey(): Buffer {
-    return createHmac('sha256', this.secret).update('encryption-key-derivation').digest()
+    if (this.cachedEncryptionKey) return this.cachedEncryptionKey
+    this.cachedEncryptionKey = scryptSync(this.secret, this.encryptionSalt, 32) as Buffer
+    return this.cachedEncryptionKey
   }
 
   private setupKeyRotation(): void {
@@ -263,9 +275,12 @@ export class StateSignatureManager {
   }
 
   private cleanupNonces(): void {
-    // Simply clear old nonces periodically
-    if (this.usedNonces.size > 100000) {
-      this.usedNonces.clear()
+    // Incremental cleanup: remove only nonces older than maxStateAge
+    const now = Date.now()
+    for (const [nonce, timestamp] of this.usedNonces) {
+      if (now - timestamp > this.config.maxStateAge) {
+        this.usedNonces.delete(nonce)
+      }
     }
   }
 

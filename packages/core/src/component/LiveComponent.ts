@@ -6,6 +6,7 @@
 import { getLiveComponentContext } from './context'
 import type { LiveDebuggerInterface } from './context'
 import type { GenericWebSocket } from '../transport/types'
+import { queueWsMessage } from '../transport/WsSendBatcher'
 import type { LiveAuthContext, LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
 import { liveLog, liveWarn } from '../debug/LiveLogger'
@@ -363,7 +364,7 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
     )
   }
 
-  public async setValue<K extends keyof TState>(payload: { key: K; value: TState[K] }): Promise<{ success: true; key: K; value: TState[K] }> {
+  public setValue<K extends keyof TState>(payload: { key: K; value: TState[K] }): { success: true; key: K; value: TState[K] } {
     const { key, value } = payload
     const update = { [key]: value } as unknown as Partial<TState>
     this.setState(update)
@@ -486,8 +487,10 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
       room: this.room
     }
 
-    if (this.ws && this.ws.send) {
-      this.ws.send(JSON.stringify(message))
+    if (this.ws) {
+      // Queue to batcher — will be sent as part of a batched array on next microtask.
+      // STATE_DELTA messages for the same componentId are deduplicated automatically.
+      queueWsMessage(this.ws, message as any)
     }
   }
 
@@ -559,11 +562,11 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
     return this.emitRoomEvent(event, data, false)
   }
 
-  protected async subscribeToRoom(roomId: string) {
+  protected subscribeToRoom(roomId: string) {
     this.room = roomId
   }
 
-  protected async unsubscribeFromRoom() {
+  protected unsubscribeFromRoom() {
     this.room = undefined
   }
 
