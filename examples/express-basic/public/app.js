@@ -1,51 +1,36 @@
 // Express + @fluxstack/live — Client Application
 //
 // Uses the @fluxstack/live-client browser bundle (IIFE → window.FluxstackLive)
+// Simplified with useLive() — no manual connection management needed.
 
-const { LiveConnection, LiveComponentHandle } = FluxstackLive
+const { useLive, onConnectionChange } = FluxstackLive
 
 // ===== Logging =====
 
-function log(msg, type = 'info') {
-  const el = document.getElementById('log')
-  const d = document.createElement('div')
+function log(msg, type) {
+  type = type || 'info'
+  var el = document.getElementById('log')
+  var d = document.createElement('div')
   d.className = 'log-entry ' + type
   d.textContent = new Date().toLocaleTimeString() + ' ' + msg
   el.prepend(d)
   if (el.children.length > 80) el.removeChild(el.lastChild)
 }
 
-// ===== Connection =====
+// ===== Connection Status (automatic) =====
 
-const connection = new LiveConnection({
-  url: 'ws://' + location.host + '/api/live/ws',
-  debug: false,
-})
-
-connection.onStateChange(function (state) {
-  const statusEl = document.getElementById('status')
-  if (state.connected) {
-    statusEl.textContent = 'Connected'
-    statusEl.className = 'status connected'
-    log('Connected', 'success')
-  } else if (state.connecting) {
-    statusEl.textContent = 'Connecting...'
-    statusEl.className = 'status disconnected'
-  } else {
-    statusEl.textContent = 'Disconnected'
-    statusEl.className = 'status disconnected'
-    log('Disconnected', 'error')
-  }
+onConnectionChange(function (connected) {
+  var statusEl = document.getElementById('status')
+  statusEl.textContent = connected ? 'Connected' : 'Disconnected'
+  statusEl.className = 'status ' + (connected ? 'connected' : 'disconnected')
+  log(connected ? 'Connected' : 'Disconnected', connected ? 'success' : 'error')
 })
 
 // ===== Counter Component =====
 
-const counter = new LiveComponentHandle(connection, 'Counter', {
-  initialState: { count: 0, lastAction: null },
-  debug: false,
-})
+var counter = useLive('Counter', { count: 0, lastAction: null })
 
-counter.onStateChange(function (state) {
+counter.on(function (state) {
   if (state.count !== undefined) {
     document.getElementById('count').textContent = state.count
   }
@@ -63,12 +48,9 @@ function counterAction(action) {
 
 // ===== Shared Counter Component =====
 
-const shared = new LiveComponentHandle(connection, 'SharedCounter', {
-  initialState: { count: 0, lastUser: null, viewers: 0 },
-  debug: false,
-})
+var shared = useLive('SharedCounter', { count: 0, lastUser: null, viewers: 0 })
 
-shared.onStateChange(function (state) {
+shared.on(function (state) {
   if (state.count !== undefined) {
     document.getElementById('sharedCount').textContent = state.count
   }
@@ -98,13 +80,11 @@ var pendingRoom = ''
 function createChat(roomId) {
   pendingRoom = roomId
 
-  chat = new LiveComponentHandle(connection, 'ChatRoom', {
-    initialState: { messages: [], users: [], currentRoom: '', username: '' },
-    autoMount: true,
-    debug: false,
+  chat = useLive('ChatRoom', {
+    messages: [], users: [], currentRoom: '', username: '',
   })
 
-  chat.onStateChange(function (state, delta) {
+  chat.on(function (state, delta) {
     updateChatUI(delta || state)
   })
 

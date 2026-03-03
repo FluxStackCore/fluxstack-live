@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Fastify + @fluxstack/live</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: system-ui, sans-serif; background: #0f172a; color: #e2e8f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+    .card { background: #1e293b; border-radius: 16px; padding: 2rem; max-width: 400px; width: 100%; box-shadow: 0 4px 24px rgba(0,0,0,.3); }
+    h1 { font-size: 1.5rem; margin-bottom: .5rem; }
+    .subtitle { color: #94a3b8; margin-bottom: 1.5rem; font-size: .875rem; }
+    .count { font-size: 4rem; font-weight: 700; text-align: center; margin: 1.5rem 0; color: #38bdf8; }
+    .last-action { text-align: center; color: #94a3b8; font-size: .8rem; margin-bottom: 1.5rem; }
+    .buttons { display: flex; gap: .75rem; justify-content: center; }
+    button { padding: .6rem 1.5rem; border: none; border-radius: 8px; font-size: 1rem; cursor: pointer; font-weight: 600; transition: transform .1s; }
+    button:active { transform: scale(.95); }
+    .dec { background: #ef4444; color: #fff; }
+    .reset { background: #64748b; color: #fff; }
+    .inc { background: #22c55e; color: #fff; }
+    .status { margin-top: 1.5rem; padding: .75rem; border-radius: 8px; background: #0f172a; font-size: .8rem; color: #94a3b8; text-align: center; }
+    .status.connected { border: 1px solid #22c55e44; }
+    .status.disconnected { border: 1px solid #ef444444; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Live Counter</h1>
+    <p class="subtitle">Fastify + @fluxstack/live</p>
+
+    <div class="count" id="count">0</div>
+    <div class="last-action" id="lastAction">--</div>
+
+    <div class="buttons">
+      <button class="dec" onclick="call('decrement')">-</button>
+      <button class="reset" onclick="call('reset')">Reset</button>
+      <button class="inc" onclick="call('increment')">+</button>
+    </div>
+
+    <div class="status disconnected" id="status">Connecting...</div>
+  </div>
+
+  <script src="/live-client.js"></script>
+  <script>
+    const { useLive, onConnectionChange } = FluxstackLive
+    const statusEl = document.getElementById('status')
+
+    // Connection status (automatic — no manual setup needed)
+    onConnectionChange(function (connected) {
+      statusEl.textContent = connected ? 'Connected' : 'Disconnected'
+      statusEl.className = 'status ' + (connected ? 'connected' : 'disconnected')
+    })
+
+    // Counter component — one line to create, auto-connects
+    const counter = useLive('Counter', { count: 0, lastAction: null })
+
+    counter.on(function (state) {
+      document.getElementById('count').textContent = state.count
+      document.getElementById('lastAction').textContent = state.lastAction ? 'last: ' + state.lastAction : '--'
+    })
+
+    function call(action) {
+      counter.call(action)
+    }
+  </script>
+</body>
+</html>

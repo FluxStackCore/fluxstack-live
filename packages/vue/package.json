@@ -1,0 +1,43 @@
+{
+  "name": "@fluxstack/live-vue",
+  "version": "0.1.0",
+  "description": "Vue 3 bindings for @fluxstack/live-client",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fluxstack/live": "^0.1.0",
+    "@fluxstack/live-client": "^0.1.0"
+  },
+  "peerDependencies": {
+    "vue": ">=3.3.0"
+  },
+  "devDependencies": {
+    "vue": "^3.5.0",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FluxStackCore/fluxstack-live",
+    "directory": "packages/vue"
+  },
+  "license": "MIT"
+}
