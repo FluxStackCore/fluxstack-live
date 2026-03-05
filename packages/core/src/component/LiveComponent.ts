@@ -15,6 +15,9 @@ import type { LiveMessage, BroadcastMessage, ComponentState, ServerRoomHandle, S
 /** @internal Symbol key for singleton emit override */
 export const EMIT_OVERRIDE_KEY = Symbol.for('fluxstack:emitOverride')
 
+/** Per-class cache for forbidden property names in createDirectStateAccessors */
+const _forbiddenSetCache = new WeakMap<Function, Set<string>>()
+
 // ===== Debug Instrumentation (injectable to avoid client-side import) =====
 let _liveDebugger: LiveDebuggerInterface | null = null
 
@@ -82,6 +85,12 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
 
   // Cached room handles
   private roomHandles: Map<string, ServerRoomHandle> = new Map()
+  // Cached $room proxy (avoids re-creating on every access)
+  private _roomProxy: ServerRoomProxy | null = null
+  // Cached $rooms array (invalidated on join/leave)
+  private _roomsCache: string[] | null = null
+  // Cached TextEncoder bytes for binary delta frame (avoids re-encoding on every call)
+  private _idBytes: Uint8Array | null = null
 
   // Guard against infinite recursion in onStateChange
   private _inStateChange = false
@@ -114,13 +123,18 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
 
   // Create getters/setters for each state property directly on `this`
   private createDirectStateAccessors() {
-    const forbidden = new Set([
-      ...Object.keys(this),
-      ...Object.getOwnPropertyNames(Object.getPrototypeOf(this)),
-      'state', '_state', 'ws', 'id', 'room', 'userId', 'broadcastToRoom',
-      '$private', '_privateState',
-      '$room', '$rooms', 'roomType', 'roomHandles', 'joinedRooms', 'roomEventUnsubscribers'
-    ])
+    const ctor = this.constructor as Function
+    let forbidden = _forbiddenSetCache.get(ctor)
+    if (!forbidden) {
+      forbidden = new Set([
+        ...Object.keys(this),
+        ...Object.getOwnPropertyNames(Object.getPrototypeOf(this)),
+        'state', '_state', 'ws', 'id', 'room', 'userId', 'broadcastToRoom',
+        '$private', '_privateState',
+        '$room', '$rooms', 'roomType', 'roomHandles', 'joinedRooms', 'roomEventUnsubscribers'
+      ])
+      _forbiddenSetCache.set(ctor, forbidden)
+    }
 
     for (const key of Object.keys(this._state as object)) {
       if (!forbidden.has(key)) {
@@ -178,6 +192,8 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
   // ========================================
 
   public get $room(): ServerRoomProxy {
+    if (this._roomProxy) return this._roomProxy
+
     const self = this
     const ctx = getLiveComponentContext()
 
@@ -193,6 +209,7 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
         join: (initialState?: any) => {
           if (self.joinedRooms.has(roomId)) return
           self.joinedRooms.add(roomId)
+          self._roomsCache = null  // invalidate cache
           ctx.roomManager.joinRoom(self.id, roomId, self.ws, initialState)
           try { self.onRoomJoin(roomId) } catch (err: any) {
             console.error(`[${self.id}] onRoomJoin error:`, err?.message || err)
@@ -202,6 +219,7 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
         leave: () => {
           if (!self.joinedRooms.has(roomId)) return
           self.joinedRooms.delete(roomId)
+          self._roomsCache = null  // invalidate cache
           ctx.roomManager.leaveRoom(self.id, roomId)
           try { self.onRoomLeave(roomId) } catch (err: any) {
             console.error(`[${self.id}] onRoomLeave error:`, err?.message || err)
@@ -272,14 +290,18 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
       }
     })
 
+    this._roomProxy = proxyFn
     return proxyFn
   }
 
   /**
-   * List of room IDs this component is participating in
+   * List of room IDs this component is participating in.
+   * Cached — invalidated on join/leave.
    */
   public get $rooms(): string[] {
-    return Array.from(this.joinedRooms)
+    if (this._roomsCache) return this._roomsCache
+    this._roomsCache = Array.from(this.joinedRooms)
+    return this._roomsCache
   }
 
   // ========================================
@@ -364,6 +386,51 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
     )
   }
 
+  /**
+   * Send a binary-encoded state delta directly over WebSocket.
+   * Updates internal state (same as setState) then sends the encoder's output
+   * as a binary frame: [0x01][idLen:u8][id_bytes:utf8][payload_bytes].
+   * Bypasses the JSON batcher — ideal for high-frequency updates.
+   */
+  public sendBinaryDelta(
+    delta: Partial<TState>,
+    encoder: (delta: Partial<TState>) => Uint8Array
+  ): void {
+    // Update internal state (same diffing as setState)
+    const actualChanges: Partial<TState> = {} as Partial<TState>
+    let hasChanges = false
+    for (const key of Object.keys(delta as object) as Array<keyof TState>) {
+      if ((this._state as any)[key] !== (delta as any)[key]) {
+        (actualChanges as any)[key] = (delta as any)[key]
+        hasChanges = true
+      }
+    }
+
+    if (!hasChanges) return
+
+    Object.assign(this._state as object, actualChanges)
+
+    // Encode payload
+    const payload = encoder(actualChanges)
+
+    // Build binary frame: [0x01][idLen:u8][id_bytes][payload]
+    // Cache encoded id bytes (id never changes)
+    if (!this._idBytes) {
+      this._idBytes = new TextEncoder().encode(this.id)
+    }
+    const idBytes = this._idBytes
+    const frame = new Uint8Array(1 + 1 + idBytes.length + payload.length)
+    frame[0] = 0x01  // BINARY_STATE_DELTA
+    frame[1] = idBytes.length
+    frame.set(idBytes, 2)
+    frame.set(payload, 2 + idBytes.length)
+
+    // Send directly (bypass batcher — binary doesn't need JSON batching)
+    if (this.ws && this.ws.readyState === 1) {
+      this.ws.send(frame)
+    }
+  }
+
   public setValue<K extends keyof TState>(payload: { key: K; value: TState[K] }): { success: true; key: K; value: TState[K] } {
     const { key, value } = payload
     const update = { [key]: value } as unknown as Partial<TState>
@@ -383,7 +450,7 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
     'onStateChange', 'onRoomJoin', 'onRoomLeave',
     'onRehydrate', 'onAction',
     'onClientJoin', 'onClientLeave',
-    'setState', 'emit', 'broadcast', 'broadcastToRoom',
+    'setState', 'sendBinaryDelta', 'emit', 'broadcast', 'broadcastToRoom',
     'createStateProxy', 'createDirectStateAccessors', 'generateId',
     'setAuthContext', '$auth',
     '$private', '_privateState',
@@ -596,6 +663,9 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
     }
     this.joinedRooms.clear()
     this.roomHandles.clear()
+    this._roomProxy = null
+    this._roomsCache = null
+    this._idBytes = null
     this._privateState = {} as TPrivate
 
     this.unsubscribeFromRoom()

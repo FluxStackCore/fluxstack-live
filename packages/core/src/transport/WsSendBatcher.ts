@@ -5,6 +5,8 @@
 // sends a single JSON array per connection at the end of the synchronous tick.
 //
 // STATE_DELTA messages for the same componentId are deduplicated (merged).
+//
+// Pre-serialized messages (from room broadcasts) bypass JSON.stringify entirely.
 
 import type { GenericWebSocket } from './types'
 
@@ -18,13 +20,28 @@ interface PendingMessage {
   [key: string]: any
 }
 
+// A queued item is either an object (needs serialization) or a pre-serialized string
+type QueueItem = PendingMessage | string
+
 // Global per-WS message queues
-const wsQueues = new WeakMap<GenericWebSocket, PendingMessage[]>()
+const wsQueues = new WeakMap<GenericWebSocket, QueueItem[]>()
 // Track which WS connections have a flush scheduled
 const scheduledFlushes = new WeakSet<GenericWebSocket>()
 // Set of WS connections that need flushing (use array since WeakSet isn't iterable)
 let pendingWs: GenericWebSocket[] = []
 let globalFlushScheduled = false
+
+function scheduleWs(ws: GenericWebSocket): void {
+  if (!scheduledFlushes.has(ws)) {
+    scheduledFlushes.add(ws)
+    pendingWs.push(ws)
+
+    if (!globalFlushScheduled) {
+      globalFlushScheduled = true
+      queueMicrotask(flushAll)
+    }
+  }
+}
 
 /**
  * Queue a message to be sent on the next microtask flush.
@@ -40,17 +57,25 @@ export function queueWsMessage(ws: GenericWebSocket, message: PendingMessage): v
   }
 
   queue.push(message)
+  scheduleWs(ws)
+}
 
-  if (!scheduledFlushes.has(ws)) {
-    scheduledFlushes.delete(ws) // no-op, just for clarity
-    scheduledFlushes.add(ws)
-    pendingWs.push(ws)
+/**
+ * Queue a pre-serialized JSON string to be sent on the next microtask flush.
+ * Bypasses JSON.stringify entirely — used for room broadcasts where the same
+ * message is sent to many connections.
+ */
+export function queuePreSerialized(ws: GenericWebSocket, serialized: string): void {
+  if (!ws || ws.readyState !== 1) return
 
-    if (!globalFlushScheduled) {
-      globalFlushScheduled = true
-      queueMicrotask(flushAll)
-    }
+  let queue = wsQueues.get(ws)
+  if (!queue) {
+    queue = []
+    wsQueues.set(ws, queue)
   }
+
+  queue.push(serialized)
+  scheduleWs(ws)
 }
 
 /**
@@ -71,12 +96,51 @@ function flushAll(): void {
 
     try {
       if (queue.length === 1) {
-        // Single message — send as plain object (no array wrapper) for backward compat
-        ws.send(JSON.stringify(queue[0]))
+        const item = queue[0]
+        if (typeof item === 'string') {
+          // Pre-serialized — send directly
+          ws.send(item)
+        } else {
+          // Single object message — serialize and send
+          ws.send(JSON.stringify(item))
+        }
       } else {
-        // Multiple messages — deduplicate STATE_DELTA, then send as array
-        const deduped = deduplicateDeltas(queue)
-        ws.send(JSON.stringify(deduped))
+        // Multiple items — need to build array
+        // Separate pre-serialized strings from objects that need dedup
+        const objects: PendingMessage[] = []
+        const preSerialized: string[] = []
+
+        for (const item of queue) {
+          if (typeof item === 'string') {
+            preSerialized.push(item)
+          } else {
+            objects.push(item)
+          }
+        }
+
+        // Send pre-serialized messages: if only pre-serialized, wrap in array
+        // If mixed, we need to combine them
+        if (objects.length === 0) {
+          // All pre-serialized — build array manually without re-parsing
+          ws.send('[' + preSerialized.join(',') + ']')
+        } else if (preSerialized.length === 0) {
+          // All objects — deduplicate and serialize
+          const deduped = deduplicateDeltas(objects)
+          ws.send(JSON.stringify(deduped))
+        } else {
+          // Mixed — serialize objects, build final string directly (no intermediate arrays)
+          const deduped = deduplicateDeltas(objects)
+          let result = '['
+          for (let i = 0; i < deduped.length; i++) {
+            if (i > 0) result += ','
+            result += JSON.stringify(deduped[i])
+          }
+          for (const ps of preSerialized) {
+            result += ',' + ps
+          }
+          result += ']'
+          ws.send(result)
+        }
       }
     } catch {
       // Connection may have closed between queue and flush

@@ -12,6 +12,8 @@ interface RoomSubscription {
 
 export function createTypedRoomEventBus<TRoomEvents extends Record<string, Record<string, any>>>() {
   const subscriptions = new Map<string, Set<RoomSubscription>>()
+  /** Reverse index: componentId -> Set of subscription keys for O(1) unsubscribeAll */
+  const componentIndex = new Map<string, Set<string>>()
 
   const getKey = (roomType: string, roomId: string, event: string) =>
     `${roomType}:${roomId}:${event}`
@@ -42,6 +44,12 @@ export function createTypedRoomEventBus<TRoomEvents extends Record<string, Recor
       }
 
       subscriptions.get(key)!.add(subscription)
+
+      // Update reverse index
+      if (!componentIndex.has(componentId)) {
+        componentIndex.set(componentId, new Set())
+      }
+      componentIndex.get(componentId)!.add(key)
 
       return () => {
         subscriptions.get(key)?.delete(subscription)
@@ -79,20 +87,28 @@ export function createTypedRoomEventBus<TRoomEvents extends Record<string, Recor
     },
 
     unsubscribeAll(componentId: string): number {
+      const keys = componentIndex.get(componentId)
+      if (!keys) return 0
+
       let removed = 0
 
-      for (const [key, subs] of subscriptions) {
+      for (const key of keys) {
+        const subs = subscriptions.get(key)
+        if (!subs) continue
+
         for (const sub of subs) {
           if (sub.componentId === componentId) {
             subs.delete(sub)
             removed++
           }
         }
+
         if (subs.size === 0) {
           subscriptions.delete(key)
         }
       }
 
+      componentIndex.delete(componentId)
       return removed
     },
 
@@ -102,7 +118,14 @@ export function createTypedRoomEventBus<TRoomEvents extends Record<string, Recor
 
       for (const key of subscriptions.keys()) {
         if (key.startsWith(prefix)) {
-          removed += subscriptions.get(key)?.size ?? 0
+          const subs = subscriptions.get(key)
+          if (subs) {
+            // Clean reverse index for all affected components
+            for (const sub of subs) {
+              componentIndex.get(sub.componentId)?.delete(key)
+            }
+            removed += subs.size
+          }
           subscriptions.delete(key)
         }
       }
@@ -134,6 +157,8 @@ export function createTypedRoomEventBus<TRoomEvents extends Record<string, Recor
 
 export class RoomEventBus {
   private subscriptions = new Map<string, Set<RoomSubscription>>()
+  /** Reverse index: componentId -> Set of subscription keys for O(1) unsubscribeAll */
+  private componentIndex = new Map<string, Set<string>>()
 
   private getKey(roomType: string, roomId: string, event: string): string {
     return `${roomType}:${roomId}:${event}`
@@ -149,11 +174,18 @@ export class RoomEventBus {
     const subscription: RoomSubscription = { roomType, roomId, event, handler, componentId }
     this.subscriptions.get(key)!.add(subscription)
 
+    // Update reverse index
+    if (!this.componentIndex.has(componentId)) {
+      this.componentIndex.set(componentId, new Set())
+    }
+    this.componentIndex.get(componentId)!.add(key)
+
     return () => {
       this.subscriptions.get(key)?.delete(subscription)
       if (this.subscriptions.get(key)?.size === 0) {
         this.subscriptions.delete(key)
       }
+      // Cleanup reverse index (lazy: remove key entry only in unsubscribeAll)
     }
   }
 
@@ -179,20 +211,28 @@ export class RoomEventBus {
   }
 
   unsubscribeAll(componentId: string): number {
+    const keys = this.componentIndex.get(componentId)
+    if (!keys) return 0
+
     let removed = 0
 
-    for (const [key, subs] of this.subscriptions) {
+    for (const key of keys) {
+      const subs = this.subscriptions.get(key)
+      if (!subs) continue
+
       for (const sub of subs) {
         if (sub.componentId === componentId) {
           subs.delete(sub)
           removed++
         }
       }
+
       if (subs.size === 0) {
         this.subscriptions.delete(key)
       }
     }
 
+    this.componentIndex.delete(componentId)
     return removed
   }
 
@@ -202,7 +242,14 @@ export class RoomEventBus {
 
     for (const key of this.subscriptions.keys()) {
       if (key.startsWith(prefix)) {
-        removed += this.subscriptions.get(key)?.size ?? 0
+        const subs = this.subscriptions.get(key)
+        if (subs) {
+          // Clean reverse index for all affected components
+          for (const sub of subs) {
+            this.componentIndex.get(sub.componentId)?.delete(key)
+          }
+          removed += subs.size
+        }
         this.subscriptions.delete(key)
       }
     }

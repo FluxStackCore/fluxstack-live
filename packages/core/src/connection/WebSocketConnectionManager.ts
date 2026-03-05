@@ -54,6 +54,8 @@ export class WebSocketConnectionManager extends EventEmitter {
   private connections = new Map<string, GenericWebSocket>()
   private connectionMetrics = new Map<string, ConnectionMetrics>()
   private connectionPools = new Map<string, Set<string>>()
+  /** Reverse index: connectionId -> Set of poolIds for O(1) cleanup */
+  private connectionPoolIndex = new Map<string, Set<string>>()
   private messageQueues = new Map<string, QueuedMessage[]>()
   private healthCheckTimer?: ReturnType<typeof setInterval>
   private heartbeatTimer?: ReturnType<typeof setInterval>
@@ -116,6 +118,12 @@ export class WebSocketConnectionManager extends EventEmitter {
       this.connectionPools.set(poolId, new Set())
     }
     this.connectionPools.get(poolId)!.add(connectionId)
+
+    // Update reverse index
+    if (!this.connectionPoolIndex.has(connectionId)) {
+      this.connectionPoolIndex.set(connectionId, new Set())
+    }
+    this.connectionPoolIndex.get(connectionId)!.add(poolId)
   }
 
   removeFromPool(connectionId: string, poolId: string): void {
@@ -124,6 +132,8 @@ export class WebSocketConnectionManager extends EventEmitter {
       pool.delete(connectionId)
       if (pool.size === 0) this.connectionPools.delete(poolId)
     }
+    // Update reverse index
+    this.connectionPoolIndex.get(connectionId)?.delete(poolId)
   }
 
   cleanupConnection(connectionId: string): void {
@@ -131,10 +141,17 @@ export class WebSocketConnectionManager extends EventEmitter {
     this.connectionMetrics.delete(connectionId)
     this.messageQueues.delete(connectionId)
 
-    for (const [poolId, pool] of this.connectionPools) {
-      if (pool.has(connectionId)) {
-        this.removeFromPool(connectionId, poolId)
+    // Use reverse index for O(1) pool cleanup instead of scanning all pools
+    const poolIds = this.connectionPoolIndex.get(connectionId)
+    if (poolIds) {
+      for (const poolId of poolIds) {
+        const pool = this.connectionPools.get(poolId)
+        if (pool) {
+          pool.delete(connectionId)
+          if (pool.size === 0) this.connectionPools.delete(poolId)
+        }
       }
+      this.connectionPoolIndex.delete(connectionId)
     }
   }
 
@@ -224,6 +241,7 @@ export class WebSocketConnectionManager extends EventEmitter {
     this.connections.clear()
     this.connectionMetrics.clear()
     this.connectionPools.clear()
+    this.connectionPoolIndex.clear()
     this.messageQueues.clear()
   }
 }

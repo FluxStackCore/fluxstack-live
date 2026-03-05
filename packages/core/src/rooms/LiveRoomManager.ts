@@ -4,9 +4,9 @@
 
 import type { RoomEventBus } from './RoomEventBus'
 import type { GenericWebSocket } from '../transport/types'
-import { queueWsMessage } from '../transport/WsSendBatcher'
+import { queueWsMessage, queuePreSerialized } from '../transport/WsSendBatcher'
 import { liveLog } from '../debug/LiveLogger'
-import { MAX_ROOM_STATE_SIZE } from '../protocol/constants'
+import { MAX_ROOM_STATE_SIZE, ROOM_NAME_REGEX } from '../protocol/constants'
 
 export interface RoomMessage {
   type: 'ROOM_JOIN' | 'ROOM_LEAVE' | 'ROOM_EMIT' | 'ROOM_STATE_SET' | 'ROOM_STATE_GET'
@@ -30,6 +30,8 @@ interface Room<TState = any> {
   members: Map<string, RoomMember>
   createdAt: number
   lastActivity: number
+  /** Estimated serialized state size in bytes (for size limit checks) */
+  stateSize?: number
 }
 
 export class LiveRoomManager {
@@ -42,40 +44,45 @@ export class LiveRoomManager {
    * Component joins a room
    */
   joinRoom<TState = any>(componentId: string, roomId: string, ws: GenericWebSocket, initialState?: TState): { state: TState } {
-    // Validate room name format
-    if (!roomId || !/^[a-zA-Z0-9_:.-]{1,64}$/.test(roomId)) {
+    // Validate room name format (uses pre-compiled regex from constants)
+    if (!roomId || !ROOM_NAME_REGEX.test(roomId)) {
       throw new Error('Invalid room name. Must be 1-64 alphanumeric characters, hyphens, underscores, dots, or colons.')
     }
 
+    const now = Date.now()
+
     // Create room if it doesn't exist
-    if (!this.rooms.has(roomId)) {
-      this.rooms.set(roomId, {
+    let room = this.rooms.get(roomId)
+    if (!room) {
+      room = {
         id: roomId,
-        state: initialState || {},
+        state: (initialState || {}) as TState,
         members: new Map(),
-        createdAt: Date.now(),
-        lastActivity: Date.now()
-      })
+        createdAt: now,
+        lastActivity: now
+      }
+      this.rooms.set(roomId, room)
       liveLog('rooms', componentId, `Room '${roomId}' created`)
     }
-
-    const room = this.rooms.get(roomId)!
 
     // Add member
     room.members.set(componentId, {
       componentId,
       ws,
-      joinedAt: Date.now()
+      joinedAt: now
     })
-    room.lastActivity = Date.now()
+    room.lastActivity = now
 
     // Track component rooms
-    if (!this.componentRooms.has(componentId)) {
-      this.componentRooms.set(componentId, new Set())
+    let compRooms = this.componentRooms.get(componentId)
+    if (!compRooms) {
+      compRooms = new Set()
+      this.componentRooms.set(componentId, compRooms)
     }
-    this.componentRooms.get(componentId)!.add(roomId)
+    compRooms.add(roomId)
 
-    liveLog('rooms', componentId, `Component '${componentId}' joined room '${roomId}' (${room.members.size} members)`)
+    const memberCount = room.members.size
+    liveLog('rooms', componentId, `Component '${componentId}' joined room '${roomId}' (${memberCount} members)`)
 
     // Notify other members
     this.broadcastToRoom(roomId, {
@@ -85,9 +92,9 @@ export class LiveRoomManager {
       event: '$sub:join',
       data: {
         subscriberId: componentId,
-        count: room.members.size
+        count: memberCount
       },
-      timestamp: Date.now()
+      timestamp: now
     }, componentId)
 
     return { state: room.state }
@@ -101,11 +108,14 @@ export class LiveRoomManager {
     if (!room) return
 
     room.members.delete(componentId)
-    room.lastActivity = Date.now()
+
+    const now = Date.now()
+    room.lastActivity = now
 
     this.componentRooms.get(componentId)?.delete(roomId)
 
-    liveLog('rooms', componentId, `Component '${componentId}' left room '${roomId}' (${room.members.size} members)`)
+    const memberCount = room.members.size
+    liveLog('rooms', componentId, `Component '${componentId}' left room '${roomId}' (${memberCount} members)`)
 
     // Notify other members
     this.broadcastToRoom(roomId, {
@@ -115,13 +125,13 @@ export class LiveRoomManager {
       event: '$sub:leave',
       data: {
         subscriberId: componentId,
-        count: room.members.size
+        count: memberCount
       },
-      timestamp: Date.now()
+      timestamp: now
     })
 
     // Cleanup empty room after delay
-    if (room.members.size === 0) {
+    if (memberCount === 0) {
       setTimeout(() => {
         const currentRoom = this.rooms.get(roomId)
         if (currentRoom && currentRoom.members.size === 0) {
@@ -133,14 +143,53 @@ export class LiveRoomManager {
   }
 
   /**
-   * Component disconnects - leave all rooms
+   * Component disconnects - leave all rooms.
+   * Batches removals: removes member from all rooms first,
+   * then sends leave notifications in bulk.
    */
   cleanupComponent(componentId: string): void {
-    const rooms = this.componentRooms.get(componentId)
-    if (!rooms) return
+    const roomIds = this.componentRooms.get(componentId)
+    if (!roomIds || roomIds.size === 0) return
 
-    for (const roomId of rooms) {
-      this.leaveRoom(componentId, roomId)
+    const now = Date.now()
+    const notifications: { roomId: string; count: number }[] = []
+
+    // Phase 1: Remove member from all rooms (no broadcasts yet)
+    for (const roomId of roomIds) {
+      const room = this.rooms.get(roomId)
+      if (!room) continue
+
+      room.members.delete(componentId)
+      room.lastActivity = now
+      const memberCount = room.members.size
+
+      // Collect notification data
+      if (memberCount > 0) {
+        notifications.push({ roomId, count: memberCount })
+      } else {
+        // Schedule empty room cleanup
+        setTimeout(() => {
+          const currentRoom = this.rooms.get(roomId)
+          if (currentRoom && currentRoom.members.size === 0) {
+            this.rooms.delete(roomId)
+          }
+        }, 5 * 60 * 1000)
+      }
+    }
+
+    // Phase 2: Send leave notifications in batch
+    for (const { roomId, count } of notifications) {
+      this.broadcastToRoom(roomId, {
+        type: 'ROOM_SYSTEM',
+        componentId,
+        roomId,
+        event: '$sub:leave',
+        data: {
+          subscriberId: componentId,
+          count
+        },
+        timestamp: now
+      })
     }
 
     this.componentRooms.delete(componentId)
@@ -153,7 +202,8 @@ export class LiveRoomManager {
     const room = this.rooms.get(roomId)
     if (!room) return 0
 
-    room.lastActivity = Date.now()
+    const now = Date.now()
+    room.lastActivity = now
 
     // 1. Emit on RoomEventBus for server-side handlers
     this.roomEvents.emit('room', roomId, event, data, excludeComponentId)
@@ -165,28 +215,43 @@ export class LiveRoomManager {
       roomId,
       event,
       data,
-      timestamp: Date.now()
+      timestamp: now
     }, excludeComponentId)
   }
 
   /**
-   * Update room state
+   * Update room state.
+   * Mutates state in-place with Object.assign to avoid full-object spread.
    */
   setRoomState(roomId: string, updates: any, excludeComponentId?: string): void {
     const room = this.rooms.get(roomId)
     if (!room) return
 
-    const newState = { ...room.state, ...updates }
+    // Mutate in-place instead of spread (avoids creating a new object)
+    Object.assign(room.state as object, updates)
 
-    // Validate state size — serialize once and reuse for size check
-    const stateJson = JSON.stringify(newState)
-    const stateSize = Buffer.byteLength(stateJson, 'utf8')
-    if (stateSize > MAX_ROOM_STATE_SIZE) {
-      throw new Error('Room state exceeds maximum size limit')
+    // Size check: estimate via update delta instead of full state re-serialization.
+    if (room.stateSize === undefined) {
+      const fullJson = JSON.stringify(room.state)
+      room.stateSize = fullJson.length
+      if (room.stateSize > MAX_ROOM_STATE_SIZE) {
+        throw new Error('Room state exceeds maximum size limit')
+      }
+    } else {
+      const deltaSize = JSON.stringify(updates).length
+      room.stateSize += deltaSize
+      if (room.stateSize > MAX_ROOM_STATE_SIZE) {
+        // Re-check precisely if we're near the limit
+        const precise = JSON.stringify(room.state).length
+        room.stateSize = precise
+        if (precise > MAX_ROOM_STATE_SIZE) {
+          throw new Error('Room state exceeds maximum size limit')
+        }
+      }
     }
 
-    room.state = newState
-    room.lastActivity = Date.now()
+    const now = Date.now()
+    room.lastActivity = now
 
     this.broadcastToRoom(roomId, {
       type: 'ROOM_STATE',
@@ -194,7 +259,7 @@ export class LiveRoomManager {
       roomId,
       event: '$state:update',
       data: { state: updates },
-      timestamp: Date.now()
+      timestamp: now
     }, excludeComponentId)
   }
 
@@ -206,24 +271,33 @@ export class LiveRoomManager {
   }
 
   /**
-   * Broadcast to all members in a room
+   * Broadcast to all members in a room.
+   * Serializes the message ONCE and sends the same string to all members.
    */
   private broadcastToRoom(roomId: string, message: any, excludeComponentId?: string): number {
     const room = this.rooms.get(roomId)
-    if (!room) return 0
+    if (!room || room.members.size === 0) return 0
+
+    // Pre-serialize once for all members
+    const serialized = JSON.stringify(message)
 
     let sent = 0
-    for (const [componentId, member] of room.members) {
-      if (excludeComponentId && componentId === excludeComponentId) continue
 
-      try {
-        if (member.ws && member.ws.readyState === 1) {
-          // Queue to batcher — per-client componentId injected as message field
-          queueWsMessage(member.ws, { ...message, componentId })
+    if (excludeComponentId) {
+      for (const [componentId, member] of room.members) {
+        if (componentId === excludeComponentId) continue
+        if (member.ws.readyState === 1) {
+          queuePreSerialized(member.ws, serialized)
           sent++
         }
-      } catch (error) {
-        console.error(`Failed to send to ${componentId}:`, error)
+      }
+    } else {
+      // Fast path: no exclusion, iterate values only
+      for (const member of room.members.values()) {
+        if (member.ws.readyState === 1) {
+          queuePreSerialized(member.ws, serialized)
+          sent++
+        }
       }
     }
 
