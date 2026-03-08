@@ -20,9 +20,12 @@ import { setLiveComponentContext } from '../component/context'
 import { RateLimiterRegistry } from '../connection/RateLimiter'
 import { liveLog, _setLoggerDebugger } from '../debug/LiveLogger'
 import { decodeBinaryChunk } from '../protocol/binary'
-import { DEFAULT_WS_PATH } from '../protocol/constants'
+import { DEFAULT_WS_PATH, MAX_MESSAGE_SIZE, MAX_ROOMS_PER_CONNECTION } from '../protocol/constants'
 import { sendImmediate } from '../transport/WsSendBatcher'
+import { sanitizePayload } from '../security/sanitize'
 import type { LiveAuthProvider } from '../auth/types'
+import type { IRoomPubSubAdapter } from '../rooms/adapters'
+import type { IClusterAdapter } from '../cluster/types'
 
 export interface LiveServerOptions {
   /** Transport adapter (Elysia, Express, etc.) */
@@ -47,6 +50,19 @@ export interface LiveServerOptions {
   componentsPath?: string
   /** HTTP monitoring routes prefix. Set to false to disable. Defaults to '/api/live' */
   httpPrefix?: string | false
+  /** Allowed origins for WebSocket connections (CSRF protection).
+   *  When set, connections from unlisted origins are rejected.
+   *  Example: ['https://myapp.com', 'http://localhost:3000'] */
+  allowedOrigins?: string[]
+  /** Optional cross-instance pub/sub adapter for horizontal scaling (e.g. Redis).
+   *  When provided, room events, state changes, and membership are propagated
+   *  across server instances. Without this, rooms are local to the current instance. */
+  roomPubSub?: IRoomPubSubAdapter
+  /** Optional cluster adapter for cross-instance component synchronization.
+   *  When provided, singleton components are coordinated across instances,
+   *  component state is mirrored to a shared store (Redis), and actions on
+   *  remote singletons are forwarded to the owner instance. */
+  cluster?: IClusterAdapter
 }
 
 export class LiveServer {
@@ -71,7 +87,7 @@ export class LiveServer {
 
     // Create all singletons
     this.roomEvents = new RoomEventBus()
-    this.roomManager = new LiveRoomManager(this.roomEvents)
+    this.roomManager = new LiveRoomManager(this.roomEvents, options.roomPubSub)
     this.debugger = new LiveDebugger(options.debug ?? false)
     this.authManager = new LiveAuthManager()
     this.stateSignature = new StateSignatureManager(options.stateSignature)
@@ -85,6 +101,7 @@ export class LiveServer {
       debugger: this.debugger,
       stateSignature: this.stateSignature,
       performanceMonitor: this.performanceMonitor,
+      cluster: options.cluster,
     })
 
     // Wire logger -> debugger
@@ -131,12 +148,17 @@ export class LiveServer {
       await this.transport.registerHttpRoutes(this.buildHttpRoutes(prefix))
     }
 
+    // Cluster adapter startup
+    if (this.options.cluster) {
+      await this.options.cluster.start()
+    }
+
     // Transport startup hook
     if (this.transport.start) {
       await this.transport.start()
     }
 
-    liveLog('lifecycle', null, `LiveServer started (ws: ${wsConfig.path})`)
+    liveLog('lifecycle', null, `LiveServer started (ws: ${wsConfig.path}${this.options.cluster ? ', cluster: enabled' : ''})`)
   }
 
   /**
@@ -147,6 +169,7 @@ export class LiveServer {
     this.connectionManager.shutdown()
     this.fileUploadManager.shutdown()
     this.stateSignature.shutdown()
+    if (this.options.cluster) await this.options.cluster.shutdown()
     if (this.transport.shutdown) await this.transport.shutdown()
     liveLog('lifecycle', null, 'LiveServer shut down')
   }
@@ -154,6 +177,19 @@ export class LiveServer {
   // ===== WebSocket Handlers =====
 
   private handleOpen(ws: GenericWebSocket): void {
+    // Read origin before overwriting ws.data (adapter may have pre-set it)
+    const origin = ws.data?.origin
+
+    // Origin validation (CSRF protection)
+    const allowedOrigins = this.options.allowedOrigins
+    if (allowedOrigins && allowedOrigins.length > 0) {
+      if (!origin || !allowedOrigins.includes(origin)) {
+        liveLog('websocket', null, `Connection rejected: origin '${origin || 'none'}' not in allowedOrigins`)
+        ws.close(4003, 'Origin not allowed')
+        return
+      }
+    }
+
     const connectionId = `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
     ws.data = {
@@ -161,6 +197,7 @@ export class LiveServer {
       components: new Map(),
       subscriptions: new Set(),
       connectedAt: new Date(),
+      origin,
     }
 
     this.connectionManager.registerConnection(ws, connectionId)
@@ -201,14 +238,24 @@ export class LiveServer {
       return
     }
 
-    // JSON protocol
+    // JSON protocol — check size before parsing
+    const str = typeof rawMessage === 'string' ? rawMessage : new TextDecoder().decode(rawMessage as ArrayBuffer)
+    if (str.length > MAX_MESSAGE_SIZE) {
+      sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Message too large', timestamp: Date.now() }))
+      return
+    }
+
     let message: LiveMessage
     try {
-      const str = typeof rawMessage === 'string' ? rawMessage : new TextDecoder().decode(rawMessage as ArrayBuffer)
       message = JSON.parse(str)
     } catch {
       sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Invalid JSON', timestamp: Date.now() }))
       return
+    }
+
+    // Strip prototype pollution keys from payload
+    if (message.payload) {
+      message.payload = sanitizePayload(message.payload)
     }
 
     try {
@@ -334,7 +381,25 @@ export class LiveServer {
 
     switch (message.type) {
       case 'ROOM_JOIN': {
+        // Per-connection room limit
+        const connRooms = ws.data?.rooms as Set<string> | undefined
+        if (connRooms && connRooms.size >= MAX_ROOMS_PER_CONNECTION) {
+          sendImmediate(ws, JSON.stringify({
+            type: 'ERROR',
+            componentId,
+            error: 'Room limit exceeded',
+            requestId: message.requestId,
+            timestamp: Date.now()
+          }))
+          break
+        }
+
         const result = this.roomManager.joinRoom(componentId, roomId, ws, message.payload?.initialState)
+
+        // Track rooms per connection
+        if (!ws.data!.rooms) ws.data!.rooms = new Set<string>()
+        ;(ws.data!.rooms as Set<string>).add(roomId)
+
         sendImmediate(ws, JSON.stringify({
           type: 'ROOM_JOINED',
           componentId,
@@ -346,6 +411,7 @@ export class LiveServer {
       }
       case 'ROOM_LEAVE':
         this.roomManager.leaveRoom(componentId, roomId)
+        ;(ws.data?.rooms as Set<string> | undefined)?.delete(roomId)
         sendImmediate(ws, JSON.stringify({
           type: 'ROOM_LEFT',
           componentId,

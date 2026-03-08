@@ -1,0 +1,135 @@
+# @fluxstack/live
+
+> Real-time server-client state synchronization framework for TypeScript.
+> Server components with reactive state, actions, rooms, auth, file uploads, and binary deltas.
+
+## What is FluxStack Live?
+
+FluxStack Live lets you write **server-side components** that automatically synchronize state to connected browser clients over WebSocket. Think Phoenix LiveView for the TypeScript/Node.js ecosystem, but framework-agnostic on both server (Elysia, Express, Fastify) and client (React, vanilla JS, Vue).
+
+## Packages
+
+| Package | npm | Purpose |
+|---|---|---|
+| `@fluxstack/live` | Core | Server framework: LiveComponent, LiveServer, rooms, auth, security |
+| `@fluxstack/live-elysia` | Adapter | Elysia.js transport adapter |
+| `@fluxstack/live-express` | Adapter | Express + ws transport adapter |
+| `@fluxstack/live-fastify` | Adapter | Fastify + @fastify/websocket transport adapter |
+| `@fluxstack/live-client` | Client | Framework-agnostic browser WebSocket client |
+| `@fluxstack/live-react` | React | React hooks and provider (`Live.use()`, `useLiveComponent()`) |
+| `@fluxstack/live-redis` | Adapter | Redis pub/sub adapter for horizontal scaling |
+
+## Quick Start (Elysia + React)
+
+### Server (server/live/Counter.ts)
+
+```typescript
+import { LiveComponent } from '@fluxstack/live'
+
+export class Counter extends LiveComponent<{ count: number }> {
+  static componentName = 'Counter'
+  static defaultState = { count: 0 }
+  static publicActions = ['increment', 'decrement'] as const
+
+  async increment() {
+    this.setState({ count: this.state.count + 1 })
+  }
+
+  async decrement() {
+    this.setState({ count: this.state.count - 1 })
+  }
+}
+```
+
+### Server Setup (server/index.ts)
+
+```typescript
+import { Elysia } from 'elysia'
+import { LiveServer } from '@fluxstack/live'
+import ElysiaTransport from '@fluxstack/live-elysia'
+
+const app = new Elysia()
+const server = new LiveServer({
+  transport: new ElysiaTransport(app),
+  componentsPath: './server/live',
+})
+await server.start()
+app.listen(3000)
+```
+
+### Client (React)
+
+```tsx
+import { LiveComponentsProvider, Live } from '@fluxstack/live-react'
+import type { Counter } from '@server/live/Counter'
+
+function App() {
+  return (
+    <LiveComponentsProvider>
+      <CounterView />
+    </LiveComponentsProvider>
+  )
+}
+
+function CounterView() {
+  const counter = Live.use<typeof Counter>(Counter)
+
+  return (
+    <div>
+      <p>Count: {counter.count}</p>
+      <button onClick={() => counter.$call('increment')}>+</button>
+      <button onClick={() => counter.$call('decrement')}>-</button>
+    </div>
+  )
+}
+```
+
+### Client (Vanilla JS)
+
+```typescript
+import { useLive } from '@fluxstack/live-client'
+
+const counter = useLive('Counter', { count: 0 })
+counter.on(state => {
+  document.getElementById('count')!.textContent = String(state.count)
+})
+document.querySelector('.inc')!.onclick = () => counter.call('increment')
+```
+
+## Key Concepts
+
+### LiveComponent
+
+Server-side component base class. Subclass it to define state, actions, and lifecycle hooks.
+
+- **State**: Reactive `this.state` with proxy-based change detection. Use `this.setState(updates)` to push changes to all connected clients.
+- **Actions**: Public methods listed in `static publicActions`. Called from clients via `$call('actionName', payload)`.
+- **Lifecycle hooks**: `onMount()`, `onConnect()`, `onDisconnect()`, `onDestroy()`, `onStateChange()`, `onAction()`, `onRehydrate()`.
+- **Private state**: `this.$private` — server-only state never sent to clients.
+- **Rooms**: `this.$room.join()`, `this.$room.emit('event', data)`, `this.$room.on('event', handler)`.
+- **Auth**: `this.$auth.hasRole('admin')`, with component-level and action-level authorization.
+- **Binary deltas**: `this.sendBinaryDelta(delta, encoder)` for high-frequency state updates (games, real-time viz).
+
+### Rooms
+
+Multi-user pub/sub channels with shared state:
+- Server: `this.$room.join()`, `this.$room.emit()`, `this.$room.on()`, `this.$room.setState()`
+- Client: `proxy.$room.join()`, `proxy.$room.emit()`, `proxy.$room.on()`
+- Cross-instance: Use `@fluxstack/live-redis` for horizontal scaling.
+
+### Auth System
+
+Pluggable auth providers. Supports JWT, API keys, or custom auth:
+- Component-level: `static auth = { required: true, roles: ['admin'] }`
+- Action-level: `static actionAuth = { deleteItem: { roles: ['admin'] } }`
+- Custom provider: Implement `LiveAuthProvider` interface.
+
+### Security
+
+- HMAC-SHA256 state signing with nonce-based replay protection
+- Payload sanitization against prototype pollution
+- Token-bucket rate limiting per connection
+- Message size limits, room count limits
+- Origin validation (CSRF protection)
+
+## For complete API reference, see llms-full.txt

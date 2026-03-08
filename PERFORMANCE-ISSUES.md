@@ -98,6 +98,13 @@ Com N clientes na mesma sala, cada action causa N-1 broadcasts. Se todos os N cl
 
 - `LiveRoomManager.setRoomState()` — resultado do `JSON.stringify(newState)` armazenado em variavel para reuso
 
+### ✅ 4. Fire-and-forget actions ($fire) (APLICADO)
+
+- `LiveComponentHandle.fire()` em `packages/client/src/component.ts` — envia CALL_ACTION com `expectResponse: false`, sem criar pendingRequest/Promise/timeout
+- `useLiveComponent.$fire()` em `packages/react/src/hooks/useLiveComponent.ts` — expoe fire-and-forget no proxy React
+- Server ja suportava: `ComponentRegistry.handleMessage()` retorna `null` quando `!message.expectResponse`, LiveServer nao envia ACTION_RESPONSE
+- Uso: `tank.$fire('sendInput', input)` em vez de `tank.sendInput(input)` (que usava `sendMessageAndWait`)
+
 ### Resultado pos-otimizacao (1000 clientes, 8 workers, sala compartilhada)
 
 | Metrica | Antes | Depois | Diferenca |
@@ -124,6 +131,47 @@ Total: 999 chamadas a JSON.stringify + ws.send (uma por componente).
 
 Quando 10 actions chegam no mesmo tick, cada uma dispara 999 broadcasts. Muitos desses broadcasts carregam o mesmo delta final. Um mecanismo de deduplicacao poderia agrupar todos os updates e enviar o estado final uma unica vez.
 
-### 3. Outgoing backpressure (MEDIO)
+### 3. setState() trata arrays com conteudo identico como "changed" (ALTO - game use case)
+
+**Arquivo:** `packages/core/src/component/LiveComponent.ts:337-365`
+
+**Problema:** `setState()` usa `!==` (comparacao por referencia) para detectar mudancas. Para primitivos funciona perfeitamente (`5 !== 5` = false). Mas para arrays/objetos, qualquer nova instancia eh tratada como "mudou" mesmo com conteudo identico:
+
+```typescript
+// LiveComponent.setState() - linha atual
+if ((this._state as any)[key] !== (newUpdates as any)[key]) {
+  // SEMPRE true para arrays, mesmo com conteudo igual
+  // [1,2,3] !== [1,2,3] -> true (referencias diferentes)
+}
+```
+
+**Impacto real (battle-tanks):** A 10Hz, o game chama setState com arrays recriados a cada tick. Resultado:
+- `powerups[]` (12 objetos) enviados 10x/s mesmo sem nenhum pickup
+- `bullets[]`, `explosions[]`, `laserBeams[]`, `vampireBeams[]` enviados como `[]` 10x/s quando vazios
+- Cada STATE_DELTA carregava ~1.5KB de dados redundantes por tick por jogador
+
+**Workaround atual (no app):** O `LiveBattleTank` agora faz tracking manual — so inclui arrays no setState quando o conteudo realmente mudou. Funciona, mas todo componente com arrays de alta frequencia precisa reimplementar essa logica.
+
+**Solucao proposta:** Adicionar deep comparison opcional para arrays no setState:
+
+```typescript
+// Opcao A: Shallow array comparison (compara elemento por elemento com ===)
+// Custo: O(n) por array, mas evita serializacao + envio desnecessario
+static stateCompareMode = 'shallow' // 'reference' | 'shallow'
+
+// Opcao B: setStateDelta() explicito (o dev controla o que vai no delta)
+this.setStateDelta({ tanks: snapshot.tanks }) // so envia o que esta no argumento
+
+// Opcao C: Campo-level hint de comparacao
+static stateConfig = {
+  tanks: { compare: 'always' },     // sempre inclui no delta
+  powerups: { compare: 'shallow' }, // compara elemento por elemento
+  count: { compare: 'reference' },  // default atual (===)
+}
+```
+
+A Opcao B (setStateDelta) eh a mais simples: nao muda o comportamento atual, apenas adiciona um metodo onde o dev pode enviar deltas explicitamente sem passar pela comparacao.
+
+### 4. Outgoing backpressure (MEDIO)
 
 Monitorar o buffer de saida do WebSocket e dropar/queuar mensagens se o cliente esta lento. Previne uso excessivo de memoria com clientes lentos.

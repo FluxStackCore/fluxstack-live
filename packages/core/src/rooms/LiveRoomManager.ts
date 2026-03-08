@@ -7,6 +7,7 @@ import type { GenericWebSocket } from '../transport/types'
 import { queueWsMessage, queuePreSerialized } from '../transport/WsSendBatcher'
 import { liveLog } from '../debug/LiveLogger'
 import { MAX_ROOM_STATE_SIZE, ROOM_NAME_REGEX } from '../protocol/constants'
+import type { IRoomPubSubAdapter } from './adapters'
 
 export interface RoomMessage {
   type: 'ROOM_JOIN' | 'ROOM_LEAVE' | 'ROOM_EMIT' | 'ROOM_STATE_SET' | 'ROOM_STATE_GET'
@@ -38,7 +39,16 @@ export class LiveRoomManager {
   private rooms = new Map<string, Room>()
   private componentRooms = new Map<string, Set<string>>() // componentId -> roomIds
 
-  constructor(private roomEvents: RoomEventBus) {}
+  /**
+   * @param roomEvents - Local server-side event bus
+   * @param pubsub - Optional cross-instance pub/sub adapter (e.g. Redis).
+   *                 When provided, room events/state/membership are propagated
+   *                 to other server instances in the background.
+   */
+  constructor(
+    private roomEvents: RoomEventBus,
+    private pubsub?: IRoomPubSubAdapter,
+  ) {}
 
   /**
    * Component joins a room
@@ -97,6 +107,9 @@ export class LiveRoomManager {
       timestamp: now
     }, componentId)
 
+    // Propagate to other instances (fire-and-forget)
+    this.pubsub?.publishMembership(roomId, 'join', componentId)?.catch(() => {})
+
     return { state: room.state }
   }
 
@@ -129,6 +142,9 @@ export class LiveRoomManager {
       },
       timestamp: now
     })
+
+    // Propagate to other instances (fire-and-forget)
+    this.pubsub?.publishMembership(roomId, 'leave', componentId)?.catch(() => {})
 
     // Cleanup empty room after delay
     if (memberCount === 0) {
@@ -208,7 +224,10 @@ export class LiveRoomManager {
     // 1. Emit on RoomEventBus for server-side handlers
     this.roomEvents.emit('room', roomId, event, data, excludeComponentId)
 
-    // 2. Broadcast via WebSocket to frontends
+    // 2. Propagate to other instances (fire-and-forget)
+    this.pubsub?.publish(roomId, event, data)?.catch(() => {})
+
+    // 3. Broadcast via WebSocket to frontends
     return this.broadcastToRoom(roomId, {
       type: 'ROOM_EVENT',
       componentId: '',
@@ -252,6 +271,9 @@ export class LiveRoomManager {
 
     const now = Date.now()
     room.lastActivity = now
+
+    // Propagate state change to other instances (fire-and-forget)
+    this.pubsub?.publishStateChange(roomId, updates)?.catch(() => {})
 
     this.broadcastToRoom(roomId, {
       type: 'ROOM_STATE',

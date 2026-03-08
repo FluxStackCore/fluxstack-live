@@ -66,6 +66,8 @@ export { LiveAuthManager } from './auth/LiveAuthManager'
 export { RoomEventBus, createTypedRoomEventBus, type EventHandler, type RoomSubscription } from './rooms/RoomEventBus'
 export { RoomStateManager, createTypedRoomState, type RoomStateData, type RoomInfo } from './rooms/RoomStateManager'
 export { LiveRoomManager } from './rooms/LiveRoomManager'
+export type { IRoomStorageAdapter, IRoomPubSubAdapter } from './rooms/adapters'
+export { InMemoryRoomAdapter } from './rooms/InMemoryRoomAdapter'
 
 // ===== Debug & Logging =====
 export {
@@ -113,6 +115,16 @@ export {
 
 // ===== DI Context =====
 export { setLiveComponentContext, getLiveComponentContext, type LiveComponentContext } from './component/context'
+
+// ===== Cluster Adapter =====
+export type {
+  IClusterAdapter,
+  ClusterComponentState,
+  ClusterSingletonOwner,
+  ClusterActionRequest,
+  ClusterActionResponse,
+  ClusterDeltaHandler,
+} from './cluster'
 
 // ===== Type Utilities =====
 export type {

@@ -36,6 +36,17 @@ export class ElysiaTransport implements LiveTransport {
       open(elysiaWs: any) {
         // Wrap Elysia WS into GenericWebSocket
         const ws = wrapElysiaWs(elysiaWs)
+        // Extract origin from upgrade request headers for CSRF validation.
+        // Pre-set on ws.data so handleOpen() can read it before overwriting.
+        try {
+          const raw = elysiaWs.raw || elysiaWs
+          const origin = raw.data?.headers?.get?.('origin')
+            || raw.data?.server?.upgrade?.headers?.get?.('origin')
+            || undefined
+          if (origin) {
+            ws.data = { origin } as any
+          }
+        } catch { /* origin extraction is best-effort */ }
         config.onOpen(ws)
       },
       message(elysiaWs: any, rawMessage: unknown) {

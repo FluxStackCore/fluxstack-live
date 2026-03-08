@@ -54,6 +54,7 @@ export class LiveConnection {
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private componentCallbacks = new Map<string, ComponentCallback>()
+  private binaryCallbacks = new Map<string, (payload: Uint8Array) => void>()
   private pendingRequests = new Map<string, {
     resolve: (value: any) => void
     reject: (error: any) => void
@@ -150,6 +151,7 @@ export class LiveConnection {
 
     try {
       const ws = new WebSocket(url)
+      ws.binaryType = 'arraybuffer'
       this.ws = ws
 
       ws.onopen = () => {
@@ -160,6 +162,12 @@ export class LiveConnection {
       }
 
       ws.onmessage = (event) => {
+        // Binary message path (BINARY_STATE_DELTA)
+        if (event.data instanceof ArrayBuffer) {
+          this.handleBinaryMessage(new Uint8Array(event.data))
+          return
+        }
+
         try {
           const parsed = JSON.parse(event.data)
           // Server may send batched messages as a JSON array
@@ -178,10 +186,17 @@ export class LiveConnection {
         }
       }
 
-      ws.onclose = () => {
-        this.log('Disconnected')
+      ws.onclose = (event) => {
+        this.log('Disconnected', { code: event.code, reason: event.reason })
         this.setState({ connected: false, connecting: false, connectionId: null })
         this.stopHeartbeat()
+
+        // Server rejected connection due to CSRF origin validation — don't retry
+        if (event.code === 4003) {
+          this.setState({ error: 'Connection rejected: origin not allowed' })
+          return
+        }
+
         this.attemptReconnect()
       }
 
@@ -386,6 +401,28 @@ export class LiveConnection {
     })
   }
 
+  /** Parse and route a binary BINARY_STATE_DELTA frame */
+  private handleBinaryMessage(buffer: Uint8Array): void {
+    if (buffer.length < 3 || buffer[0] !== 0x01) return  // not BINARY_STATE_DELTA
+
+    const idLen = buffer[1]
+    if (buffer.length < 2 + idLen) return
+
+    const componentId = new TextDecoder().decode(buffer.subarray(2, 2 + idLen))
+    const payload = buffer.subarray(2 + idLen)
+
+    const callback = this.binaryCallbacks.get(componentId)
+    if (callback) {
+      callback(payload)
+    }
+  }
+
+  /** Register a binary message handler for a component */
+  registerBinaryHandler(componentId: string, callback: (payload: Uint8Array) => void): () => void {
+    this.binaryCallbacks.set(componentId, callback)
+    return () => { this.binaryCallbacks.delete(componentId) }
+  }
+
   /** Register a component message callback */
   registerComponent(componentId: string, callback: ComponentCallback): () => void {
     this.log('Registering component', componentId)
@@ -425,6 +462,7 @@ export class LiveConnection {
   destroy(): void {
     this.disconnect()
     this.componentCallbacks.clear()
+    this.binaryCallbacks.clear()
     for (const [, req] of this.pendingRequests) {
       clearTimeout(req.timeout)
       req.reject(new Error('Connection destroyed'))

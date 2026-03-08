@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-express",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Express transport adapter for @fluxstack/live",
   "type": "module",
   "main": "./dist/index.js",
@@ -20,8 +20,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.1.0",
-    "@fluxstack/live-client": "^0.1.0"
+    "@fluxstack/live": "^0.2.0",
+    "@fluxstack/live-client": "^0.2.0"
   },
   "peerDependencies": {
     "express": ">=4.0.0",

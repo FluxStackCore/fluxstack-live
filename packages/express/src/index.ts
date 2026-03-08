@@ -69,6 +69,12 @@ export class ExpressTransport implements LiveTransport {
     this.wss.on('connection', (rawWs: WsWebSocket, req) => {
       const ws = wrapNodeWs(rawWs, req)
 
+      // Extract origin from upgrade request for CSRF validation
+      const origin = req?.headers?.origin
+      if (origin) {
+        ws.data = { origin } as any
+      }
+
       config.onOpen(ws)
 
       rawWs.on('message', (data, isBinary) => {
@@ -199,6 +205,10 @@ export interface ExpressLiveOptions extends ExpressTransportOptions {
   debug?: boolean
   /** URL path to serve the browser client bundle. Defaults to '/live-client.js'. Set to false to disable. */
   clientPath?: string | false
+  /** Optional cross-instance pub/sub adapter for horizontal room scaling (e.g. RedisRoomAdapter). */
+  roomPubSub?: import('@fluxstack/live').LiveServerOptions['roomPubSub']
+  /** Optional cluster adapter for cross-instance singleton coordination (e.g. RedisClusterAdapter). */
+  cluster?: import('@fluxstack/live').LiveServerOptions['cluster']
 }
 
 /**
@@ -268,7 +278,7 @@ export async function expressLive(
   const { LiveServer } = await import('@fluxstack/live')
   const { createServer } = await import('http')
 
-  const { componentsPath, wsPath, httpPrefix, debug, clientPath, ...transportOpts } = options
+  const { componentsPath, wsPath, httpPrefix, debug, clientPath, roomPubSub, cluster, ...transportOpts } = options
 
   registerClientBundle(app, clientPath)
 
@@ -281,6 +291,8 @@ export async function expressLive(
     wsPath,
     httpPrefix,
     debug,
+    roomPubSub,
+    cluster,
   })
 
   await liveServer.start()
@@ -326,7 +338,7 @@ export function live(app: Express, options: ExpressLiveOptions = {}): LiveMiddle
     const httpServer: HttpServer = originalListen(...args)
 
     // Attach live system to the server (async, WS can attach to a running server)
-    const { componentsPath, wsPath, httpPrefix, debug, clientPath: _, ...transportOpts } = options
+    const { componentsPath, wsPath, httpPrefix, debug, clientPath: _, roomPubSub, cluster, ...transportOpts } = options
     const transport = new ExpressTransport(app, httpServer, transportOpts)
 
     import('@fluxstack/live').then(({ LiveServer }) => {
@@ -336,6 +348,8 @@ export function live(app: Express, options: ExpressLiveOptions = {}): LiveMiddle
         wsPath,
         httpPrefix,
         debug,
+        roomPubSub,
+        cluster,
       })
       middleware.liveServer = liveServer
       liveServer.start().then(() => {

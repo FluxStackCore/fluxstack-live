@@ -29,3 +29,9 @@ export const MAX_ROOM_NAME_LENGTH = 64
 
 /** Room name validation regex */
 export const ROOM_NAME_REGEX = /^[a-zA-Z0-9_:.-]{1,64}$/
+
+/** Maximum outgoing message queue size per WebSocket connection (backpressure) */
+export const MAX_QUEUE_SIZE = 1000
+
+/** Default nonce TTL for state signature replay protection (5 minutes) */
+export const DEFAULT_NONCE_TTL = 5 * 60 * 1000

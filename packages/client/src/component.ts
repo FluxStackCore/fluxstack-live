@@ -215,6 +215,23 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
     return (response as any).result
   }
 
+  /**
+   * Fire an action without waiting for a response (fire-and-forget).
+   * Useful for high-frequency operations like game input where the
+   * server doesn't need to send back a result.
+   */
+  fire(action: string, payload: Record<string, any> = {}): void {
+    if (!this._mounted || !this._componentId) return
+
+    this.connection.sendMessage({
+      type: 'CALL_ACTION',
+      componentId: this._componentId,
+      action,
+      payload,
+      expectResponse: false,
+    } as any)
+  }
+
   // ── State ──
 
   /**
@@ -225,6 +242,28 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
   onStateChange(callback: StateChangeCallback<TState>): () => void {
     this.stateListeners.add(callback)
     return () => { this.stateListeners.delete(callback) }
+  }
+
+  /**
+   * Register a binary decoder for this component.
+   * When the server sends a BINARY_STATE_DELTA frame targeting this component,
+   * the decoder converts the raw payload into a delta object which is merged into state.
+   * Returns an unsubscribe function.
+   */
+  setBinaryDecoder(decoder: (buffer: Uint8Array) => Record<string, any>): () => void {
+    if (!this._componentId) {
+      throw new Error('Component must be mounted before setting binary decoder')
+    }
+
+    return this.connection.registerBinaryHandler(this._componentId, (payload: Uint8Array) => {
+      try {
+        const delta = decoder(payload)
+        this._state = { ...this._state, ...delta } as TState
+        this.notifyStateChange(this._state, delta as Partial<TState>)
+      } catch (e) {
+        console.error('Binary decode error:', e)
+      }
+    })
   }
 
   /**

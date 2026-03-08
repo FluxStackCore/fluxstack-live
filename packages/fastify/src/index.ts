@@ -61,6 +61,12 @@ export class FastifyTransport implements LiveTransport {
       (socket: WsWebSocket, req: FastifyRequest) => {
         const ws = wrapFastifyWs(socket, req)
 
+        // Extract origin from upgrade request for CSRF validation
+        const origin = req?.headers?.origin
+        if (origin) {
+          ws.data = { origin } as any
+        }
+
         config.onOpen(ws)
 
         socket.on('message', (data: Buffer | ArrayBuffer | Buffer[], isBinary?: boolean) => {
@@ -186,6 +192,10 @@ export interface FastifyLiveOptions extends FastifyTransportOptions {
   debug?: boolean
   /** URL path to serve the browser client bundle. Defaults to '/live-client.js'. Set to false to disable. */
   clientPath?: string | false
+  /** Optional cross-instance pub/sub adapter for horizontal room scaling (e.g. RedisRoomAdapter). */
+  roomPubSub?: import('@fluxstack/live').LiveServerOptions['roomPubSub']
+  /** Optional cluster adapter for cross-instance singleton coordination (e.g. RedisClusterAdapter). */
+  cluster?: import('@fluxstack/live').LiveServerOptions['cluster']
 }
 
 /**
@@ -261,7 +271,7 @@ export async function fastifyLive(
     })
   }
 
-  const { componentsPath, wsPath, httpPrefix, debug, clientPath, ...transportOpts } = options
+  const { componentsPath, wsPath, httpPrefix, debug, clientPath, roomPubSub, cluster, ...transportOpts } = options
 
   registerClientBundle(app, clientPath)
 
@@ -273,6 +283,8 @@ export async function fastifyLive(
     wsPath,
     httpPrefix,
     debug,
+    roomPubSub,
+    cluster,
   })
 
   await liveServer.start()

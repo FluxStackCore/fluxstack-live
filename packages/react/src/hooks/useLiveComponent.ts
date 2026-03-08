@@ -53,6 +53,7 @@ export interface LiveComponentProxy<
 
   $call: (action: string, payload?: any) => Promise<void>
   $callAndWait: <R = any>(action: string, payload?: any, timeout?: number) => Promise<R>
+  $fire: (action: string, payload?: any) => void
   $mount: () => Promise<void>
   $unmount: () => Promise<void>
   $refresh: () => Promise<void>
@@ -115,13 +116,15 @@ export interface UseLiveComponentOptions extends HybridComponentOptions {
   syncMode?: 'immediate' | 'debounced' | 'manual'
   persistState?: boolean
   debugLabel?: string
+  /** Binary decoder for high-frequency binary state deltas. When set, the component will accept binary WebSocket frames and decode them into state deltas. */
+  binaryDecoder?: (buffer: Uint8Array) => Record<string, any>
 }
 
 // ===== Reserved Props =====
 
 const RESERVED_PROPS = new Set([
   '$state', '$connected', '$loading', '$error', '$status', '$componentId', '$dirty', '$authenticated',
-  '$call', '$callAndWait', '$mount', '$unmount', '$refresh', '$set', '$onBroadcast', '$updateLocal',
+  '$call', '$callAndWait', '$fire', '$mount', '$unmount', '$refresh', '$set', '$onBroadcast', '$updateLocal',
   '$room', '$rooms', '$field', '$sync',
   'then', 'toJSON', 'valueOf', 'toString',
   Symbol.toStringTag, Symbol.iterator,
@@ -172,6 +175,7 @@ export function useLiveComponent<
     onRehydrate,
     onError,
     onStateChange,
+    binaryDecoder,
   } = options
 
   const {
@@ -180,6 +184,7 @@ export function useLiveComponent<
     sendMessage,
     sendMessageAndWait,
     registerComponent,
+    registerBinaryHandler,
     unregisterComponent,
   } = useLiveComponents()
 
@@ -380,6 +385,20 @@ export function useLiveComponent<
     return response as R
   }, [componentId, connected, sendMessageAndWait])
 
+  // ===== Fire (fire-and-forget, no response) =====
+  const fire = useCallback((action: string, payload?: any) => {
+    const id = componentId || lastComponentIdRef.current
+    if (!id || !connected) return
+
+    sendMessage({
+      type: 'CALL_ACTION',
+      componentId: id,
+      action,
+      payload,
+      expectResponse: false,
+    } as any)
+  }, [componentId, connected, sendMessage])
+
   // ===== Refresh =====
   const refresh = useCallback(async () => {
     for (const [key, change] of pendingChanges.current) {
@@ -500,8 +519,27 @@ export function useLiveComponent<
       }
     })
 
-    return () => unregister()
-  }, [componentId, registerComponent, updateState, stateData, componentName, room, userId, onStateChange, onRehydrate, onError])
+    // Register binary handler if binaryDecoder is provided
+    let unregisterBinary: (() => void) | undefined
+    if (binaryDecoder && componentId) {
+      unregisterBinary = registerBinaryHandler(componentId, (payload: Uint8Array) => {
+        try {
+          const delta = binaryDecoder(payload)
+          const oldState = storeRef.current?.getState().state ?? stateData
+          const mergedState = { ...oldState, ...delta } as TState
+          updateState(mergedState)
+          onStateChange?.(mergedState, oldState)
+        } catch (e) {
+          console.error('Binary decode error:', e)
+        }
+      })
+    }
+
+    return () => {
+      unregister()
+      unregisterBinary?.()
+    }
+  }, [componentId, registerComponent, registerBinaryHandler, binaryDecoder, updateState, stateData, componentName, room, userId, onStateChange, onRehydrate, onError])
 
   // ===== Auto Mount =====
   useEffect(() => {
@@ -616,6 +654,7 @@ export function useLiveComponent<
           case '$authenticated': return wsAuthenticated
           case '$call': return call
           case '$callAndWait': return callAndWait
+          case '$fire': return fire
           case '$mount': return mount
           case '$unmount': return unmount
           case '$refresh': return refresh
@@ -677,12 +716,12 @@ export function useLiveComponent<
         return [
           ...Object.keys(stateData),
           '$state', '$connected', '$loading', '$error', '$status', '$componentId', '$dirty', '$authenticated',
-          '$call', '$callAndWait', '$mount', '$unmount', '$refresh', '$set', '$field', '$sync',
+          '$call', '$callAndWait', '$fire', '$mount', '$unmount', '$refresh', '$set', '$field', '$sync',
           '$onBroadcast', '$updateLocal', '$room', '$rooms',
         ]
       },
     })
-  }, [stateData, connected, wsAuthenticated, loading, error, componentId, call, callAndWait, mount, unmount, refresh, setProperty, optimistic, sendMessageAndWait, createFieldBinding, sync, localVersion, roomManager])
+  }, [stateData, connected, wsAuthenticated, loading, error, componentId, call, callAndWait, fire, mount, unmount, refresh, setProperty, optimistic, sendMessageAndWait, createFieldBinding, sync, localVersion, roomManager])
 
   return proxy
 }

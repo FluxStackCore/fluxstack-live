@@ -2,21 +2,28 @@
 //
 // Framework-agnostic base class for server-side Live Components.
 // Uses getLiveComponentContext() for dependency injection instead of global singletons.
+//
+// Internally delegates to focused managers (composition pattern):
+//   - ComponentStateManager: reactive state, proxy, binary delta
+//   - ComponentMessaging: emit(), broadcast()
+//   - ActionSecurityManager: action validation, rate limiting, Zod
+//   - ComponentRoomProxy: $room, $rooms, room events
 
 import { getLiveComponentContext } from './context'
 import type { LiveDebuggerInterface } from './context'
 import type { GenericWebSocket } from '../transport/types'
-import { queueWsMessage } from '../transport/WsSendBatcher'
 import type { LiveAuthContext, LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
-import { liveLog, liveWarn } from '../debug/LiveLogger'
-import type { LiveMessage, BroadcastMessage, ComponentState, ServerRoomHandle, ServerRoomProxy } from '../protocol/messages'
+import type { BroadcastMessage, ComponentState, ServerRoomHandle, ServerRoomProxy } from '../protocol/messages'
 
-/** @internal Symbol key for singleton emit override */
-export const EMIT_OVERRIDE_KEY = Symbol.for('fluxstack:emitOverride')
+// Managers
+import { ComponentStateManager } from './managers/ComponentStateManager'
+import { ComponentMessaging, EMIT_OVERRIDE_KEY } from './managers/ComponentMessaging'
+import { ActionSecurityManager } from './managers/ActionSecurityManager'
+import { ComponentRoomProxy } from './managers/ComponentRoomProxy'
 
-/** Per-class cache for forbidden property names in createDirectStateAccessors */
-const _forbiddenSetCache = new WeakMap<Function, Set<string>>()
+// Re-export EMIT_OVERRIDE_KEY for external consumers
+export { EMIT_OVERRIDE_KEY }
 
 // ===== Debug Instrumentation (injectable to avoid client-side import) =====
 let _liveDebugger: LiveDebuggerInterface | null = null
@@ -52,6 +59,31 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
   static actionAuth?: LiveActionAuthMap
 
   /**
+   * Zod schemas for action payload validation.
+   * When defined, payloads are validated before the action method is called.
+   *
+   * @example
+   * static actionSchemas = {
+   *   sendMessage: z.object({ text: z.string().max(500) }),
+   *   updatePosition: z.object({ x: z.number(), y: z.number() }),
+   * }
+   */
+  static actionSchemas?: Record<string, { safeParse: (data: unknown) => { success: boolean; error?: any; data?: any } }>
+
+  /**
+   * Rate limit for action execution.
+   * Prevents clients from spamming expensive operations.
+   *
+   * @example
+   * static actionRateLimit = { maxCalls: 10, windowMs: 1000, perAction: true }
+   */
+  static actionRateLimit?: {
+    maxCalls: number
+    windowMs: number
+    perAction?: boolean
+  }
+
+  /**
    * Data that survives HMR reloads.
    */
   static persistent?: Record<string, any>
@@ -63,8 +95,7 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
   static singleton?: boolean
 
   public readonly id: string
-  private _state: TState
-  public state: TState // Proxy wrapper
+  public state: TState // Proxy wrapper (getter delegates to _stateManager)
   protected ws: GenericWebSocket
   public room?: string
   public userId?: string
@@ -73,110 +104,69 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
   // Server-only private state (NEVER sent to client)
   private _privateState: TPrivate = {} as TPrivate
 
-  // Auth context (injected by registry during mount)
+  // Auth context (injected by registry during mount, immutable after first set)
   private _authContext: LiveAuthContext = ANONYMOUS_CONTEXT
-
-  // Room event subscriptions (cleaned up on destroy)
-  private roomEventUnsubscribers: (() => void)[] = []
-  private joinedRooms: Set<string> = new Set()
+  private _authContextSet = false
 
   // Room type for typed events (override in subclass)
   protected roomType: string = 'default'
 
-  // Cached room handles
-  private roomHandles: Map<string, ServerRoomHandle> = new Map()
-  // Cached $room proxy (avoids re-creating on every access)
-  private _roomProxy: ServerRoomProxy | null = null
-  // Cached $rooms array (invalidated on join/leave)
-  private _roomsCache: string[] | null = null
-  // Cached TextEncoder bytes for binary delta frame (avoids re-encoding on every call)
-  private _idBytes: Uint8Array | null = null
-
-  // Guard against infinite recursion in onStateChange
-  private _inStateChange = false
-
   // Singleton emit override
   public [EMIT_OVERRIDE_KEY]: ((type: string, payload: any) => void) | null = null
+
+  // ===== Internal Managers (composition) =====
+  private _stateManager: ComponentStateManager<TState>
+  private _messaging: ComponentMessaging
+  private _actionSecurity: ActionSecurityManager
+  private _roomProxyManager: ComponentRoomProxy
+
+  static publicActions?: readonly string[]
 
   constructor(initialState: Partial<TState>, ws: GenericWebSocket, options?: { room?: string; userId?: string }) {
     this.id = this.generateId()
     const ctor = this.constructor as typeof LiveComponent
-    this._state = { ...ctor.defaultState, ...initialState } as TState
-
-    // Create reactive proxy that auto-syncs on mutation
-    this.state = this.createStateProxy(this._state)
-
     this.ws = ws
     this.room = options?.room
     this.userId = options?.userId
 
-    // Auto-join default room if specified
-    if (this.room) {
-      this.joinedRooms.add(this.room)
-      const ctx = getLiveComponentContext()
-      ctx.roomManager.joinRoom(this.id, this.room, this.ws)
-    }
+    // 1. Messaging (needed by state manager for emit)
+    this._messaging = new ComponentMessaging({
+      componentId: this.id,
+      ws: this.ws,
+      getUserId: () => this.userId,
+      getRoom: () => this.room,
+      getBroadcastToRoom: () => this.broadcastToRoom,
+      getEmitOverride: () => this[EMIT_OVERRIDE_KEY],
+    })
+
+    // 2. State manager
+    this._stateManager = new ComponentStateManager<TState>({
+      componentId: this.id,
+      initialState: { ...ctor.defaultState, ...initialState } as TState,
+      ws: this.ws,
+      emitFn: (type, payload) => this._messaging.emit(type, payload),
+      onStateChangeFn: (changes) => this.onStateChange(changes),
+      debugger: _liveDebugger,
+    })
+
+    // Expose proxy state as `this.state`
+    this.state = this._stateManager.proxyState
+
+    // 3. Action security
+    this._actionSecurity = new ActionSecurityManager()
+
+    // 4. Room proxy (context resolved lazily — only when room features are used)
+    this._roomProxyManager = new ComponentRoomProxy({
+      componentId: this.id,
+      ws: this.ws,
+      defaultRoom: this.room,
+      getCtx: () => getLiveComponentContext(),
+      debugger: _liveDebugger,
+      setStateFn: (updates: any) => this.setState(updates),
+    })
 
     // Create direct property accessors (this.count instead of this.state.count)
-    this.createDirectStateAccessors()
-  }
-
-  // Create getters/setters for each state property directly on `this`
-  private createDirectStateAccessors() {
-    const ctor = this.constructor as Function
-    let forbidden = _forbiddenSetCache.get(ctor)
-    if (!forbidden) {
-      forbidden = new Set([
-        ...Object.keys(this),
-        ...Object.getOwnPropertyNames(Object.getPrototypeOf(this)),
-        'state', '_state', 'ws', 'id', 'room', 'userId', 'broadcastToRoom',
-        '$private', '_privateState',
-        '$room', '$rooms', 'roomType', 'roomHandles', 'joinedRooms', 'roomEventUnsubscribers'
-      ])
-      _forbiddenSetCache.set(ctor, forbidden)
-    }
-
-    for (const key of Object.keys(this._state as object)) {
-      if (!forbidden.has(key)) {
-        Object.defineProperty(this, key, {
-          get: () => (this._state as any)[key],
-          set: (value) => { (this.state as any)[key] = value },
-          enumerable: true,
-          configurable: true
-        })
-      }
-    }
-  }
-
-  // Create a Proxy that auto-emits STATE_DELTA on any mutation
-  private createStateProxy(state: TState): TState {
-    const self = this
-    return new Proxy(state as object, {
-      set(target, prop, value) {
-        const oldValue = (target as any)[prop]
-        if (oldValue !== value) {
-          (target as any)[prop] = value
-          const changes = { [prop]: value } as Partial<TState>
-          self.emit('STATE_DELTA', { delta: changes })
-          if (!self._inStateChange) {
-            self._inStateChange = true
-            try { self.onStateChange(changes) } catch (err: any) {
-              console.error(`[${self.id}] onStateChange error:`, err?.message || err)
-            } finally { self._inStateChange = false }
-          }
-          _liveDebugger?.trackStateChange(
-            self.id,
-            changes as Record<string, unknown>,
-            target as Record<string, unknown>,
-            'proxy'
-          )
-        }
-        return true
-      },
-      get(target, prop) {
-        return (target as any)[prop]
-      }
-    }) as TState
+    this._stateManager.applyDirectAccessors(this, this.constructor as Function)
   }
 
   // ========================================
@@ -192,106 +182,7 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
   // ========================================
 
   public get $room(): ServerRoomProxy {
-    if (this._roomProxy) return this._roomProxy
-
-    const self = this
-    const ctx = getLiveComponentContext()
-
-    const createHandle = (roomId: string): ServerRoomHandle => {
-      if (this.roomHandles.has(roomId)) {
-        return this.roomHandles.get(roomId)!
-      }
-
-      const handle: ServerRoomHandle = {
-        get id() { return roomId },
-        get state() { return ctx.roomManager.getRoomState(roomId) },
-
-        join: (initialState?: any) => {
-          if (self.joinedRooms.has(roomId)) return
-          self.joinedRooms.add(roomId)
-          self._roomsCache = null  // invalidate cache
-          ctx.roomManager.joinRoom(self.id, roomId, self.ws, initialState)
-          try { self.onRoomJoin(roomId) } catch (err: any) {
-            console.error(`[${self.id}] onRoomJoin error:`, err?.message || err)
-          }
-        },
-
-        leave: () => {
-          if (!self.joinedRooms.has(roomId)) return
-          self.joinedRooms.delete(roomId)
-          self._roomsCache = null  // invalidate cache
-          ctx.roomManager.leaveRoom(self.id, roomId)
-          try { self.onRoomLeave(roomId) } catch (err: any) {
-            console.error(`[${self.id}] onRoomLeave error:`, err?.message || err)
-          }
-        },
-
-        emit: (event: string, data: any): number => {
-          return ctx.roomManager.emitToRoom(roomId, event, data, self.id)
-        },
-
-        on: (event: string, handler: (data: any) => void): (() => void) => {
-          const unsubscribe = ctx.roomEvents.on(
-            'room',
-            roomId,
-            event,
-            self.id,
-            handler
-          )
-          self.roomEventUnsubscribers.push(unsubscribe)
-          return unsubscribe
-        },
-
-        setState: (updates: any) => {
-          ctx.roomManager.setRoomState(roomId, updates, self.id)
-        }
-      }
-
-      this.roomHandles.set(roomId, handle)
-      return handle
-    }
-
-    const proxyFn = ((roomId: string) => createHandle(roomId)) as ServerRoomProxy
-
-    const defaultHandle = this.room ? createHandle(this.room) : null
-
-    Object.defineProperties(proxyFn, {
-      id: { get: () => self.room },
-      state: { get: () => defaultHandle?.state ?? {} },
-      join: {
-        value: (initialState?: any) => {
-          if (!defaultHandle) throw new Error('No default room set')
-          defaultHandle.join(initialState)
-        }
-      },
-      leave: {
-        value: () => {
-          if (!defaultHandle) throw new Error('No default room set')
-          defaultHandle.leave()
-        }
-      },
-      emit: {
-        value: (event: string, data: any) => {
-          if (!defaultHandle) throw new Error('No default room set')
-          return defaultHandle.emit(event, data)
-        }
-      },
-      on: {
-        value: (event: string, handler: (data: any) => void) => {
-          if (!defaultHandle) throw new Error('No default room set')
-          return defaultHandle.on(event, handler)
-        }
-      },
-      setState: {
-        value: (updates: any) => {
-          if (!defaultHandle) throw new Error('No default room set')
-          defaultHandle.setState(updates)
-        }
-      }
-    })
-
-    this._roomProxy = proxyFn
-    return proxyFn
+    return this._roomProxyManager.$room
   }
 
   /**
@@ -299,9 +190,7 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
    * Cached — invalidated on join/leave.
    */
   public get $rooms(): string[] {
-    if (this._roomsCache) return this._roomsCache
-    this._roomsCache = Array.from(this.joinedRooms)
-    return this._roomsCache
+    return this._roomProxyManager.$rooms
   }
 
   // ========================================
@@ -312,12 +201,22 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
     return this._authContext
   }
 
-  /** @internal */
+  /** @internal - Immutable after first set to prevent privilege escalation */
   public setAuthContext(context: LiveAuthContext): void {
+    if (this._authContextSet) {
+      throw new Error('Auth context is immutable after initial set')
+    }
     this._authContext = context
+    this._authContextSet = true
     if (context.authenticated && context.user?.id && !this.userId) {
       this.userId = context.user.id
     }
+  }
+
+  /** @internal - Reset auth context (for registry use in reconnection) */
+  public _resetAuthContext(): void {
+    this._authContextSet = false
+    this._authContext = ANONYMOUS_CONTEXT
   }
 
   // ========================================
@@ -353,37 +252,11 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
   protected onClientLeave(connectionId: string, connectionCount: number): void {}
 
   // ========================================
-  // State Management
+  // State Management (delegates to _stateManager)
   // ========================================
 
   public setState(updates: Partial<TState> | ((prev: TState) => Partial<TState>)) {
-    const newUpdates = typeof updates === 'function' ? updates(this._state) : updates
-
-    const actualChanges: Partial<TState> = {} as Partial<TState>
-    let hasChanges = false
-    for (const key of Object.keys(newUpdates as object) as Array<keyof TState>) {
-      if ((this._state as any)[key] !== (newUpdates as any)[key]) {
-        (actualChanges as any)[key] = (newUpdates as any)[key]
-        hasChanges = true
-      }
-    }
-
-    if (!hasChanges) return
-
-    Object.assign(this._state as object, actualChanges)
-    this.emit('STATE_DELTA', { delta: actualChanges })
-    if (!this._inStateChange) {
-      this._inStateChange = true
-      try { this.onStateChange(actualChanges) } catch (err: any) {
-        console.error(`[${this.id}] onStateChange error:`, err?.message || err)
-      } finally { this._inStateChange = false }
-    }
-    _liveDebugger?.trackStateChange(
-      this.id,
-      actualChanges as Record<string, unknown>,
-      this._state as Record<string, unknown>,
-      'setState'
-    )
+    this._stateManager.setState(updates)
   }
 
   /**
@@ -396,228 +269,49 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
     delta: Partial<TState>,
     encoder: (delta: Partial<TState>) => Uint8Array
   ): void {
-    // Update internal state (same diffing as setState)
-    const actualChanges: Partial<TState> = {} as Partial<TState>
-    let hasChanges = false
-    for (const key of Object.keys(delta as object) as Array<keyof TState>) {
-      if ((this._state as any)[key] !== (delta as any)[key]) {
-        (actualChanges as any)[key] = (delta as any)[key]
-        hasChanges = true
-      }
-    }
-
-    if (!hasChanges) return
-
-    Object.assign(this._state as object, actualChanges)
-
-    // Encode payload
-    const payload = encoder(actualChanges)
-
-    // Build binary frame: [0x01][idLen:u8][id_bytes][payload]
-    // Cache encoded id bytes (id never changes)
-    if (!this._idBytes) {
-      this._idBytes = new TextEncoder().encode(this.id)
-    }
-    const idBytes = this._idBytes
-    const frame = new Uint8Array(1 + 1 + idBytes.length + payload.length)
-    frame[0] = 0x01  // BINARY_STATE_DELTA
-    frame[1] = idBytes.length
-    frame.set(idBytes, 2)
-    frame.set(payload, 2 + idBytes.length)
-
-    // Send directly (bypass batcher — binary doesn't need JSON batching)
-    if (this.ws && this.ws.readyState === 1) {
-      this.ws.send(frame)
-    }
+    this._stateManager.sendBinaryDelta(delta, encoder)
   }
 
   public setValue<K extends keyof TState>(payload: { key: K; value: TState[K] }): { success: true; key: K; value: TState[K] } {
-    const { key, value } = payload
-    const update = { [key]: value } as unknown as Partial<TState>
-    this.setState(update)
-    return { success: true, key, value }
+    return this._stateManager.setValue(payload)
   }
 
   // ========================================
-  // Action Security
+  // Action Execution (delegates to _actionSecurity)
   // ========================================
-
-  static publicActions?: readonly string[]
-
-  private static readonly BLOCKED_ACTIONS: ReadonlySet<string> = new Set([
-    'constructor', 'destroy', 'executeAction', 'getSerializableState',
-    'onMount', 'onDestroy', 'onConnect', 'onDisconnect',
-    'onStateChange', 'onRoomJoin', 'onRoomLeave',
-    'onRehydrate', 'onAction',
-    'onClientJoin', 'onClientLeave',
-    'setState', 'sendBinaryDelta', 'emit', 'broadcast', 'broadcastToRoom',
-    'createStateProxy', 'createDirectStateAccessors', 'generateId',
-    'setAuthContext', '$auth',
-    '$private', '_privateState',
-    '$persistent',
-    '_inStateChange',
-    '$room', '$rooms', 'subscribeToRoom', 'unsubscribeFromRoom',
-    'emitRoomEvent', 'onRoomEvent', 'emitRoomEventWithState',
-  ])
 
   public async executeAction(action: string, payload: any): Promise<any> {
-    const actionStart = Date.now()
-    try {
-      if ((LiveComponent.BLOCKED_ACTIONS as Set<string>).has(action)) {
-        throw new Error(`Action '${action}' is not callable`)
-      }
-
-      if (action.startsWith('_') || action.startsWith('#')) {
-        throw new Error(`Action '${action}' is not callable`)
-      }
-
-      const componentClass = this.constructor as typeof LiveComponent
-      const publicActions = componentClass.publicActions
-      if (!publicActions) {
-        console.warn(`[SECURITY] Component '${componentClass.componentName || componentClass.name}' has no publicActions defined. All remote actions are blocked.`)
-        throw new Error(`Action '${action}' is not callable - component has no publicActions defined`)
-      }
-      if (!publicActions.includes(action)) {
-        const methodExists = typeof (this as any)[action] === 'function'
-        if (methodExists) {
-          const name = componentClass.componentName || componentClass.name
-          throw new Error(
-            `Action '${action}' exists on '${name}' but is not listed in publicActions. ` +
-            `Add it to: static publicActions = [..., '${action}']`
-          )
-        }
-        throw new Error(`Action '${action}' is not callable`)
-      }
-
-      const method = (this as any)[action]
-      if (typeof method !== 'function') {
-        throw new Error(`Action '${action}' not found on component`)
-      }
-
-      if (Object.prototype.hasOwnProperty.call(Object.prototype, action)) {
-        throw new Error(`Action '${action}' is not callable`)
-      }
-
-      _liveDebugger?.trackActionCall(this.id, action, payload)
-
-      let hookResult: void | false | Promise<void | false>
-      try {
-        hookResult = await this.onAction(action, payload)
-      } catch (hookError: any) {
-        _liveDebugger?.trackActionError(this.id, action, hookError.message, Date.now() - actionStart)
-        this.emit('ERROR', {
-          action,
-          error: `Action '${action}' failed pre-validation`
-        })
-        throw hookError
-      }
-      if (hookResult === false) {
-        _liveDebugger?.trackActionError(this.id, action, 'Action cancelled', Date.now() - actionStart)
-        throw new Error(`Action '${action}' was cancelled`)
-      }
-
-      const result = await method.call(this, payload)
-
-      _liveDebugger?.trackActionResult(this.id, action, result, Date.now() - actionStart)
-
-      return result
-    } catch (error: any) {
-      if (!error.message?.includes('was cancelled') && !error.message?.includes('pre-validation')) {
-        _liveDebugger?.trackActionError(this.id, action, error.message, Date.now() - actionStart)
-
-        this.emit('ERROR', {
-          action,
-          error: error.message
-        })
-      }
-      throw error
-    }
+    return this._actionSecurity.validateAndExecute(action, payload, {
+      component: this,
+      componentClass: this.constructor as any,
+      componentId: this.id,
+      emitFn: (type, p) => this.emit(type, p),
+      debugger: _liveDebugger,
+    })
   }
 
   // ========================================
-  // Messaging
+  // Messaging (delegates to _messaging)
   // ========================================
 
   protected emit(type: string, payload: any) {
-    const override = this[EMIT_OVERRIDE_KEY]
-    if (override) {
-      override(type, payload)
-      return
-    }
-
-    const message: LiveMessage = {
-      type: type as any,
-      componentId: this.id,
-      payload,
-      timestamp: Date.now(),
-      userId: this.userId,
-      room: this.room
-    }
-
-    if (this.ws) {
-      // Queue to batcher — will be sent as part of a batched array on next microtask.
-      // STATE_DELTA messages for the same componentId are deduplicated automatically.
-      queueWsMessage(this.ws, message as any)
-    }
+    this._messaging.emit(type, payload)
   }
 
   protected broadcast(type: string, payload: any, excludeCurrentUser = false) {
-    if (!this.room) {
-      liveWarn('rooms', this.id, `[${this.id}] Cannot broadcast '${type}' - no room set`)
-      return
-    }
-
-    const message: BroadcastMessage = {
-      type,
-      payload,
-      room: this.room,
-      excludeUser: excludeCurrentUser ? this.userId : undefined
-    }
-
-    liveLog('rooms', this.id, `[${this.id}] Broadcasting '${type}' to room '${this.room}'`)
-
-    this.broadcastToRoom(message)
+    this._messaging.broadcast(type, payload, excludeCurrentUser)
   }
 
   // ========================================
-  // Room Events - Internal Server Events
+  // Room Events (delegates to _roomProxyManager)
   // ========================================
 
   protected emitRoomEvent(event: string, data: any, notifySelf = false): number {
-    if (!this.room) {
-      liveWarn('rooms', this.id, `[${this.id}] Cannot emit room event '${event}' - no room set`)
-      return 0
-    }
-
-    const ctx = getLiveComponentContext()
-    const excludeId = notifySelf ? undefined : this.id
-    const notified = ctx.roomEvents.emit(this.roomType, this.room, event, data, excludeId)
-
-    liveLog('rooms', this.id, `[${this.id}] Room event '${event}' -> ${notified} components`)
-
-    _liveDebugger?.trackRoomEmit(this.id, this.room, event, data)
-
-    return notified
+    return this._roomProxyManager.emitRoomEvent(event, data, notifySelf)
   }
 
   protected onRoomEvent<T = any>(event: string, handler: (data: T) => void): void {
-    if (!this.room) {
-      liveWarn('rooms', this.id, `[${this.id}] Cannot subscribe to room event '${event}' - no room set`)
-      return
-    }
-
-    const ctx = getLiveComponentContext()
-    const unsubscribe = ctx.roomEvents.on(
-      this.roomType,
-      this.room,
-      event,
-      this.id,
-      handler
-    )
-
-    this.roomEventUnsubscribers.push(unsubscribe)
-
-    liveLog('rooms', this.id, `[${this.id}] Subscribed to room event '${event}'`)
+    this._roomProxyManager.onRoomEvent(event, handler)
   }
 
   protected emitRoomEventWithState(
@@ -625,15 +319,16 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
     data: any,
     stateUpdates: Partial<TState>
   ): number {
-    this.setState(stateUpdates)
-    return this.emitRoomEvent(event, data, false)
+    return this._roomProxyManager.emitRoomEventWithState(event, data, stateUpdates)
   }
 
   protected subscribeToRoom(roomId: string) {
+    this._roomProxyManager.subscribeToRoom(roomId)
     this.room = roomId
   }
 
   protected unsubscribeFromRoom() {
+    this._roomProxyManager.unsubscribeFromRoom()
     this.room = undefined
   }
 
@@ -652,26 +347,20 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
       console.error(`[${this.id}] onDestroy error:`, err?.message || err)
     }
 
-    for (const unsubscribe of this.roomEventUnsubscribers) {
-      unsubscribe()
-    }
-    this.roomEventUnsubscribers = []
+    // Cleanup room proxy (unsubscribers, leave rooms, clear handles)
+    this._roomProxyManager.destroy()
 
-    const ctx = getLiveComponentContext()
-    for (const roomId of this.joinedRooms) {
-      ctx.roomManager.leaveRoom(this.id, roomId)
-    }
-    this.joinedRooms.clear()
-    this.roomHandles.clear()
-    this._roomProxy = null
-    this._roomsCache = null
-    this._idBytes = null
+    // Cleanup state manager (cached bytes)
+    this._stateManager.cleanup()
+
+    // Clear private state
     this._privateState = {} as TPrivate
 
-    this.unsubscribeFromRoom()
+    // Clear room on this instance
+    this.room = undefined
   }
 
   public getSerializableState(): TState {
-    return this.state
+    return this._stateManager.getSerializableState()
   }
 }

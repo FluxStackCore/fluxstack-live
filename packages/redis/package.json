@@ -1,0 +1,42 @@
+{
+  "name": "@fluxstack/live-redis",
+  "version": "0.2.0",
+  "description": "Redis adapter for @fluxstack/live — room state persistence and cross-instance pub/sub for horizontal scaling",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@fluxstack/live": "^0.2.0"
+  },
+  "peerDependencies": {
+    "ioredis": ">=5.0.0"
+  },
+  "devDependencies": {
+    "ioredis": "^5.6.1",
+    "tsup": "^8.4.0",
+    "typescript": "^5.8.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FluxStackCore/fluxstack-live",
+    "directory": "packages/redis"
+  },
+  "license": "MIT"
+}

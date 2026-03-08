@@ -36,6 +36,10 @@ export interface LiveWSData {
   userId?: string
   /** Auth context for the connection */
   authContext?: LiveAuthContext
+  /** Rooms joined by this connection (for per-connection limits) */
+  rooms?: Set<string>
+  /** Origin header from the WebSocket upgrade request (set by transport adapter) */
+  origin?: string
 }
 
 // ===== Backward Compatibility Aliases =====

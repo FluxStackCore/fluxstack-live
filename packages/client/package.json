@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-client",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-agnostic browser client for @fluxstack/live",
   "type": "module",
   "main": "./dist/index.js",
@@ -21,7 +21,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.1.0"
+    "@fluxstack/live": "^0.2.0"
   },
   "devDependencies": {
     "tsup": "^8.4.0",

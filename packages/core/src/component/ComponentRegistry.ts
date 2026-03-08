@@ -15,6 +15,7 @@ import type { LiveDebugger } from '../debug/LiveDebugger'
 import type { StateSignatureManager, SignedState } from '../security/StateSignature'
 import type { PerformanceMonitor } from '../monitoring/PerformanceMonitor'
 import { liveLog, registerComponentLogging, unregisterComponentLogging } from '../debug/LiveLogger'
+import type { IClusterAdapter, ClusterActionRequest, ClusterActionResponse } from '../cluster/types'
 
 export interface ComponentMetadata {
   id: string
@@ -52,6 +53,16 @@ export interface ComponentRegistryDeps {
   debugger: LiveDebugger
   stateSignature: StateSignatureManager
   performanceMonitor: PerformanceMonitor
+  cluster?: IClusterAdapter
+}
+
+/** Remote singleton proxy — represents a singleton owned by another server instance. */
+interface RemoteSingletonEntry {
+  componentName: string
+  componentId: string
+  ownerInstanceId: string
+  lastState: any
+  connections: Map<string, GenericWebSocket>
 }
 
 export class ComponentRegistry {
@@ -63,6 +74,8 @@ export class ComponentRegistry {
   private autoDiscoveredComponents = new Map<string, new (initialState: any, ws: GenericWebSocket, options?: { room?: string; userId?: string }) => LiveComponent<any>>()
   private healthCheckInterval?: ReturnType<typeof setInterval>
   private singletons = new Map<string, { instance: LiveComponent; connections: Map<string, GenericWebSocket> }>()
+  private remoteSingletons = new Map<string, RemoteSingletonEntry>()
+  private cluster?: IClusterAdapter
 
   private authManager: LiveAuthManager
   private debugger: LiveDebugger
@@ -74,11 +87,86 @@ export class ComponentRegistry {
     this.debugger = deps.debugger
     this.stateSignature = deps.stateSignature
     this.performanceMonitor = deps.performanceMonitor
+    this.cluster = deps.cluster
 
     // Inject debugger into LiveComponent base class
     _setLiveDebugger(deps.debugger)
 
     this.setupHealthMonitoring()
+    this.setupClusterHandlers()
+  }
+
+  /** Set up handlers for incoming cluster messages (deltas, forwarded actions). */
+  private setupClusterHandlers(): void {
+    if (!this.cluster) return
+
+    // Handle incoming state deltas from other instances (for remote singletons)
+    this.cluster.onDelta((componentId, componentName, delta, sourceInstanceId) => {
+      const remote = this.remoteSingletons.get(componentName)
+      if (!remote || remote.componentId !== componentId) return
+
+      // Apply delta to local cache
+      if (delta && remote.lastState) {
+        Object.assign(remote.lastState, delta)
+      }
+
+      // Forward STATE_DELTA to all local WebSocket connections interested in this singleton
+      const message = JSON.stringify({
+        type: 'STATE_DELTA',
+        componentId,
+        payload: { delta },
+        timestamp: Date.now()
+      })
+      const dead: string[] = []
+      for (const [connId, ws] of remote.connections) {
+        if (ws.readyState === 1) {
+          try { ws.send(message) } catch { dead.push(connId) }
+        } else {
+          dead.push(connId)
+        }
+      }
+      for (const connId of dead) remote.connections.delete(connId)
+    })
+
+    // Handle ownership loss (split-brain detection during heartbeat)
+    this.cluster.onOwnershipLost((componentName: string) => {
+      const singleton = this.singletons.get(componentName)
+      if (!singleton) return
+
+      // Save final state before losing ownership
+      this.cluster!.saveSingletonState(componentName, singleton.instance.getSerializableState()).catch(() => {})
+
+      // Notify all local clients that this singleton is being destroyed
+      const errorMsg = JSON.stringify({
+        type: 'ERROR',
+        componentId: singleton.instance.id,
+        payload: { error: 'OWNERSHIP_LOST: singleton moved to another server' },
+        timestamp: Date.now()
+      })
+      for (const [, ws] of singleton.connections) {
+        try { ws.send(errorMsg) } catch { /* ignore */ }
+      }
+
+      // Clean up local singleton
+      this.cleanupComponent(singleton.instance.id)
+      this.singletons.delete(componentName)
+    })
+
+    // Handle forwarded actions from other instances (we are the singleton owner)
+    this.cluster.onActionForward(async (request: ClusterActionRequest): Promise<ClusterActionResponse> => {
+      try {
+        // Split-brain protection: verify we still own this singleton before executing
+        const stillOwner = await this.cluster!.verifySingletonOwnership(request.componentName)
+        if (!stillOwner) {
+          return { success: false, error: 'OWNERSHIP_LOST: this instance no longer owns the singleton', requestId: request.requestId }
+        }
+
+        const result = await this.executeAction(request.componentId, request.action, request.payload)
+        return { success: true, result, requestId: request.requestId }
+      } catch (error: any) {
+        return { success: false, error: error.message, requestId: request.requestId }
+      }
+    })
   }
 
   private setupHealthMonitoring(): void {
@@ -193,7 +281,9 @@ export class ComponentRegistry {
 
       // Singleton check
       const isSingleton = (ComponentClass as any).singleton === true
+      let clusterSingletonId: string | null = null
       if (isSingleton) {
+        // Check local singleton first
         const existing = this.singletons.get(componentName)
         if (existing) {
           const connId = ws.data?.connectionId || `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -217,11 +307,74 @@ export class ComponentRegistry {
 
           return { componentId: existing.instance.id, initialState: existing.instance.getSerializableState(), signedState }
         }
+
+        // Check remote singleton (already proxied from another instance)
+        const existingRemote = this.remoteSingletons.get(componentName)
+        if (existingRemote) {
+          const connId = ws.data?.connectionId || `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+          this.ensureWsData(ws, options?.userId)
+          existingRemote.connections.set(connId, ws)
+
+          sendImmediate(ws, JSON.stringify({
+            type: 'STATE_UPDATE',
+            componentId: existingRemote.componentId,
+            payload: { state: existingRemote.lastState },
+            timestamp: Date.now()
+          }))
+
+          return { componentId: existingRemote.componentId, initialState: existingRemote.lastState, signedState: null }
+        }
+
+        // Cluster: try to claim singleton ownership with pre-generated ID (no race window)
+        if (this.cluster) {
+          clusterSingletonId = `live-${crypto.randomUUID()}`
+          const claimed = await this.cluster.claimSingleton(componentName, clusterSingletonId)
+          if (!claimed) {
+            clusterSingletonId = null
+            // Another server owns this singleton — create remote proxy
+            const owner = await this.cluster.getSingletonOwner(componentName)
+            if (owner) {
+              const stored = await this.cluster.loadState(owner.componentId)
+              const connId = ws.data?.connectionId || `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+              this.ensureWsData(ws, options?.userId)
+
+              const remote: RemoteSingletonEntry = {
+                componentName,
+                componentId: owner.componentId,
+                ownerInstanceId: owner.instanceId,
+                lastState: stored?.state || {},
+                connections: new Map([[connId, ws]])
+              }
+              this.remoteSingletons.set(componentName, remote)
+
+              sendImmediate(ws, JSON.stringify({
+                type: 'STATE_UPDATE',
+                componentId: owner.componentId,
+                payload: { state: remote.lastState },
+                timestamp: Date.now()
+              }))
+
+              return { componentId: owner.componentId, initialState: remote.lastState, signedState: null }
+            }
+          }
+
+          // Failover recovery: load previous singleton state from Redis (survives owner crash)
+          const recoveredState = await this.cluster.loadSingletonState(componentName)
+          if (recoveredState) {
+            initialState = { ...initialState, ...recoveredState }
+          }
+        }
       }
 
       // Create component
       const component = new ComponentClass({ ...initialState, ...props }, ws, options)
       component.setAuthContext(authContext)
+
+      // Cluster singleton: replace auto-generated ID with the one used for the atomic claim
+      if (clusterSingletonId) {
+        ;(component as any).id = clusterSingletonId
+      }
+
       component.broadcastToRoom = (message: BroadcastMessage) => {
         this.broadcastToRoom(message, component.id)
       }
@@ -245,6 +398,12 @@ export class ComponentRegistry {
         connections.set(connId, ws)
         this.singletons.set(componentName, { instance: component, connections })
 
+        // Cluster: save initial state (claim already established with correct ID)
+        if (this.cluster) {
+          this.cluster.saveState(component.id, componentName, component.getSerializableState()).catch(() => {})
+          this.cluster.saveSingletonState(componentName, component.getSerializableState()).catch(() => {})
+        }
+
         ;(component as any)[EMIT_OVERRIDE_KEY] = (type: string, payload: any) => {
           const message: LiveMessage = {
             type: type as any,
@@ -262,6 +421,13 @@ export class ComponentRegistry {
               try { cWs.send(serialized) } catch { dead.push(cId) }
             }
             for (const cId of dead) singleton.connections.delete(cId)
+          }
+
+          // Cluster: publish delta and save state for remote instances
+          if (this.cluster && type === 'STATE_DELTA' && payload?.delta) {
+            this.cluster.publishDelta(component.id, componentName, payload.delta).catch(() => {})
+            this.cluster.saveState(component.id, componentName, component.getSerializableState()).catch(() => {})
+            this.cluster.saveSingletonState(componentName, component.getSerializableState()).catch(() => {})
           }
         }
 
@@ -316,7 +482,7 @@ export class ComponentRegistry {
     options?: { room?: string; userId?: string }
   ): Promise<{ success: boolean; newComponentId?: string; error?: string }> {
     try {
-      const validation = this.stateSignature.validateState(signedState)
+      const validation = this.stateSignature.validateState(signedState, { skipNonce: true })
       if (!validation.valid) return { success: false, error: validation.error || 'Invalid state signature' }
 
       const definition = this.definitions.get(componentName)
@@ -404,6 +570,7 @@ export class ComponentRegistry {
   }
 
   private removeSingletonConnection(componentId: string, connId?: string, context = 'unmount'): boolean {
+    // Check local singletons
     for (const [name, singleton] of this.singletons) {
       if (singleton.instance.id !== componentId) continue
       if (connId) singleton.connections.delete(connId)
@@ -411,15 +578,38 @@ export class ComponentRegistry {
         try { (singleton.instance as any).onDisconnect() } catch { /* ignore */ }
         this.cleanupComponent(componentId)
         this.singletons.delete(name)
+        // Release cluster singleton claim
+        if (this.cluster) {
+          this.cluster.releaseSingleton(name).catch(() => {})
+          this.cluster.deleteState(componentId).catch(() => {})
+        }
       }
       return true
     }
+
+    // Check remote singletons
+    for (const [name, remote] of this.remoteSingletons) {
+      if (remote.componentId !== componentId) continue
+      if (connId) remote.connections.delete(connId)
+      if (remote.connections.size === 0) {
+        this.remoteSingletons.delete(name)
+      }
+      return true
+    }
+
     return false
   }
 
   unmountComponent(componentId: string, ws?: GenericWebSocket) {
     const component = this.components.get(componentId)
-    if (!component) return
+    if (!component) {
+      // May be a remote singleton — try to remove the connection
+      if (ws) {
+        const connId = ws.data?.connectionId
+        this.removeSingletonConnection(componentId, connId, 'unmount')
+      }
+      return
+    }
 
     if (ws) {
       const connId = ws.data?.connectionId
@@ -447,6 +637,14 @@ export class ComponentRegistry {
   private getSingletonName(componentId: string): string | null {
     for (const [name, s] of this.singletons) {
       if (s.instance.id === componentId) return name
+    }
+    return null
+  }
+
+  /** Find a remote singleton entry by componentId. */
+  private findRemoteSingleton(componentId: string): RemoteSingletonEntry | null {
+    for (const [, entry] of this.remoteSingletons) {
+      if (entry.componentId === componentId) return entry
     }
     return null
   }
@@ -532,7 +730,26 @@ export class ComponentRegistry {
           this.unmountComponent(message.componentId, ws)
           return { success: true }
 
-        case 'CALL_ACTION':
+        case 'CALL_ACTION': {
+          // Check if this action targets a remote singleton (owned by another server)
+          const remoteSingleton = this.findRemoteSingleton(message.componentId)
+          if (remoteSingleton && this.cluster) {
+            const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+            const request: ClusterActionRequest = {
+              sourceInstanceId: this.cluster.instanceId,
+              targetInstanceId: remoteSingleton.ownerInstanceId,
+              componentId: remoteSingleton.componentId,
+              componentName: remoteSingleton.componentName,
+              action: message.action!,
+              payload: message.payload,
+              requestId
+            }
+            const response = await this.cluster.forwardAction(request)
+            if (!response.success) throw new Error(response.error || 'Remote action failed')
+            if (message.expectResponse) return { success: true, result: response.result }
+            return null
+          }
+
           this.recordComponentMetrics(message.componentId, undefined, message.action)
           const actionStart = Date.now()
           try {
@@ -544,6 +761,7 @@ export class ComponentRegistry {
             this.performanceMonitor.recordActionTime(message.componentId, message.action!, Date.now() - actionStart, error)
             throw error
           }
+        }
 
         case 'PROPERTY_UPDATE':
           this.updateProperty(message.componentId, message.property!, message.payload.value)
@@ -574,6 +792,16 @@ export class ComponentRegistry {
       }
     }
 
+    // Also clean up any remote singleton connections for this ws
+    if (connId) {
+      for (const [name, remote] of this.remoteSingletons) {
+        remote.connections.delete(connId)
+        if (remote.connections.size === 0) {
+          this.remoteSingletons.delete(name)
+        }
+      }
+    }
+
     ws.data.components.clear()
   }
 
@@ -585,6 +813,9 @@ export class ComponentRegistry {
       connections: this.wsConnections.size,
       singletons: Object.fromEntries(
         Array.from(this.singletons.entries()).map(([name, s]) => [name, { componentId: s.instance.id, connections: s.connections.size }])
+      ),
+      remoteSingletons: Object.fromEntries(
+        Array.from(this.remoteSingletons.entries()).map(([name, r]) => [name, { componentId: r.componentId, ownerInstanceId: r.ownerInstanceId, connections: r.connections.size }])
       ),
       roomDetails: Object.fromEntries(
         Array.from(this.rooms.entries()).map(([roomId, components]) => [roomId, components.size])
@@ -672,6 +903,7 @@ export class ComponentRegistry {
   cleanup(): void {
     if (this.healthCheckInterval) clearInterval(this.healthCheckInterval)
     this.singletons.clear()
+    this.remoteSingletons.clear()
     for (const [componentId] of this.components) this.cleanupComponent(componentId)
   }
 }

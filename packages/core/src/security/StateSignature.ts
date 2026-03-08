@@ -2,7 +2,7 @@
 //
 // Cryptographic state signing for secure client-side persistence.
 // Supports: key rotation, compression (gzip), encryption (AES-256-CBC),
-// anti-replay nonces, state backups, and state migrations.
+// hybrid anti-replay nonces (stateless HMAC + replay detection), state backups, and state migrations.
 
 import { createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto'
 import { gzipSync, gunzipSync } from 'zlib'
@@ -30,16 +30,16 @@ export interface StateSignatureConfig {
   compressionEnabled?: boolean
   /** Enable encryption */
   encryptionEnabled?: boolean
-  /** Enable anti-replay nonces */
+  /** Enable anti-replay nonces (hybrid: stateless HMAC + replay detection) */
   nonceEnabled?: boolean
-  /** Maximum state age in ms */
+  /** Maximum state age in ms. Default: 1800000 (30 minutes) */
   maxStateAge?: number
   /** Enable state backups */
   backupEnabled?: boolean
   /** Max state backups to keep */
   maxBackups?: number
-  /** Maximum number of tracked nonces. When exceeded, new requests are rejected (backpressure). Default: 500000 */
-  maxNonces?: number
+  /** Nonce TTL in ms. Nonces older than this are rejected. Default: 10000 (10 seconds) */
+  nonceTTL?: number
 }
 
 interface StateBackup {
@@ -51,12 +51,13 @@ export class StateSignatureManager {
   private secret: Buffer
   private previousSecrets: Buffer[] = []
   private rotationTimer?: ReturnType<typeof setInterval>
-  private usedNonces = new Map<string, number>()
-  private nonceCleanupTimer?: ReturnType<typeof setInterval>
   private stateBackups = new Map<string, StateBackup[]>()
   private config: Required<StateSignatureConfig>
   private encryptionSalt: Buffer
   private cachedEncryptionKey: Buffer | null = null
+  /** Replay detection: nonce → timestamp when it was first seen. Cleaned every 60s. */
+  private usedNonces = new Map<string, number>()
+  private nonceCleanupTimer?: ReturnType<typeof setInterval>
 
   constructor(config: StateSignatureConfig = {}) {
     const defaultSecret = typeof process !== 'undefined'
@@ -70,10 +71,10 @@ export class StateSignatureManager {
       compressionEnabled: config.compressionEnabled ?? true,
       encryptionEnabled: config.encryptionEnabled ?? false,
       nonceEnabled: config.nonceEnabled ?? false,
-      maxStateAge: config.maxStateAge ?? 7 * 24 * 60 * 60 * 1000,
+      maxStateAge: config.maxStateAge ?? 30 * 60 * 1000,
       backupEnabled: config.backupEnabled ?? true,
       maxBackups: config.maxBackups ?? 3,
-      maxNonces: config.maxNonces ?? 500000,
+      nonceTTL: config.nonceTTL ?? 5 * 60 * 1000,
     }
 
     // Generate random secret if none provided
@@ -90,8 +91,59 @@ export class StateSignatureManager {
     }
 
     if (this.config.nonceEnabled) {
-      this.nonceCleanupTimer = setInterval(() => this.cleanupNonces(), 60 * 60 * 1000)
+      this.nonceCleanupTimer = setInterval(() => this.cleanupNonces(), this.config.nonceTTL + 10 * 1000)
     }
+  }
+
+  /**
+   * Generate a hybrid nonce: `timestamp:random:HMAC(timestamp:random, secret)`
+   * Self-validating via HMAC, unique via random bytes, replay-tracked via Map.
+   */
+  private generateNonce(): string {
+    const ts = Date.now().toString()
+    const rand = randomBytes(8).toString('hex')
+    const payload = `${ts}:${rand}`
+    const mac = createHmac('sha256', this.secret).update(payload).digest('hex').slice(0, 16)
+    return `${ts}:${rand}:${mac}`
+  }
+
+  /**
+   * Validate a hybrid nonce: check format, HMAC, and TTL.
+   */
+  private validateNonce(nonce: string): { valid: boolean; error?: string } {
+    const parts = nonce.split(':')
+    if (parts.length !== 3) return { valid: false, error: 'Malformed nonce' }
+
+    const [ts, rand, mac] = parts
+    const timestamp = Number(ts)
+
+    if (isNaN(timestamp)) return { valid: false, error: 'Malformed nonce timestamp' }
+
+    // Check TTL
+    const age = Date.now() - timestamp
+    if (age > this.config.nonceTTL) {
+      return { valid: false, error: 'Nonce expired' }
+    }
+    if (age < -30000) {
+      // Nonce from the future (>30s clock skew) — reject
+      return { valid: false, error: 'Nonce timestamp in the future' }
+    }
+
+    // Verify HMAC — try current key first, then previous keys (rotation)
+    const payload = `${ts}:${rand}`
+    const expectedMac = createHmac('sha256', this.secret).update(payload).digest('hex').slice(0, 16)
+    if (this.timingSafeEqual(mac, expectedMac)) {
+      return { valid: true }
+    }
+
+    for (const prevSecret of this.previousSecrets) {
+      const prevMac = createHmac('sha256', prevSecret).update(payload).digest('hex').slice(0, 16)
+      if (this.timingSafeEqual(mac, prevMac)) {
+        return { valid: true }
+      }
+    }
+
+    return { valid: false, error: 'Invalid nonce signature' }
   }
 
   signState(
@@ -125,8 +177,8 @@ export class StateSignatureManager {
       encrypted = true
     }
 
-    // Nonce
-    const nonce = this.config.nonceEnabled ? randomBytes(16).toString('hex') : undefined
+    // Stateless nonce
+    const nonce = this.config.nonceEnabled ? this.generateNonce() : undefined
 
     const signedState: SignedState = {
       data: dataStr,
@@ -149,7 +201,7 @@ export class StateSignatureManager {
     return signedState
   }
 
-  validateState(signedState: SignedState): { valid: boolean; error?: string } {
+  validateState(signedState: SignedState, options?: { skipNonce?: boolean }): { valid: boolean; error?: string } {
     try {
       // Check max age
       const age = Date.now() - signedState.timestamp
@@ -157,21 +209,25 @@ export class StateSignatureManager {
         return { valid: false, error: 'State expired' }
       }
 
-      // Check nonce
-      if (signedState.nonce && this.config.nonceEnabled) {
-        if (this.usedNonces.has(signedState.nonce)) {
-          return { valid: false, error: 'Nonce already used (replay attempt)' }
+      // Check stateless nonce (HMAC + TTL) — skipped for rehydration
+      if (signedState.nonce && this.config.nonceEnabled && !options?.skipNonce) {
+        const nonceResult = this.validateNonce(signedState.nonce)
+        if (!nonceResult.valid) {
+          return { valid: false, error: nonceResult.error }
         }
-        // Backpressure: reject new requests when nonce storage is full
-        if (this.usedNonces.size >= this.config.maxNonces) {
-          return { valid: false, error: 'Nonce storage full - too many concurrent states (backpressure)' }
+
+        // Replay detection: reject if nonce was already used
+        if (this.usedNonces.has(signedState.nonce)) {
+          return { valid: false, error: 'Nonce already used' }
         }
       }
 
       // Verify signature with current key
       const expectedSig = this.computeSignature(signedState)
       if (this.timingSafeEqual(signedState.signature, expectedSig)) {
-        if (signedState.nonce) this.usedNonces.set(signedState.nonce, Date.now())
+        if (signedState.nonce && this.config.nonceEnabled) {
+          this.usedNonces.set(signedState.nonce, Date.now())
+        }
         return { valid: true }
       }
 
@@ -179,7 +235,9 @@ export class StateSignatureManager {
       for (const prevSecret of this.previousSecrets) {
         const prevSig = this.computeSignatureWithKey(signedState, prevSecret)
         if (this.timingSafeEqual(signedState.signature, prevSig)) {
-          if (signedState.nonce) this.usedNonces.set(signedState.nonce, Date.now())
+          if (signedState.nonce && this.config.nonceEnabled) {
+            this.usedNonces.set(signedState.nonce, Date.now())
+          }
           return { valid: true }
         }
       }
@@ -270,17 +328,16 @@ export class StateSignatureManager {
         this.previousSecrets.pop()
       }
       this.secret = randomBytes(32)
+      this.cachedEncryptionKey = null
       liveLog('state', null, 'Key rotation completed')
     }, this.config.rotationInterval)
   }
 
+  /** Remove nonces older than nonceTTL + 10s from the replay detection map. */
   private cleanupNonces(): void {
-    // Incremental cleanup: remove only nonces older than maxStateAge
-    const now = Date.now()
-    for (const [nonce, timestamp] of this.usedNonces) {
-      if (now - timestamp > this.config.maxStateAge) {
-        this.usedNonces.delete(nonce)
-      }
+    const cutoff = Date.now() - (this.config.nonceTTL + 10 * 1000)
+    for (const [nonce, ts] of this.usedNonces) {
+      if (ts < cutoff) this.usedNonces.delete(nonce)
     }
   }
 

@@ -9,6 +9,7 @@
 // Pre-serialized messages (from room broadcasts) bypass JSON.stringify entirely.
 
 import type { GenericWebSocket } from './types'
+import { MAX_QUEUE_SIZE } from '../protocol/constants'
 
 interface PendingMessage {
   type: string
@@ -56,6 +57,11 @@ export function queueWsMessage(ws: GenericWebSocket, message: PendingMessage): v
     wsQueues.set(ws, queue)
   }
 
+  // Backpressure: drop oldest messages when queue is full
+  if (queue.length >= MAX_QUEUE_SIZE) {
+    queue.shift()
+  }
+
   queue.push(message)
   scheduleWs(ws)
 }
@@ -72,6 +78,11 @@ export function queuePreSerialized(ws: GenericWebSocket, serialized: string): vo
   if (!queue) {
     queue = []
     wsQueues.set(ws, queue)
+  }
+
+  // Backpressure: drop oldest messages when queue is full
+  if (queue.length >= MAX_QUEUE_SIZE) {
+    queue.shift()
   }
 
   queue.push(serialized)

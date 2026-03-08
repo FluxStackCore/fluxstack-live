@@ -1,0 +1,2056 @@
+# @fluxstack/live — Complete API Reference
+
+> Real-time server-client state synchronization framework for TypeScript.
+> Server components with reactive state, actions, rooms, auth, file uploads, and binary deltas.
+
+---
+
+## Table of Contents
+
+1. [Architecture Overview](#architecture-overview)
+2. [Package Structure](#package-structure)
+3. [@fluxstack/live (Core)](#core-package)
+   - [LiveServer](#liveserver)
+   - [LiveComponent](#livecomponent)
+   - [Component Registry](#component-registry)
+   - [Protocol & Messages](#protocol--messages)
+   - [Transport Layer](#transport-layer)
+   - [Room System](#room-system)
+   - [Auth System](#auth-system)
+   - [Security](#security)
+   - [Connection Management](#connection-management)
+   - [File Upload](#file-upload)
+   - [Debug & Logging](#debug--logging)
+   - [Performance Monitoring](#performance-monitoring)
+   - [Build Plugin](#build-plugin)
+   - [Type Utilities](#type-utilities)
+4. [@fluxstack/live-client (Browser Client)](#client-package)
+   - [LiveConnection](#liveconnection)
+   - [LiveComponentHandle](#livecomponenthandle)
+   - [useLive (Vanilla JS)](#uselive-vanilla-js)
+   - [RoomManager (Client)](#roommanager-client)
+   - [File Upload (Client)](#file-upload-client)
+   - [State Persistence](#state-persistence)
+   - [State Validator](#state-validator)
+5. [@fluxstack/live-react (React Bindings)](#react-package)
+   - [LiveComponentsProvider](#livecomponentsprovider)
+   - [Live.use()](#liveuse)
+   - [useLiveComponent](#uselivecomponent)
+   - [useChunkedUpload](#usechunkedupload)
+   - [useLiveDebugger](#uselivedebugger)
+6. [@fluxstack/live-elysia (Elysia Adapter)](#elysia-adapter)
+7. [@fluxstack/live-express (Express Adapter)](#express-adapter)
+8. [@fluxstack/live-fastify (Fastify Adapter)](#fastify-adapter)
+9. [@fluxstack/live-redis (Redis Adapter)](#redis-adapter)
+10. [Usage Examples](#usage-examples)
+
+---
+
+## Architecture Overview
+
+```
+Browser                          Server
+┌──────────────────┐             ┌─────────────────────────────────┐
+│ @fluxstack/       │  WebSocket  │ @fluxstack/live                  │
+│   live-react      │◄───────────►│   LiveServer                     │
+│   Live.use()      │  JSON/Binary│     ├─ ComponentRegistry         │
+│   useLiveComponent│             │     ├─ LiveRoomManager           │
+│                   │             │     ├─ LiveAuthManager            │
+│ @fluxstack/       │             │     ├─ StateSignatureManager      │
+│   live-client     │             │     ├─ PerformanceMonitor         │
+│   LiveConnection  │             │     └─ FileUploadManager          │
+│   LiveComponentHandle          │                                    │
+│   RoomManager     │             │ Transport Adapters:               │
+└──────────────────┘             │   @fluxstack/live-elysia           │
+                                 │   @fluxstack/live-express          │
+                                 │   @fluxstack/live-fastify          │
+                                 │                                    │
+                                 │ Optional:                          │
+                                 │   @fluxstack/live-redis            │
+                                 └─────────────────────────────────┘
+```
+
+**Data flow:**
+1. Client calls `Live.use(Counter)` — sends `COMPONENT_MOUNT` message via WebSocket
+2. Server instantiates `Counter` LiveComponent, returns initial state + signed state
+3. Client receives state, renders UI
+4. Client calls `counter.$call('increment')` — sends `CALL_ACTION` message
+5. Server executes action, calls `this.setState()` — sends `STATE_DELTA` to all connected clients
+6. Client receives delta, merges into state, React re-renders
+
+---
+
+## Package Structure
+
+```
+fluxstack-live/
+├── packages/
+│   ├── core/          # @fluxstack/live — server framework
+│   │   └── src/
+│   │       ├── server/          LiveServer.ts
+│   │       ├── component/       LiveComponent.ts, ComponentRegistry.ts, context.ts, types.ts
+│   │       │   └── managers/    ComponentMessaging, ComponentStateManager,
+│   │       │                    ActionSecurityManager, ComponentRoomProxy
+│   │       ├── protocol/        messages.ts, constants.ts, binary.ts
+│   │       ├── transport/       types.ts, WsSendBatcher.ts
+│   │       ├── rooms/           RoomEventBus.ts, RoomStateManager.ts,
+│   │       │                    LiveRoomManager.ts, adapters.ts, InMemoryRoomAdapter.ts
+│   │       ├── auth/            types.ts, LiveAuthManager.ts, LiveAuthContext.ts
+│   │       ├── security/        StateSignature.ts, sanitize.ts
+│   │       ├── connection/      WebSocketConnectionManager.ts, RateLimiter.ts
+│   │       ├── upload/          FileUploadManager.ts
+│   │       ├── debug/           LiveDebugger.ts, LiveLogger.ts
+│   │       ├── monitoring/      PerformanceMonitor.ts
+│   │       └── build/           index.ts (Vite plugin)
+│   ├── client/        # @fluxstack/live-client — browser client
+│   │   └── src/       connection.ts, component.ts, rooms.ts, upload.ts,
+│   │                  persistence.ts, state-validator.ts, index.ts
+│   ├── react/         # @fluxstack/live-react — React hooks
+│   │   └── src/
+│   │       ├── hooks/           useLiveComponent.ts, useChunkedUpload.ts,
+│   │       │                    useLiveChunkedUpload.ts, useLiveDebugger.ts
+│   │       ├── components/      Live.tsx
+│   │       └── LiveComponentsProvider.tsx
+│   ├── elysia/        # @fluxstack/live-elysia
+│   ├── express/       # @fluxstack/live-express
+│   ├── fastify/       # @fluxstack/live-fastify
+│   └── redis/         # @fluxstack/live-redis
+```
+
+---
+
+## Core Package
+
+### LiveServer
+
+Main entry point. Orchestrates all subsystems and handles WebSocket lifecycle.
+
+```typescript
+import { LiveServer } from '@fluxstack/live'
+
+interface LiveServerOptions {
+  /** Transport adapter (Elysia, Express, Fastify) */
+  transport: LiveTransport
+  /** WebSocket endpoint path. Default: '/api/live/ws' */
+  wsPath?: string
+  /** Enable debug mode. Default: false */
+  debug?: boolean
+  /** State signature configuration */
+  stateSignature?: StateSignatureConfig
+  /** Performance monitor configuration */
+  performance?: PerformanceConfig
+  /** File upload configuration */
+  fileUpload?: FileUploadConfig
+  /** Connection manager configuration */
+  connection?: Partial<ConnectionConfig>
+  /** Rate limiter: max tokens per connection */
+  rateLimitMaxTokens?: number
+  /** Rate limiter: tokens refilled per second */
+  rateLimitRefillRate?: number
+  /** Components path for auto-discovery */
+  componentsPath?: string
+  /** HTTP monitoring routes prefix. Set to false to disable. Default: '/api/live' */
+  httpPrefix?: string | false
+  /** Allowed origins for CSRF protection.
+   *  When set, connections from unlisted origins are rejected.
+   *  Example: ['https://myapp.com', 'http://localhost:3000'] */
+  allowedOrigins?: string[]
+  /** Cross-instance pub/sub adapter for horizontal scaling (e.g. Redis).
+   *  Without this, rooms are local to the current instance. */
+  roomPubSub?: IRoomPubSubAdapter
+}
+
+class LiveServer {
+  // Public subsystem singletons
+  readonly roomEvents: RoomEventBus
+  readonly roomManager: LiveRoomManager
+  readonly debugger: LiveDebugger
+  readonly authManager: LiveAuthManager
+  readonly stateSignature: StateSignatureManager
+  readonly performanceMonitor: PerformanceMonitor
+  readonly fileUploadManager: FileUploadManager
+  readonly connectionManager: WebSocketConnectionManager
+  readonly registry: ComponentRegistry
+  readonly rateLimiter: RateLimiterRegistry
+
+  constructor(options: LiveServerOptions)
+
+  /** Register an auth provider */
+  useAuth(provider: LiveAuthProvider): this
+
+  /** Start: register WS + HTTP handlers on the transport */
+  async start(): Promise<void>
+
+  /** Graceful shutdown */
+  async shutdown(): Promise<void>
+}
+```
+
+**HTTP monitoring routes** (when `httpPrefix` is not `false`):
+- `GET /api/live/stats` — system statistics (components, rooms, connections, uploads, performance)
+- `GET /api/live/components` — list registered component names
+- `POST /api/live/rooms/:roomId/messages` — send message to room via HTTP
+- `POST /api/live/rooms/:roomId/emit` — emit custom event to room via HTTP
+
+---
+
+### LiveComponent
+
+Abstract base class for all server-side live components.
+
+```typescript
+import { LiveComponent } from '@fluxstack/live'
+
+abstract class LiveComponent<
+  TState = ComponentState,
+  TPrivate extends Record<string, any> = Record<string, any>
+> {
+  // ===== Static Configuration =====
+
+  /** Unique component name used for client-server mapping */
+  static componentName: string
+  /** Default initial state for new instances */
+  static defaultState: any
+  /** List of action methods callable from the client */
+  static publicActions?: readonly string[]
+  /** Component-level auth requirements */
+  static auth?: LiveComponentAuth
+  /** Per-action auth requirements */
+  static actionAuth?: LiveActionAuthMap
+  /** Zod schemas for action payload validation */
+  static actionSchemas?: Record<string, { safeParse: (data: unknown) => { success: boolean; error?: any; data?: any } }>
+  /** Rate limiting for actions */
+  static actionRateLimit?: { maxCalls: number; windowMs: number; perAction?: boolean }
+  /** Persistent state configuration (survives reconnects) */
+  static persistent?: Record<string, any>
+  /** Singleton mode — only one instance per component name */
+  static singleton?: boolean
+  /** Logging configuration */
+  static logging?: boolean | readonly ('lifecycle' | 'messages' | 'state' | 'performance' | 'rooms' | 'websocket')[]
+
+  // ===== Instance Properties =====
+
+  /** Unique instance ID (auto-generated) */
+  readonly id: string
+  /** Reactive state — changes are automatically synced to clients */
+  state: TState
+  /** WebSocket connection */
+  protected ws: GenericWebSocket
+  /** Room this component belongs to */
+  room?: string
+  /** User ID associated with this component */
+  userId?: string
+  /** Function to broadcast to room members */
+  broadcastToRoom: (message: BroadcastMessage) => void
+
+  constructor(initialState: Partial<TState>, ws: GenericWebSocket, options?: { room?: string; userId?: string })
+
+  // ===== Properties =====
+
+  /** Server-only private state (never sent to clients) */
+  get $private(): TPrivate
+
+  /** Room proxy — access rooms: this.$room.join(), this.$room.emit(), this.$room('roomId') */
+  get $room(): ServerRoomProxy
+
+  /** List of rooms this component has joined */
+  get $rooms(): string[]
+
+  /** Auth context for the current user */
+  get $auth(): LiveAuthContext
+
+  /** Persistent state (survives reconnects) */
+  get $persistent(): Record<string, any>
+
+  // ===== Lifecycle Hooks =====
+
+  /** Called when WebSocket connection opens */
+  protected onConnect(): void
+
+  /** Called after component is mounted. Can be async. */
+  protected onMount(): void | Promise<void>
+
+  /** Called when WebSocket connection closes */
+  protected onDisconnect(): void
+
+  /** Called when component is destroyed */
+  protected onDestroy(): void
+
+  /** Called after state changes */
+  protected onStateChange(changes: Partial<TState>): void
+
+  /** Called when component joins a room */
+  protected onRoomJoin(roomId: string): void
+
+  /** Called when component leaves a room */
+  protected onRoomLeave(roomId: string): void
+
+  /** Called during rehydration (reconnect with signed state) */
+  protected onRehydrate(previousState: TState): void
+
+  /** Called before an action executes. Return false to block it. */
+  protected onAction(action: string, payload: any): void | false | Promise<void | false>
+
+  /** Called when another client joins a singleton component */
+  protected onClientJoin(connectionId: string, connectionCount: number): void
+
+  /** Called when a client leaves a singleton component */
+  protected onClientLeave(connectionId: string, connectionCount: number): void
+
+  // ===== State Management =====
+
+  /** Update state and push delta to all connected clients */
+  setState(updates: Partial<TState> | ((prev: TState) => Partial<TState>)): void
+
+  /** Send binary state delta for high-frequency updates (games, real-time viz) */
+  sendBinaryDelta(delta: Partial<TState>, encoder: (delta: Partial<TState>) => Uint8Array): void
+
+  /** Set a single state value (called by client SET_VALUE messages) */
+  setValue<K extends keyof TState>(payload: { key: K; value: TState[K] }): { success: true; key: K; value: TState[K] }
+
+  /** Execute an action with security validation */
+  async executeAction(action: string, payload: any): Promise<any>
+
+  // ===== Messaging =====
+
+  /** Emit message to this component's client */
+  protected emit(type: string, payload: any): void
+
+  /** Broadcast message to all clients in the same room */
+  protected broadcast(type: string, payload: any, excludeCurrentUser?: boolean): void
+
+  // ===== Room Events =====
+
+  /** Emit event to all members in the current room */
+  protected emitRoomEvent(event: string, data: any, notifySelf?: boolean): number
+
+  /** Listen for room events */
+  protected onRoomEvent<T = any>(event: string, handler: (data: T) => void): void
+
+  /** Emit room event AND update state atomically */
+  protected emitRoomEventWithState(event: string, data: any, stateUpdates: Partial<TState>): number
+
+  /** Subscribe this component to a specific room */
+  protected subscribeToRoom(roomId: string): void
+
+  /** Unsubscribe from the current room */
+  protected unsubscribeFromRoom(): void
+
+  // ===== Cleanup =====
+
+  /** Destroy component and clean up resources */
+  destroy(): void
+
+  /** Get state safe for serialization */
+  getSerializableState(): TState
+
+  /** Set auth context */
+  setAuthContext(context: LiveAuthContext): void
+}
+```
+
+**State direct accessors:** If `defaultState` defines properties, they become directly accessible on the component instance. For example, if `defaultState = { count: 0 }`, then `this.count` is a getter/setter for `this.state.count`. Setting `this.count = 5` automatically calls `setState({ count: 5 })`.
+
+**Reactive proxy state:** `this.state` is a Proxy. Assigning to `this.state.count = 5` inside a method automatically emits a `STATE_DELTA` to clients. Multiple assignments within the same synchronous execution are batched.
+
+---
+
+### Component Registry
+
+Manages component registration, lifecycle, mounting, and message routing.
+
+```typescript
+class ComponentRegistry {
+  constructor(deps: {
+    authManager: LiveAuthManager
+    debugger: LiveDebugger
+    stateSignature: StateSignatureManager
+    performanceMonitor: PerformanceMonitor
+  })
+
+  /** Register a component definition (name + class) */
+  registerComponent<TState>(definition: ComponentDefinition<TState>): void
+
+  /** Register a component class directly */
+  registerComponentClass(
+    name: string,
+    componentClass: new (initialState: any, ws: GenericWebSocket, options?: { room?: string; userId?: string }) => LiveComponent<any>,
+  ): void
+
+  /** Auto-discover components from a directory (scans for files exporting LiveComponent subclasses) */
+  async autoDiscoverComponents(componentsPath: string): Promise<void>
+
+  /** Mount a component: create instance, return initial state + signed state */
+  async mountComponent(
+    ws: GenericWebSocket,
+    componentName: string,
+    props?: Record<string, unknown>,
+    options?: { room?: string; userId?: string; version?: string; debugLabel?: string },
+  ): Promise<{ componentId: string; initialState: unknown; signedState: unknown }>
+
+  /** Rehydrate a component from signed state (reconnection) */
+  async rehydrateComponent(
+    componentId: string,
+    componentName: string,
+    signedState: SignedState,
+    ws: GenericWebSocket,
+    options?: { room?: string; userId?: string },
+  ): Promise<{ success: boolean; newComponentId?: string; error?: string }>
+
+  /** Unmount and destroy a component */
+  unmountComponent(componentId: string, ws?: GenericWebSocket): void
+
+  /** Execute an action on a mounted component */
+  async executeAction(componentId: string, action: string, payload: any): Promise<any>
+
+  /** Handle incoming WebSocket message (routes to appropriate component) */
+  async handleMessage(ws: GenericWebSocket, message: LiveMessage): Promise<{
+    success: boolean; result?: unknown; error?: string
+  } | null>
+
+  /** Clean up all components for a disconnected WebSocket */
+  cleanupConnection(ws: GenericWebSocket): void
+
+  /** Get system statistics */
+  getStats(): {
+    components: number
+    definitions: number
+    rooms: number
+    connections: number
+    singletons: Record<string, any>
+    roomDetails: Record<string, number>
+  }
+
+  /** Get registered component names */
+  getRegisteredComponentNames(): string[]
+
+  /** Get a component instance by ID */
+  getComponent(componentId: string): LiveComponent | undefined
+
+  /** Clean up all components */
+  cleanup(): void
+}
+```
+
+---
+
+### Protocol & Messages
+
+#### Constants
+
+```typescript
+const PROTOCOL_VERSION = 1
+const DEFAULT_WS_PATH = '/api/live/ws'
+const DEFAULT_CHUNK_SIZE = 64 * 1024        // 64 KB
+const MAX_MESSAGE_SIZE = 100 * 1024 * 1024  // 100 MB
+const MAX_ROOM_STATE_SIZE = 10 * 1024 * 1024 // 10 MB
+const MAX_ROOMS_PER_CONNECTION = 50
+const MAX_ROOM_NAME_LENGTH = 64
+const ROOM_NAME_REGEX = /^[a-zA-Z0-9_:.-]{1,64}$/
+const MAX_QUEUE_SIZE = 1000
+const DEFAULT_NONCE_TTL = 5 * 60 * 1000     // 5 minutes
+const DEFAULT_RATE_LIMIT_MAX_TOKENS = 100
+const DEFAULT_RATE_LIMIT_REFILL_RATE = 50
+```
+
+#### Client-to-Server Messages (LiveMessage)
+
+```typescript
+interface LiveMessage {
+  type:
+    | 'COMPONENT_MOUNT'      // Mount a component
+    | 'COMPONENT_UNMOUNT'    // Unmount a component
+    | 'COMPONENT_REHYDRATE'  // Rehydrate from signed state
+    | 'CALL_ACTION'          // Call a server action
+    | 'PROPERTY_UPDATE'      // Update a property
+    | 'STATE_UPDATE'         // Full state update
+    | 'AUTH'                 // Authenticate
+    | 'ROOM_JOIN'            // Join a room
+    | 'ROOM_LEAVE'           // Leave a room
+    | 'ROOM_EMIT'            // Emit event to room
+    | 'ROOM_STATE_SET'       // Update room state
+    | 'ROOM_STATE_GET'       // Get room state
+    | 'FILE_UPLOAD_START'    // Start file upload
+    | 'FILE_UPLOAD_CHUNK'    // Send file chunk
+    | 'FILE_UPLOAD_COMPLETE' // Complete file upload
+    | 'COMPONENT_PING'       // Heartbeat ping
+  componentId: string
+  action?: string
+  property?: string
+  payload?: any
+  timestamp?: number
+  userId?: string
+  room?: string
+  requestId?: string      // For request-response pattern
+  responseId?: string
+  expectResponse?: boolean // Set to false for fire-and-forget
+}
+```
+
+#### Server-to-Client Messages (WebSocketResponse)
+
+```typescript
+interface WebSocketResponse {
+  type:
+    | 'CONNECTION_ESTABLISHED'   // Connection ready
+    | 'MESSAGE_RESPONSE'         // Generic response
+    | 'ACTION_RESPONSE'          // Action result
+    | 'COMPONENT_MOUNTED'        // Mount confirmation
+    | 'COMPONENT_REHYDRATED'     // Rehydration confirmation
+    | 'STATE_UPDATE'             // Full state push
+    | 'STATE_DELTA'              // Partial state push
+    | 'BROADCAST'                // Broadcast to room
+    | 'ERROR'                    // Error message
+    | 'AUTH_RESPONSE'            // Auth result
+    | 'ROOM_EVENT'               // Room event
+    | 'ROOM_STATE'               // Room state update
+    | 'ROOM_SYSTEM'              // Room system event ($sub:join, $sub:leave)
+    | 'ROOM_JOINED'              // Room join confirmation
+    | 'ROOM_LEFT'                // Room leave confirmation
+    | 'FILE_UPLOAD_PROGRESS'     // Upload progress
+    | 'FILE_UPLOAD_COMPLETE'     // Upload complete
+    | 'FILE_UPLOAD_START_RESPONSE' // Upload start confirmation
+    | 'COMPONENT_PONG'           // Heartbeat pong
+  originalType?: string
+  componentId?: string
+  success?: boolean
+  result?: any
+  error?: string
+  requestId?: string
+  timestamp?: number
+  connectionId?: string
+  payload?: any
+  signedState?: any
+}
+```
+
+#### Binary Protocol
+
+For high-frequency state updates (games, real-time data viz):
+
+```typescript
+// BINARY_STATE_DELTA frame format:
+// [0x01] [componentId length: 1 byte] [componentId: N bytes] [payload: remaining bytes]
+
+function encodeBinaryChunk(header: BinaryChunkHeader, data: Buffer | Uint8Array): Buffer
+function decodeBinaryChunk(raw: ArrayBuffer | Uint8Array): { header: BinaryChunkHeader; data: Buffer }
+```
+
+#### WsSendBatcher
+
+Batches and optimizes WebSocket sends:
+
+```typescript
+/** Queue a message to be sent (batched with other messages in the same tick) */
+function queueWsMessage(ws: GenericWebSocket, message: PendingMessage): void
+
+/** Queue a pre-serialized JSON string */
+function queuePreSerialized(ws: GenericWebSocket, serialized: string): void
+
+/** Send immediately without batching (for responses) */
+function sendImmediate(ws: GenericWebSocket, data: string): void
+```
+
+---
+
+### Transport Layer
+
+Transport adapters implement this interface to bridge different web frameworks:
+
+```typescript
+interface LiveTransport {
+  /** Register WebSocket handler */
+  registerWebSocket(config: WebSocketConfig): void | Promise<void>
+  /** Register HTTP routes */
+  registerHttpRoutes(routes: HttpRouteDefinition[]): void | Promise<void>
+  /** Optional startup hook */
+  start?(): void | Promise<void>
+  /** Optional shutdown hook */
+  shutdown?(): void | Promise<void>
+}
+
+interface WebSocketConfig {
+  path: string
+  onOpen(ws: GenericWebSocket): void | Promise<void>
+  onMessage(ws: GenericWebSocket, message: unknown, isBinary: boolean): void | Promise<void>
+  onClose(ws: GenericWebSocket, code: number, reason: string): void | Promise<void>
+  onError?(ws: GenericWebSocket, error: Error): void
+}
+
+interface GenericWebSocket {
+  send(data: string | ArrayBuffer | Uint8Array, compress?: boolean): void | number
+  close(code?: number, reason?: string): void
+  data: LiveWSData
+  readonly remoteAddress: string
+  readonly readyState: 0 | 1 | 2 | 3
+}
+
+interface LiveWSData {
+  connectionId: string
+  components: Map<string, any>
+  subscriptions: Set<string>
+  connectedAt: Date
+  userId?: string
+  authContext?: LiveAuthContext
+  rooms?: Set<string>
+  origin?: string
+}
+
+interface HttpRouteDefinition {
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE'
+  path: string
+  handler: (request: HttpRequest) => HttpResponse | Promise<HttpResponse>
+  metadata?: { summary?: string; description?: string; tags?: string[] }
+}
+
+interface HttpRequest {
+  params: Record<string, string>
+  query: Record<string, string | undefined>
+  body: unknown
+  headers: Record<string, string | undefined>
+}
+
+interface HttpResponse {
+  status?: number
+  body: unknown
+  headers?: Record<string, string>
+}
+```
+
+---
+
+### Room System
+
+#### RoomEventBus
+
+Server-side pub/sub event bus for room events:
+
+```typescript
+class RoomEventBus {
+  /** Subscribe to events on a room */
+  on(roomType: string, roomId: string, event: string, componentId: string, handler: EventHandler): () => void
+
+  /** Emit event to all subscribers in a room */
+  emit(roomType: string, roomId: string, event: string, data: any, excludeComponentId?: string): number
+
+  /** Unsubscribe all handlers for a component */
+  unsubscribeAll(componentId: string): number
+
+  /** Clear all handlers for a room */
+  clearRoom(roomType: string, roomId: string): number
+
+  /** Get subscription statistics */
+  getStats(): { totalSubscriptions: number; rooms: Record<string, { events: Record<string, number> }> }
+}
+
+/** Create a typed event bus for compile-time safety */
+function createTypedRoomEventBus<TRoomEvents extends Record<string, Record<string, any>>>(): TypedRoomEventBus
+```
+
+#### RoomStateManager
+
+Server-side room state storage:
+
+```typescript
+class RoomStateManager {
+  get<T extends RoomStateData>(roomId: string, defaultState?: T): T
+  update<T extends RoomStateData>(roomId: string, updates: Partial<T>): T
+  set<T extends RoomStateData>(roomId: string, state: T): void
+  join(roomId: string): void
+  leave(roomId: string): void
+  has(roomId: string): boolean
+  delete(roomId: string): boolean
+  getStats(): { totalRooms: number; rooms: Record<string, { componentCount: number; stateKeys: string[] }> }
+}
+
+/** Create a typed room state manager */
+function createTypedRoomState<TRoomTypes extends Record<string, RoomStateData>>(): TypedRoomStateManager
+```
+
+#### LiveRoomManager
+
+High-level room manager used by LiveServer. Manages room membership, state, and WebSocket broadcasting:
+
+```typescript
+class LiveRoomManager {
+  constructor(roomEvents: RoomEventBus, pubsub?: IRoomPubSubAdapter)
+
+  /** Component joins a room. Creates room if it doesn't exist. */
+  joinRoom<TState = any>(componentId: string, roomId: string, ws: GenericWebSocket, initialState?: TState): { state: TState }
+
+  /** Component leaves a room. Empty rooms are cleaned up after 5 minutes. */
+  leaveRoom(componentId: string, roomId: string): void
+
+  /** Component disconnects — leave all rooms with batched notifications. */
+  cleanupComponent(componentId: string): void
+
+  /** Emit event to all room members via WebSocket + RoomEventBus + pub/sub */
+  emitToRoom(roomId: string, event: string, data: any, excludeComponentId?: string): number
+
+  /** Update room state (merge). Broadcasts to members. Enforces MAX_ROOM_STATE_SIZE. */
+  setRoomState(roomId: string, updates: any, excludeComponentId?: string): void
+
+  /** Get room state */
+  getRoomState<TState = any>(roomId: string): TState
+
+  /** Check if component is in a room */
+  isInRoom(componentId: string, roomId: string): boolean
+
+  /** Get list of rooms for a component */
+  getComponentRooms(componentId: string): string[]
+
+  /** Get room statistics */
+  getStats(): { totalRooms: number; rooms: Record<string, { members: number; createdAt: number; lastActivity: number }> }
+}
+```
+
+#### Room Adapters
+
+Pluggable interfaces for room storage and cross-instance pub/sub:
+
+```typescript
+/** Adapter for room state storage */
+interface IRoomStorageAdapter {
+  getOrCreateRoom(roomId: string, initialState?: any): Promise<{ state: any; created: boolean }>
+  getState(roomId: string): Promise<any>
+  updateState(roomId: string, updates: any): Promise<void>
+  hasRoom(roomId: string): Promise<boolean>
+  deleteRoom(roomId: string): Promise<boolean>
+  getStats(): Promise<{ totalRooms: number; rooms: Record<string, any> }>
+}
+
+/** Adapter for cross-instance pub/sub (horizontal scaling) */
+interface IRoomPubSubAdapter {
+  publish(roomId: string, event: string, data: any): Promise<void>
+  subscribe(roomId: string, handler: (event: string, data: any) => void): Promise<() => void>
+  publishMembership(roomId: string, action: 'join' | 'leave', componentId: string): Promise<void>
+  publishStateChange(roomId: string, updates: any): Promise<void>
+}
+
+/** Default in-memory adapter (single-instance, no external dependencies) */
+class InMemoryRoomAdapter implements IRoomStorageAdapter, IRoomPubSubAdapter {
+  // All pub/sub methods are no-ops (single-instance mode)
+}
+```
+
+---
+
+### Auth System
+
+#### Types
+
+```typescript
+interface LiveAuthCredentials {
+  token?: string
+  publicKey?: string
+  signature?: string
+  timestamp?: number
+  nonce?: string
+  [key: string]: unknown
+}
+
+interface LiveAuthUser {
+  id: string
+  roles?: string[]
+  permissions?: string[]
+  [key: string]: unknown
+}
+
+interface LiveAuthContext {
+  readonly authenticated: boolean
+  readonly user?: LiveAuthUser
+  readonly token?: string
+  readonly authenticatedAt?: number
+  hasRole(role: string): boolean
+  hasAnyRole(roles: string[]): boolean
+  hasAllRoles(roles: string[]): boolean
+  hasPermission(permission: string): boolean
+  hasAllPermissions(permissions: string[]): boolean
+  hasAnyPermission(permissions: string[]): boolean
+}
+
+interface LiveAuthProvider {
+  readonly name: string
+  authenticate(credentials: LiveAuthCredentials): Promise<LiveAuthContext | null>
+  authorizeAction?(context: LiveAuthContext, componentName: string, action: string): Promise<boolean>
+  authorizeRoom?(context: LiveAuthContext, roomId: string): Promise<boolean>
+}
+
+interface LiveComponentAuth {
+  required?: boolean
+  roles?: string[]
+  permissions?: string[]
+}
+
+interface LiveActionAuth {
+  roles?: string[]
+  permissions?: string[]
+}
+
+type LiveActionAuthMap = Record<string, LiveActionAuth>
+```
+
+#### LiveAuthManager
+
+```typescript
+class LiveAuthManager {
+  /** Register an auth provider */
+  register(provider: LiveAuthProvider): void
+  /** Unregister by name */
+  unregister(name: string): void
+  /** Set default provider */
+  setDefault(name: string): void
+  /** Authenticate credentials */
+  async authenticate(credentials: LiveAuthCredentials, providerName?: string): Promise<LiveAuthContext>
+  /** Check component-level authorization */
+  authorizeComponent(authContext: LiveAuthContext, authConfig: LiveComponentAuth | undefined): LiveAuthResult
+  /** Check action-level authorization */
+  async authorizeAction(
+    authContext: LiveAuthContext,
+    componentName: string,
+    action: string,
+    actionAuth: LiveActionAuth | undefined,
+    providerName?: string,
+  ): Promise<LiveAuthResult>
+}
+```
+
+#### Auth Contexts
+
+```typescript
+/** Authenticated user context */
+class AuthenticatedContext implements LiveAuthContext {
+  readonly authenticated = true
+  constructor(user: LiveAuthUser, token?: string)
+}
+
+/** Anonymous (unauthenticated) context */
+class AnonymousContext implements LiveAuthContext {
+  readonly authenticated = false
+  // All has* methods return false
+}
+
+const ANONYMOUS_CONTEXT: AnonymousContext
+```
+
+---
+
+### Security
+
+#### StateSignatureManager
+
+HMAC-SHA256 state signing with optional encryption, compression, and nonce-based replay protection:
+
+```typescript
+interface StateSignatureConfig {
+  secret?: string
+  rotationEnabled?: boolean
+  rotationInterval?: number
+  compressionEnabled?: boolean
+  encryptionEnabled?: boolean
+  nonceEnabled?: boolean
+  maxStateAge?: number
+  backupEnabled?: boolean
+  maxBackups?: number
+  nonceTTL?: number
+}
+
+interface SignedState {
+  data: string
+  signature: string
+  timestamp: number
+  version: number
+  componentId: string
+  nonce?: string
+  compressed?: boolean
+  encrypted?: boolean
+}
+
+class StateSignatureManager {
+  constructor(config?: StateSignatureConfig)
+
+  /** Sign component state */
+  signState(
+    componentId: string,
+    state: Record<string, unknown>,
+    version: number,
+    options?: { compress?: boolean; backup?: boolean },
+  ): SignedState
+
+  /** Validate a signed state (checks HMAC, nonce, age) */
+  validateState(signedState: SignedState, options?: { skipNonce?: boolean }): { valid: boolean; error?: string }
+
+  /** Extract data from signed state */
+  extractData(signedState: SignedState): Record<string, unknown>
+
+  /** Get state backups for a component */
+  getBackups(componentId: string): SignedState[]
+
+  /** Graceful shutdown (clear timers) */
+  shutdown(): void
+}
+```
+
+#### Payload Sanitization
+
+Strips prototype pollution keys (`__proto__`, `constructor`, `prototype`) from incoming payloads:
+
+```typescript
+function sanitizePayload<T>(value: T, depth?: number): T
+```
+
+---
+
+### Connection Management
+
+```typescript
+interface ConnectionConfig {
+  maxConnections: number
+  connectionTimeout: number
+  heartbeatInterval: number
+  reconnectAttempts: number
+  reconnectDelay: number
+  maxReconnectDelay: number
+  jitterFactor: number
+  loadBalancing: 'round-robin' | 'least-connections' | 'random'
+  healthCheckInterval: number
+  messageQueueSize: number
+  offlineQueueEnabled: boolean
+}
+
+class WebSocketConnectionManager extends EventEmitter {
+  constructor(config?: Partial<ConnectionConfig>)
+
+  registerConnection(ws: GenericWebSocket, connectionId: string, poolId?: string): void
+  cleanupConnection(connectionId: string): void
+  getConnectionMetrics(connectionId: string): ConnectionMetrics | null
+  getAllConnectionMetrics(): ConnectionMetrics[]
+  getSystemStats(): {
+    totalConnections: number
+    activeConnections: number
+    totalPools: number
+    totalQueuedMessages: number
+    maxConnections: number
+    connectionUtilization: number
+  }
+  shutdown(): void
+}
+```
+
+#### Rate Limiter
+
+Token-bucket rate limiter per connection:
+
+```typescript
+class ConnectionRateLimiter {
+  constructor(maxTokens?: number, refillRate?: number)
+  /** Returns true if request is allowed, false if rate-limited */
+  tryConsume(count?: number): boolean
+}
+
+class RateLimiterRegistry {
+  constructor(maxTokens?: number, refillRate?: number)
+  /** Get or create rate limiter for a connection */
+  get(connectionId: string): ConnectionRateLimiter
+  /** Remove rate limiter for a disconnected connection */
+  remove(connectionId: string): void
+}
+```
+
+---
+
+### File Upload
+
+Chunked file upload system with per-user quotas and type validation:
+
+```typescript
+interface FileUploadConfig {
+  maxUploadSize?: number        // Default: 50 MB
+  chunkTimeout?: number         // Default: 30s
+  maxBytesPerUser?: number      // Per-user upload quota
+  quotaResetInterval?: number   // Quota reset interval
+  allowedTypes?: string[]       // Allowed MIME types (e.g. ['image/png', 'image/jpeg'])
+  blockedExtensions?: string[]  // Blocked file extensions
+  uploadsDir?: string           // Upload directory
+  assembleFile?: (upload: ActiveUpload) => Promise<string>  // Custom file assembly
+}
+
+class FileUploadManager {
+  constructor(config?: FileUploadConfig)
+
+  async startUpload(message: FileUploadStartMessage, userId?: string): Promise<{ success: boolean; error?: string }>
+  async receiveChunk(message: FileUploadChunkMessage, binaryData?: Buffer | null): Promise<FileUploadProgressResponse | null>
+  async completeUpload(message: FileUploadCompleteMessage): Promise<FileUploadCompleteResponse>
+
+  getUserUploadUsage(userId: string): { used: number; limit: number; remaining: number }
+  getUploadStatus(uploadId: string): ActiveUpload | null
+  getStats(): { activeUploads: number; maxUploadSize: number; allowedTypes: string[] }
+  shutdown(): void
+}
+```
+
+---
+
+### Debug & Logging
+
+#### LiveDebugger
+
+Full debug system with event tracking, component snapshots, and WebSocket debug clients:
+
+```typescript
+type DebugEventType =
+  | 'COMPONENT_MOUNT' | 'COMPONENT_UNMOUNT' | 'COMPONENT_REHYDRATE'
+  | 'STATE_CHANGE' | 'ACTION_CALL' | 'ACTION_RESULT' | 'ACTION_ERROR'
+  | 'ROOM_JOIN' | 'ROOM_LEAVE' | 'ROOM_EMIT' | 'ROOM_EVENT_RECEIVED'
+  | 'WS_CONNECT' | 'WS_DISCONNECT' | 'ERROR' | 'LOG'
+
+class LiveDebugger {
+  constructor(enabled?: boolean)
+
+  get enabled(): boolean
+  set enabled(value: boolean)
+
+  // Tracking methods
+  trackComponentMount(componentId: string, componentName: string, initialState: Record<string, unknown>, room?: string): void
+  trackComponentUnmount(componentId: string): void
+  trackStateChange(componentId: string, delta: Record<string, unknown>, fullState: Record<string, unknown>, source?: string): void
+  trackActionCall(componentId: string, action: string, payload: unknown): void
+  trackActionResult(componentId: string, action: string, result: unknown, duration: number): void
+  trackActionError(componentId: string, action: string, error: string, duration: number): void
+  trackRoomJoin(componentId: string, roomId: string): void
+  trackRoomLeave(componentId: string, roomId: string): void
+  trackRoomEmit(componentId: string, roomId: string, event: string, data: unknown): void
+  trackConnection(connectionId: string): void
+  trackDisconnection(connectionId: string, componentCount: number): void
+  trackError(componentId: string | null, error: string, context?: Record<string, unknown>): void
+
+  // Debug clients (WebSocket connections that receive debug events)
+  registerDebugClient(ws: GenericWebSocket): void
+  unregisterDebugClient(ws: GenericWebSocket): void
+
+  // Queries
+  getSnapshot(): DebugSnapshot
+  getComponentState(componentId: string): ComponentSnapshot | null
+  getEvents(filter?: { componentId?: string; type?: DebugEventType; limit?: number }): DebugEvent[]
+  clearEvents(): void
+}
+```
+
+#### LiveLogger
+
+Category-based logging with per-component configuration:
+
+```typescript
+type LiveLogCategory = 'lifecycle' | 'messages' | 'state' | 'performance' | 'rooms' | 'websocket'
+
+function liveLog(category: LiveLogCategory, componentId: string | null, message: string, ...args: unknown[]): void
+function liveWarn(category: LiveLogCategory, componentId: string | null, message: string, ...args: unknown[]): void
+function registerComponentLogging(componentId: string, config: LiveLogConfig | undefined): void
+function unregisterComponentLogging(componentId: string): void
+```
+
+---
+
+### Performance Monitoring
+
+```typescript
+interface PerformanceConfig {
+  slowActionThreshold?: number      // ms, default varies
+  slowRenderThreshold?: number      // ms
+  highErrorRateThreshold?: number   // error rate
+  alertsEnabled?: boolean           // Enable performance alerts
+}
+
+class PerformanceMonitor extends EventEmitter {
+  constructor(config?: PerformanceConfig)
+
+  initializeComponent(componentId: string, componentName: string): void
+  recordRenderTime(componentId: string, time: number): void
+  recordActionTime(componentId: string, action: string, time: number, error?: Error): void
+  recordStateChange(componentId: string): void
+  removeComponent(componentId: string): void
+
+  getComponentMetrics(componentId: string): ComponentPerformanceMetrics | null
+  getAllMetrics(): ComponentPerformanceMetrics[]
+  getAlerts(limit?: number): PerformanceAlert[]
+  clearAlerts(): void
+  getStats(): { totalComponents: number; totalAlerts: number; components: Array<...> }
+}
+```
+
+---
+
+### Build Plugin
+
+Vite plugin to strip server-only code from client bundles:
+
+```typescript
+import { liveStripPlugin } from '@fluxstack/live/build'
+
+// In vite.config.ts
+export default {
+  plugins: [
+    liveStripPlugin({
+      importPrefix: '@fluxstack/live',
+      serverDir: 'server',
+      verbose: false,
+    }),
+  ],
+}
+```
+
+---
+
+### Type Utilities
+
+Helper types for end-to-end type safety between server and client:
+
+```typescript
+// Extract action names from a LiveComponent class
+type ExtractActions<T extends LiveComponent<any>>
+type ActionNames<T extends LiveComponent<any>>
+type ActionPayload<T extends LiveComponent<any>, K>
+type ActionReturn<T extends LiveComponent<any>, K>
+
+// Infer state types from a LiveComponent class
+type InferComponentState<T extends LiveComponent<any>>
+type InferPrivateState<T extends LiveComponent<any, any>>
+
+// Typed call/set utilities for client-side
+type TypedCall<T extends LiveComponent<any>>
+type TypedCallAndWait<T extends LiveComponent<any>>
+type TypedSetValue<T extends LiveComponent<any>>
+
+// Full typed hook return type
+interface UseTypedLiveComponentReturn<T extends LiveComponent<any>> {
+  state: InferComponentState<T>
+  loading: boolean
+  error: string | null
+  connected: boolean
+  componentId: string | null
+  status: 'synced' | 'disconnected' | 'connecting' | 'reconnecting' | 'loading' | 'mounting' | 'error'
+  call: TypedCall<T>
+  callAndWait: TypedCallAndWait<T>
+  setValue: TypedSetValue<T>
+  mount: () => Promise<void>
+  unmount: () => Promise<void>
+  useControlledField: <K extends keyof InferComponentState<T>>(field: K, action?: string) => FieldBinding
+}
+```
+
+---
+
+## Client Package
+
+### LiveConnection
+
+Framework-agnostic WebSocket connection manager with auto-reconnect and heartbeat:
+
+```typescript
+interface LiveConnectionOptions {
+  /** WebSocket URL. Auto-detected from window.location if omitted. */
+  url?: string
+  /** Auth credentials to send on connection */
+  auth?: LiveAuthOptions
+  /** Auto-connect on creation. Default: true */
+  autoConnect?: boolean
+  /** Reconnect interval in ms. Default: 1000 */
+  reconnectInterval?: number
+  /** Max reconnect attempts. Default: 5 */
+  maxReconnectAttempts?: number
+  /** Heartbeat interval in ms. Default: 30000 */
+  heartbeatInterval?: number
+  /** Enable debug logging. Default: false */
+  debug?: boolean
+}
+
+interface LiveConnectionState {
+  connected: boolean
+  connecting: boolean
+  error: string | null
+  connectionId: string | null
+  authenticated: boolean
+}
+
+class LiveConnection {
+  constructor(options?: LiveConnectionOptions)
+
+  get state(): LiveConnectionState
+  onStateChange(callback: (state: LiveConnectionState) => void): () => void
+
+  connect(): void
+  disconnect(): void
+  reconnect(): void
+
+  generateRequestId(): string
+  async sendMessage(message: WebSocketMessage): Promise<void>
+  async sendMessageAndWait(message: WebSocketMessage, timeout?: number): Promise<WebSocketResponse>
+  async sendBinaryAndWait(data: ArrayBuffer, requestId: string, timeout?: number): Promise<WebSocketResponse>
+
+  registerComponent(componentId: string, callback: (message: WebSocketResponse) => void): () => void
+  unregisterComponent(componentId: string): void
+  registerBinaryHandler(componentId: string, callback: (payload: Uint8Array) => void): () => void
+
+  async authenticate(credentials: LiveAuthOptions): Promise<boolean>
+  getWebSocket(): WebSocket | null
+  destroy(): void
+}
+```
+
+**URL auto-detection:** If `url` is omitted, the client detects the WebSocket URL from `window.location`:
+- `https://myapp.com` becomes `wss://myapp.com/api/live/ws`
+- `http://localhost:3000` becomes `ws://localhost:3000/api/live/ws`
+
+**CSRF rejection handling:** If the server closes the connection with code `4003` (origin not allowed), the client does NOT attempt to reconnect.
+
+---
+
+### LiveComponentHandle
+
+High-level vanilla JS wrapper for live components:
+
+```typescript
+interface LiveComponentOptions<TState = Record<string, any>> {
+  initialState?: Partial<TState>
+  room?: string
+  userId?: string
+  autoMount?: boolean  // Default: true
+  debug?: boolean
+}
+
+class LiveComponentHandle<TState extends Record<string, any>> {
+  constructor(connection: LiveConnection, componentName: string, options?: LiveComponentOptions<TState>)
+
+  // Getters
+  get state(): Readonly<TState>
+  get componentId(): string | null
+  get mounted(): boolean
+  get mounting(): boolean
+  get error(): string | null
+
+  // Lifecycle
+  async mount(): Promise<void>
+  async unmount(): Promise<void>
+  destroy(): void
+
+  // Actions
+  async call<R = any>(action: string, payload?: Record<string, any>): Promise<R>
+  fire(action: string, payload?: Record<string, any>): void  // Fire-and-forget
+
+  // State
+  onStateChange(callback: (state: TState, delta: Partial<TState> | null) => void): () => void
+  setBinaryDecoder(decoder: (buffer: Uint8Array) => Record<string, any>): () => void
+  onError(callback: (error: string) => void): () => void
+}
+```
+
+---
+
+### useLive (Vanilla JS)
+
+Simplified API for vanilla JavaScript usage. Manages a shared connection singleton:
+
+```typescript
+interface UseLiveHandle<TState extends Record<string, any>> {
+  call: <R = any>(action: string, payload?: Record<string, any>) => Promise<R>
+  on: (callback: (state: TState, delta: Partial<TState> | null) => void) => () => void
+  onError: (callback: (error: string) => void) => () => void
+  readonly state: Readonly<TState>
+  readonly mounted: boolean
+  readonly componentId: string | null
+  readonly error: string | null
+  destroy: () => void
+  readonly handle: LiveComponentHandle<TState>
+}
+
+function useLive<TState extends Record<string, any>>(
+  componentName: string,
+  initialState: TState,
+  options?: { url?: string; room?: string; userId?: string; autoMount?: boolean; debug?: boolean },
+): UseLiveHandle<TState>
+
+/** Subscribe to shared connection status changes */
+function onConnectionChange(callback: (connected: boolean) => void): () => void
+
+/** Get or create the shared connection instance */
+function getConnection(url?: string): LiveConnection
+```
+
+**Example (browser):**
+```html
+<script src="/live-client.js"></script>
+<script>
+  const counter = FluxstackLive.useLive('Counter', { count: 0 })
+  counter.on(state => {
+    document.getElementById('count').textContent = state.count
+  })
+  document.querySelector('.inc').onclick = () => counter.call('increment')
+</script>
+```
+
+---
+
+### RoomManager (Client)
+
+Client-side room manager. Framework-agnostic:
+
+```typescript
+interface RoomHandle<TState = any, TEvents extends Record<string, any> = Record<string, any>> {
+  readonly id: string
+  readonly joined: boolean
+  readonly state: TState
+  join: (initialState?: TState) => Promise<void>
+  leave: () => Promise<void>
+  emit: <K extends keyof TEvents>(event: K, data: TEvents[K]) => void
+  on: <K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>) => Unsubscribe
+  onSystem: (event: string, handler: EventHandler) => Unsubscribe
+  setState: (updates: Partial<TState>) => void
+}
+
+/** Callable proxy: proxy('roomId') returns a RoomHandle, or use proxy.join()/emit()/on() for default room */
+interface RoomProxy<TState = any, TEvents extends Record<string, any> = Record<string, any>> {
+  (roomId: string): RoomHandle<TState, TEvents>
+  readonly id: string | null
+  readonly joined: boolean
+  readonly state: TState
+  join: (initialState?: TState) => Promise<void>
+  leave: () => Promise<void>
+  emit: <K extends keyof TEvents>(event: K, data: TEvents[K]) => void
+  on: <K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>) => Unsubscribe
+  onSystem: (event: string, handler: EventHandler) => Unsubscribe
+  setState: (updates: Partial<TState>) => void
+}
+
+class RoomManager<TState = any, TEvents extends Record<string, any> = Record<string, any>> {
+  constructor(options: RoomManagerOptions)
+  createHandle(roomId: string): RoomHandle<TState, TEvents>
+  createProxy(): RoomProxy<TState, TEvents>
+  getJoinedRooms(): string[]
+  setComponentId(id: string | null): void
+  destroy(): void
+}
+```
+
+---
+
+### File Upload (Client)
+
+Chunked upload with adaptive chunk sizing:
+
+```typescript
+class ChunkedUploader {
+  constructor(options: ChunkedUploadOptions)
+  async start(file: File): Promise<void>
+  pause(): void
+  resume(): void
+  cancel(): void
+  get state(): ChunkedUploadState
+  onProgress(callback: (state: ChunkedUploadState) => void): () => void
+}
+
+class AdaptiveChunkSizer {
+  constructor(config?: AdaptiveChunkConfig)
+  getChunkSize(): number
+  recordTransfer(bytes: number, durationMs: number): void
+}
+
+function createBinaryChunkMessage(header: BinaryChunkHeader, data: Uint8Array): ArrayBuffer
+```
+
+---
+
+### State Persistence
+
+LocalStorage-based state persistence for offline/reconnection support:
+
+```typescript
+interface PersistedState {
+  componentName: string
+  state: any
+  signedState: any
+  timestamp: number
+  version: number
+}
+
+function persistState(componentName: string, state: any, signedState: any): void
+function getPersistedState(componentName: string): PersistedState | null
+function clearPersistedState(componentName: string): void
+```
+
+---
+
+### State Validator
+
+Client-side state validation and conflict detection:
+
+```typescript
+interface HybridState<T> {
+  data: T
+  validation: StateValidation
+  conflicts: StateConflict[]
+  status: 'synced' | 'conflict' | 'disconnected'
+}
+
+class StateValidator {
+  static validate(clientState: any, serverState: any): StateValidation
+  static detectConflicts(clientState: any, serverState: any): StateConflict[]
+  static resolveConflicts(conflicts: StateConflict[], strategy: 'client' | 'server' | 'latest'): any
+}
+```
+
+---
+
+## React Package
+
+### LiveComponentsProvider
+
+React context provider that manages the WebSocket connection:
+
+```typescript
+interface LiveComponentsProviderProps {
+  children: React.ReactNode
+  /** WebSocket URL. Auto-detected if omitted. */
+  url?: string
+  /** Auth credentials */
+  auth?: LiveAuthOptions
+  /** Auto-connect on mount. Default: true */
+  autoConnect?: boolean
+  /** Reconnect interval in ms. Default: 1000 */
+  reconnectInterval?: number
+  /** Max reconnect attempts. Default: 5 */
+  maxReconnectAttempts?: number
+  /** Heartbeat interval in ms. Default: 30000 */
+  heartbeatInterval?: number
+  /** Enable debug logging. Default: false */
+  debug?: boolean
+}
+
+function LiveComponentsProvider(props: LiveComponentsProviderProps): JSX.Element
+
+/** Access the connection context from any child component */
+function useLiveComponents(): LiveComponentsContextValue
+```
+
+**Usage:**
+```tsx
+import { LiveComponentsProvider } from '@fluxstack/live-react'
+
+function App() {
+  return (
+    <LiveComponentsProvider url="ws://localhost:3000/api/live/ws" debug>
+      <MyApp />
+    </LiveComponentsProvider>
+  )
+}
+```
+
+---
+
+### Live.use()
+
+Primary React API. Pass a server component class to get a fully-typed reactive proxy:
+
+```typescript
+import { Live } from '@fluxstack/live-react'
+
+const Live = {
+  use: <T extends ComponentClass, TBroadcasts = Record<string, any>>(
+    ComponentClass: T,
+    options?: {
+      initialState?: Partial<ExtractState<T>>
+      room?: string
+      userId?: string
+      autoMount?: boolean
+      debug?: boolean
+      debounce?: number
+      optimistic?: boolean
+      syncMode?: 'immediate' | 'debounced' | 'manual'
+      persistState?: boolean
+      binaryDecoder?: (buffer: Uint8Array) => Record<string, any>
+    },
+  ) => LiveProxyWithBroadcasts<ExtractState<T>, ExtractActions<T>, TBroadcasts>
+}
+```
+
+The proxy object returned is **both** a state object and a control interface:
+
+```typescript
+// State access — directly on the proxy
+counter.count        // state value (reactive, causes re-render)
+
+// Control interface — prefixed with $
+counter.$state       // full state object
+counter.$connected   // boolean
+counter.$loading     // boolean
+counter.$error       // string | null
+counter.$status      // 'synced' | 'disconnected' | 'connecting' | ...
+counter.$componentId // string | null
+counter.$dirty       // boolean (local changes not yet synced)
+
+// Actions
+counter.$call('increment')                    // Call action (wait for response)
+counter.$callAndWait('increment')             // Call and wait for return value
+counter.$fire('increment')                    // Fire-and-forget (no response)
+counter.$set('count', 5)                      // Set a single value
+counter.$field('name')                        // Form field binding { value, onChange, onBlur }
+counter.$sync()                               // Force sync pending changes
+counter.$refresh()                            // Re-mount from server
+
+// Rooms
+counter.$room.join()                          // Join default room
+counter.$room.emit('chat', { text: 'hi' })   // Emit to room
+counter.$room.on('chat', handler)             // Listen for room events
+counter.$room('other-room').join()            // Join a specific room
+
+// Lifecycle
+counter.$mount()                              // Manual mount
+counter.$unmount()                            // Manual unmount
+counter.$updateLocal({ count: 5 })            // Local-only state update
+counter.$onBroadcast(handler)                 // Listen for broadcasts
+```
+
+**Example with type inference:**
+```tsx
+import { Live } from '@fluxstack/live-react'
+import type { Counter } from '@server/live/Counter'
+
+function CounterView() {
+  const counter = Live.use<typeof Counter>(Counter)
+
+  return (
+    <div>
+      <p>Count: {counter.count}</p>
+      <button onClick={() => counter.$call('increment')}>+</button>
+      <p>Status: {counter.$status}</p>
+    </div>
+  )
+}
+```
+
+---
+
+### useLiveComponent
+
+Lower-level hook (same functionality as `Live.use` but with string-based component name):
+
+```typescript
+function useLiveComponent<
+  TState extends Record<string, any>,
+  TActions = {},
+  TBroadcasts extends Record<string, any> = Record<string, any>,
+>(
+  componentName: string,
+  initialState: TState,
+  options?: UseLiveComponentOptions,
+): LiveProxyWithBroadcasts<TState, TActions, TBroadcasts>
+
+/** Pre-configure a component for reuse */
+function createLiveComponent<TState, TActions, TBroadcasts>(
+  componentName: string,
+  defaultOptions?: Omit<UseLiveComponentOptions, keyof HybridComponentOptions>,
+): (initialState: TState, options?: UseLiveComponentOptions) => LiveProxyWithBroadcasts<TState, TActions, TBroadcasts>
+```
+
+---
+
+### useChunkedUpload
+
+React hook for chunked file uploads:
+
+```typescript
+interface ChunkedUploadState {
+  uploading: boolean
+  progress: number       // 0-100
+  bytesUploaded: number
+  totalBytes: number
+  speed: number          // bytes/sec
+  error: string | null
+  completed: boolean
+}
+
+function useChunkedUpload(options?: ChunkedUploadOptions): {
+  upload: (file: File) => Promise<void>
+  pause: () => void
+  resume: () => void
+  cancel: () => void
+  state: ChunkedUploadState
+}
+```
+
+---
+
+### useLiveDebugger
+
+React hook for the debug system:
+
+```typescript
+function useLiveDebugger(options?: UseLiveDebuggerOptions): {
+  enabled: boolean
+  events: DebugEvent[]
+  snapshot: DebugSnapshot | null
+  components: ComponentSnapshot[]
+  clearEvents: () => void
+  setFilter: (filter: DebugFilter) => void
+}
+```
+
+---
+
+## Elysia Adapter
+
+```typescript
+import ElysiaTransport from '@fluxstack/live-elysia'
+import { Elysia } from 'elysia'
+
+class ElysiaTransport implements LiveTransport {
+  constructor(app: Elysia<any>)
+  registerWebSocket(config: WebSocketConfig): void
+  registerHttpRoutes(routes: HttpRouteDefinition[]): void | Promise<void>
+  /** Register client bundle serving (optional) */
+  registerClientBundle(clientPath?: string | false): void
+}
+```
+
+**Usage:**
+```typescript
+import { Elysia } from 'elysia'
+import { LiveServer } from '@fluxstack/live'
+import ElysiaTransport from '@fluxstack/live-elysia'
+
+const app = new Elysia()
+const transport = new ElysiaTransport(app)
+const server = new LiveServer({
+  transport,
+  componentsPath: './server/live',
+  debug: true,
+})
+await server.start()
+app.listen(3000)
+```
+
+---
+
+## Express Adapter
+
+```typescript
+import ExpressTransport, { expressLive, live } from '@fluxstack/live-express'
+import express from 'express'
+import { createServer } from 'http'
+
+class ExpressTransport implements LiveTransport {
+  constructor(app: Express, httpServer: HttpServer, options?: { maxPayload?: number; perMessageDeflate?: boolean })
+  registerWebSocket(config: WebSocketConfig): void
+  registerHttpRoutes(routes: HttpRouteDefinition[]): void
+  async shutdown(): Promise<void>
+}
+
+/** Quick setup function */
+async function expressLive(
+  app: Express,
+  options?: { componentsPath?: string; wsPath?: string; httpPrefix?: string | false; debug?: boolean },
+): Promise<{ httpServer: HttpServer; liveServer: LiveServer }>
+
+/** Express middleware */
+function live(app: Express, options?: ExpressLiveOptions): LiveMiddlewareResult
+```
+
+**Usage:**
+```typescript
+import express from 'express'
+import { expressLive } from '@fluxstack/live-express'
+
+const app = express()
+const { httpServer, liveServer } = await expressLive(app, {
+  componentsPath: './server/live',
+})
+httpServer.listen(3000)
+```
+
+---
+
+## Fastify Adapter
+
+```typescript
+import FastifyTransport, { fastifyLive, live } from '@fluxstack/live-fastify'
+
+class FastifyTransport implements LiveTransport {
+  constructor(app: FastifyInstance, options?: { maxPayload?: number; perMessageDeflate?: boolean })
+  registerWebSocket(config: WebSocketConfig): void
+  registerHttpRoutes(routes: HttpRouteDefinition[]): void
+  async shutdown(): Promise<void>
+}
+
+/** Quick setup function */
+async function fastifyLive(
+  app: FastifyInstance,
+  options?: FastifyLiveOptions,
+): Promise<{ liveServer: LiveServer }>
+
+/** Fastify plugin */
+const live: FastifyPlugin<FastifyLiveOptions>
+```
+
+**Usage:**
+```typescript
+import Fastify from 'fastify'
+import { fastifyLive } from '@fluxstack/live-fastify'
+
+const app = Fastify()
+const { liveServer } = await fastifyLive(app, {
+  componentsPath: './server/live',
+})
+await app.listen({ port: 3000 })
+```
+
+---
+
+## Redis Adapter
+
+Optional package for horizontal scaling. Provides cross-instance room event propagation and state persistence via Redis pub/sub:
+
+```typescript
+import { RedisRoomAdapter } from '@fluxstack/live-redis'
+import Redis from 'ioredis'
+
+interface RedisRoomAdapterOptions {
+  /** ioredis client instance for commands */
+  redis: Redis
+  /** Optional separate ioredis client for subscriptions.
+   *  If not provided, a duplicate of `redis` will be created.
+   *  (ioredis requires separate connections for subscribe mode) */
+  subscriber?: Redis
+  /** Key prefix for all Redis keys. Default: 'fluxstack:room:' */
+  prefix?: string
+  /** Room state TTL in seconds. Default: 86400 (24h). Set to 0 to disable. */
+  stateTtl?: number
+}
+
+class RedisRoomAdapter implements IRoomPubSubAdapter {
+  constructor(options: RedisRoomAdapterOptions)
+
+  // IRoomPubSubAdapter implementation
+  async publish(roomId: string, event: string, data: any): Promise<void>
+  async subscribe(roomId: string, handler: (event: string, data: any) => void): Promise<() => void>
+  async publishMembership(roomId: string, action: 'join' | 'leave', componentId: string): Promise<void>
+  async publishStateChange(roomId: string, updates: any): Promise<void>
+
+  // Additional utilities
+  async getPersistedState<T = any>(roomId: string): Promise<T | null>
+  async deletePersistedState(roomId: string): Promise<boolean>
+  async shutdown(): Promise<void>
+}
+```
+
+**Usage:**
+```typescript
+import Redis from 'ioredis'
+import { RedisRoomAdapter } from '@fluxstack/live-redis'
+import { LiveServer } from '@fluxstack/live'
+import ElysiaTransport from '@fluxstack/live-elysia'
+
+const redis = new Redis(process.env.REDIS_URL)
+const adapter = new RedisRoomAdapter({ redis, stateTtl: 3600 })
+
+const server = new LiveServer({
+  transport: new ElysiaTransport(app),
+  roomPubSub: adapter,
+  componentsPath: './server/live',
+})
+await server.start()
+```
+
+**How it works:**
+- Each server instance gets a unique `instanceId`
+- Room events, state changes, and membership changes are published to Redis channels
+- Messages from the same instance are filtered out (echo prevention)
+- Room state is persisted in Redis with configurable TTL
+- On shutdown, all subscriptions are cleaned up
+
+---
+
+## Usage Examples
+
+### Counter Component (Server)
+
+```typescript
+import { LiveComponent } from '@fluxstack/live'
+
+export class Counter extends LiveComponent<{ count: number }> {
+  static componentName = 'Counter'
+  static defaultState = { count: 0 }
+  static publicActions = ['increment', 'decrement', 'reset'] as const
+
+  async increment() {
+    this.setState({ count: this.state.count + 1 })
+  }
+
+  async decrement() {
+    this.setState({ count: this.state.count - 1 })
+  }
+
+  async reset() {
+    this.setState({ count: 0 })
+  }
+}
+```
+
+### Chat Room (Server)
+
+```typescript
+import { LiveComponent } from '@fluxstack/live'
+
+interface ChatState {
+  messages: Array<{ user: string; text: string; timestamp: number }>
+  userCount: number
+}
+
+export class ChatRoom extends LiveComponent<ChatState> {
+  static componentName = 'ChatRoom'
+  static defaultState = { messages: [], userCount: 0 }
+  static publicActions = ['sendMessage'] as const
+
+  async onMount() {
+    this.$room.join({ messages: [], userCount: 0 })
+
+    this.$room.on('message', (data: { user: string; text: string }) => {
+      this.setState({
+        messages: [...this.state.messages.slice(-99), { ...data, timestamp: Date.now() }],
+      })
+    })
+
+    this.$room.on('$sub:join', () => {
+      this.setState({ userCount: this.state.userCount + 1 })
+    })
+
+    this.$room.on('$sub:leave', () => {
+      this.setState({ userCount: Math.max(0, this.state.userCount - 1) })
+    })
+  }
+
+  async sendMessage(payload: { text: string }) {
+    this.$room.emit('message', {
+      user: this.userId || 'anonymous',
+      text: payload.text,
+    })
+  }
+}
+```
+
+### Auth-Protected Component (Server)
+
+```typescript
+import { LiveComponent } from '@fluxstack/live'
+
+export class AdminPanel extends LiveComponent<{ stats: any }> {
+  static componentName = 'AdminPanel'
+  static defaultState = { stats: {} }
+  static publicActions = ['refreshStats', 'deleteUser'] as const
+
+  // Component requires authentication with 'admin' role
+  static auth = { required: true, roles: ['admin'] }
+
+  // Additional per-action auth
+  static actionAuth = {
+    deleteUser: { roles: ['super-admin'] },
+  }
+
+  async refreshStats() {
+    // Fetch stats from database...
+    this.setState({ stats: { users: 100, active: 42 } })
+  }
+
+  async deleteUser(payload: { userId: string }) {
+    // Only accessible by super-admin role
+    // Delete user logic...
+  }
+}
+```
+
+### Zod-Validated Actions (Server)
+
+```typescript
+import { LiveComponent } from '@fluxstack/live'
+import { z } from 'zod'
+
+export class UserProfile extends LiveComponent<{ name: string; email: string }> {
+  static componentName = 'UserProfile'
+  static defaultState = { name: '', email: '' }
+  static publicActions = ['updateProfile'] as const
+
+  static actionSchemas = {
+    updateProfile: z.object({
+      name: z.string().min(1).max(100),
+      email: z.string().email(),
+    }),
+  }
+
+  async updateProfile(payload: { name: string; email: string }) {
+    // Payload is already validated by Zod schema
+    this.setState(payload)
+  }
+}
+```
+
+### Binary Delta (Server — for games/real-time)
+
+```typescript
+import { LiveComponent } from '@fluxstack/live'
+
+interface GameState {
+  x: number
+  y: number
+  health: number
+}
+
+export class GameEntity extends LiveComponent<GameState> {
+  static componentName = 'GameEntity'
+  static defaultState = { x: 0, y: 0, health: 100 }
+  static publicActions = ['move'] as const
+
+  private encoder = new TextEncoder()
+
+  async move(payload: { dx: number; dy: number }) {
+    const delta = {
+      x: this.state.x + payload.dx,
+      y: this.state.y + payload.dy,
+    }
+
+    // Send binary delta instead of JSON for lower latency
+    this.sendBinaryDelta(delta, (d) => {
+      const json = JSON.stringify(d)
+      return this.encoder.encode(json)
+    })
+  }
+}
+```
+
+### React Client
+
+```tsx
+import { LiveComponentsProvider, Live } from '@fluxstack/live-react'
+import type { ChatRoom } from '@server/live/ChatRoom'
+
+function App() {
+  return (
+    <LiveComponentsProvider>
+      <Chat />
+    </LiveComponentsProvider>
+  )
+}
+
+function Chat() {
+  const chat = Live.use<typeof ChatRoom>(ChatRoom, {
+    room: 'general',
+  })
+
+  const [text, setText] = useState('')
+
+  return (
+    <div>
+      <p>Status: {chat.$status} | Users: {chat.userCount}</p>
+      <div>
+        {chat.messages.map((msg, i) => (
+          <p key={i}><b>{msg.user}:</b> {msg.text}</p>
+        ))}
+      </div>
+      <input value={text} onChange={e => setText(e.target.value)} />
+      <button onClick={() => { chat.$call('sendMessage', { text }); setText('') }}>
+        Send
+      </button>
+    </div>
+  )
+}
+```
+
+### Vanilla JS Client
+
+```typescript
+import { useLive, onConnectionChange } from '@fluxstack/live-client'
+
+// Connection status indicator
+onConnectionChange(connected => {
+  document.getElementById('status')!.textContent = connected ? 'Connected' : 'Disconnected'
+})
+
+// Live counter
+const counter = useLive('Counter', { count: 0 })
+counter.on(state => {
+  document.getElementById('count')!.textContent = String(state.count)
+})
+document.querySelector('.inc')!.onclick = () => counter.call('increment')
+document.querySelector('.dec')!.onclick = () => counter.call('decrement')
+```
+
+### Horizontal Scaling with Redis
+
+```typescript
+import { Elysia } from 'elysia'
+import Redis from 'ioredis'
+import { LiveServer } from '@fluxstack/live'
+import ElysiaTransport from '@fluxstack/live-elysia'
+import { RedisRoomAdapter } from '@fluxstack/live-redis'
+
+const redis = new Redis(process.env.REDIS_URL)
+const roomAdapter = new RedisRoomAdapter({
+  redis,
+  prefix: 'myapp:room:',
+  stateTtl: 3600, // 1 hour
+})
+
+const app = new Elysia()
+const server = new LiveServer({
+  transport: new ElysiaTransport(app),
+  roomPubSub: roomAdapter,
+  componentsPath: './server/live',
+  allowedOrigins: ['https://myapp.com'],
+})
+
+await server.start()
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  await server.shutdown()
+  await roomAdapter.shutdown()
+  redis.disconnect()
+})
+
+app.listen(3000)
+```
+
+---
+
+## DI Context
+
+The internal context system connects LiveComponent instances to the LiveServer's subsystems:
+
+```typescript
+interface LiveComponentContext {
+  roomEvents: RoomEventBus
+  roomManager: LiveRoomManagerInterface
+  debugger?: LiveDebuggerInterface
+}
+
+/** Set by LiveServer during construction */
+function setLiveComponentContext(ctx: LiveComponentContext): void
+
+/** Used by LiveComponent internally (lazy) */
+function getLiveComponentContext(): LiveComponentContext
+
+/** Check if context is available (useful for tests) */
+function hasLiveComponentContext(): boolean
+```
+
+---
+
+## Internal Component Managers
+
+LiveComponent delegates to 4 internal managers (implementation detail, not part of public API):
+
+| Manager | Responsibility |
+|---|---|
+| `ComponentMessaging` | `emit()`, `broadcast()`, WebSocket message dispatch |
+| `ComponentStateManager` | Reactive proxy state, `setState()`, binary delta, direct accessors |
+| `ActionSecurityManager` | Blocked actions, public actions check, rate limiting, Zod validation |
+| `ComponentRoomProxy` | `$room` proxy, `$rooms`, join/leave, room event handlers |
+
+These are internal to `@fluxstack/live` and not exported from the public API.

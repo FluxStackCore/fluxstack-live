@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-agnostic Live Components for real-time server-client state synchronization",
   "type": "module",
   "main": "./dist/index.js",
@@ -25,11 +25,14 @@
   },
   "devDependencies": {
     "@types/node": "^25.3.3",
+    "ioredis": "^5.10.0",
     "tsup": "^8.4.0",
     "typescript": "^5.8.3",
     "vite": "^7.1.0"
   },
-  "peerDependencies": {},
+  "peerDependencies": {
+    "zod": "^4.3.6"
+  },
   "keywords": [
     "live-components",
     "real-time",
