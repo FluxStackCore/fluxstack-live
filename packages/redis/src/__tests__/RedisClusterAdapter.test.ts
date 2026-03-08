@@ -114,8 +114,9 @@ describe('RedisClusterAdapter', () => {
 
   describe('claimSingleton / getSingletonOwner / releaseSingleton', () => {
     it('should claim a singleton successfully', async () => {
-      const claimed = await adapter.claimSingleton('Counter', 'comp-1')
-      expect(claimed).toBe(true)
+      const claim = await adapter.claimSingleton('Counter', 'comp-1')
+      expect(claim.claimed).toBe(true)
+      expect(claim.recoveredState).toBeUndefined()
     })
 
     it('should reject duplicate claims', async () => {
@@ -128,8 +129,8 @@ describe('RedisClusterAdapter', () => {
       })
       await adapter2.start()
 
-      const claimed = await adapter2.claimSingleton('Counter', 'comp-2')
-      expect(claimed).toBe(false)
+      const claim = await adapter2.claimSingleton('Counter', 'comp-2')
+      expect(claim.claimed).toBe(false)
 
       await adapter2.shutdown()
     })
@@ -158,8 +159,19 @@ describe('RedisClusterAdapter', () => {
     it('should allow re-claim after release', async () => {
       await adapter.claimSingleton('Counter', 'comp-1')
       await adapter.releaseSingleton('Counter')
-      const claimed = await adapter.claimSingleton('Counter', 'comp-2')
-      expect(claimed).toBe(true)
+      const claim = await adapter.claimSingleton('Counter', 'comp-2')
+      expect(claim.claimed).toBe(true)
+    })
+
+    it('should return recovered state on failover claim', async () => {
+      // Simulate previous owner saving state then releasing
+      await adapter.saveSingletonState('Counter', { count: 42 })
+      await adapter.releaseSingleton('Counter')
+
+      // New claim should include recovered state
+      const claim = await adapter.claimSingleton('Counter', 'comp-new')
+      expect(claim.claimed).toBe(true)
+      expect(claim.recoveredState).toEqual({ count: 42 })
     })
   })
 

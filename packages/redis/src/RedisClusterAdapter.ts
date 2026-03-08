@@ -20,6 +20,7 @@ import type {
   IClusterAdapter,
   ClusterComponentState,
   ClusterSingletonOwner,
+  ClusterSingletonClaim,
   ClusterActionRequest,
   ClusterActionResponse,
   ClusterDeltaHandler,
@@ -163,16 +164,18 @@ export class RedisClusterAdapter implements IClusterAdapter {
 
   // ── Singleton Coordination ───────────────────────────
 
-  async claimSingleton(componentName: string, componentId: string): Promise<boolean> {
+  async claimSingleton(componentName: string, componentId: string): Promise<ClusterSingletonClaim> {
     const key = this.singletonKey(componentName)
     const value = `${this.instanceId}:${componentId}`
     // SET NX = atomic set-if-not-exists, EX = TTL in seconds
     const result = await this.redis.set(key, value, 'EX', this.singletonTtl, 'NX')
     if (result === 'OK') {
       this.ownedSingletons.set(componentName, componentId)
-      return true
+      // Failover recovery: load previous singleton state (survives owner crash + claim expiry)
+      const recoveredState = await this.loadSingletonState(componentName)
+      return { claimed: true, recoveredState: recoveredState ?? undefined }
     }
-    return false
+    return { claimed: false }
   }
 
   async getSingletonOwner(componentName: string): Promise<ClusterSingletonOwner | null> {

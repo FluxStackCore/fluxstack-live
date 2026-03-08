@@ -38,8 +38,10 @@ export interface IClusterAdapter {
 
   // ── Singleton Coordination ────────────────────────────
 
-  /** Attempt to claim ownership of a singleton (atomic). Returns true if claimed. */
-  claimSingleton(componentName: string, componentId: string): Promise<boolean>
+  /** Attempt to claim ownership of a singleton (atomic).
+   *  Returns { claimed: true, recoveredState? } on success, { claimed: false } otherwise.
+   *  When claiming after a failover, recoveredState contains the previous owner's last state. */
+  claimSingleton(componentName: string, componentId: string): Promise<ClusterSingletonClaim>
 
   /** Get the current owner of a singleton. Returns null if not claimed. */
   getSingletonOwner(componentName: string): Promise<ClusterSingletonOwner | null>
@@ -99,6 +101,14 @@ export interface ClusterActionRequest {
   action: string
   payload: any
   requestId: string
+}
+
+/** Result of a singleton claim attempt. */
+export interface ClusterSingletonClaim {
+  /** Whether the claim was successful. */
+  claimed: boolean
+  /** If claimed and previous state exists (failover recovery), the recovered state. */
+  recoveredState?: any
 }
 
 /** Response from a forwarded action. */

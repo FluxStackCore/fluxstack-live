@@ -328,8 +328,8 @@ export class ComponentRegistry {
         // Cluster: try to claim singleton ownership with pre-generated ID (no race window)
         if (this.cluster) {
           clusterSingletonId = `live-${crypto.randomUUID()}`
-          const claimed = await this.cluster.claimSingleton(componentName, clusterSingletonId)
-          if (!claimed) {
+          const claim = await this.cluster.claimSingleton(componentName, clusterSingletonId)
+          if (!claim.claimed) {
             clusterSingletonId = null
             // Another server owns this singleton — create remote proxy
             const owner = await this.cluster.getSingletonOwner(componentName)
@@ -358,15 +358,14 @@ export class ComponentRegistry {
             }
           }
 
-          // Failover recovery: load previous singleton state from Redis (survives owner crash)
-          const recoveredState = await this.cluster.loadSingletonState(componentName)
-          if (recoveredState) {
-            initialState = { ...initialState, ...recoveredState }
+          // Failover recovery: recovered state from adapter takes priority over client props
+          if (claim.recoveredState) {
+            props = { ...props, ...claim.recoveredState }
           }
         }
       }
 
-      // Create component
+      // Create component with merged state (props may include recovered cluster state)
       const component = new ComponentClass({ ...initialState, ...props }, ws, options)
       component.setAuthContext(authContext)
 
@@ -575,13 +574,17 @@ export class ComponentRegistry {
       if (singleton.instance.id !== componentId) continue
       if (connId) singleton.connections.delete(connId)
       if (singleton.connections.size === 0) {
+        // Capture final state synchronously BEFORE cleanup destroys the instance
+        const finalState = singleton.instance.getSerializableState()
         try { (singleton.instance as any).onDisconnect() } catch { /* ignore */ }
         this.cleanupComponent(componentId)
         this.singletons.delete(name)
-        // Release cluster singleton claim
+        // Save state to Redis, THEN release claim (must be sequential to avoid race)
         if (this.cluster) {
-          this.cluster.releaseSingleton(name).catch(() => {})
-          this.cluster.deleteState(componentId).catch(() => {})
+          this.cluster.saveSingletonState(name, finalState)
+            .then(() => this.cluster!.releaseSingleton(name))
+            .then(() => this.cluster!.deleteState(componentId))
+            .catch(() => {})
         }
       }
       return true
