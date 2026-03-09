@@ -1,0 +1,24 @@
+{
+  "name": "cluster-failover-demo",
+  "private": true,
+  "scripts": {
+    "server-a": "cross-env SERVER_PORT=3001 bun run server.ts",
+    "server-b": "cross-env SERVER_PORT=3002 bun run server.ts",
+    "test:e2e": "npx playwright test --config=e2e/playwright.config.ts",
+    "test:e2e:cluster": "npx playwright test --config=e2e/playwright.config.ts --project=cluster-failover",
+    "test:e2e:react": "npx playwright test --config=e2e/playwright.config.ts --project=react-app",
+    "test:e2e:client": "npx playwright test --config=e2e/playwright.config.ts --project=client-edge"
+  },
+  "dependencies": {
+    "@fluxstack/live": "workspace:*",
+    "@fluxstack/live-elysia": "workspace:*",
+    "@fluxstack/live-client": "workspace:*",
+    "@fluxstack/live-redis": "workspace:*",
+    "elysia": "^1.4.6",
+    "ioredis": "^5.6.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "cross-env": "^10.1.0"
+  }
+}
