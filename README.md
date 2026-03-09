@@ -14,6 +14,7 @@ Live Components turn server-side classes into reactive state that syncs automati
 | `@fluxstack/live-fastify` | Fastify transport adapter |
 | `@fluxstack/live-client` | Browser WebSocket client |
 | `@fluxstack/live-react` | React hooks and providers (`Live.use()`) |
+| `@fluxstack/live-vue` | Vue 3 composables (`useLive()`, `provideLiveConnection()`) |
 | `@fluxstack/live-redis` | Redis adapters for horizontal scaling (rooms + cluster) |
 
 ## Quick Start

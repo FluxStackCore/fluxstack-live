@@ -44,6 +44,7 @@ bun run build            # core -> adapters -> client -> react (sequential)
 - `packages/fastify` — Fastify transport adapter
 - `packages/client` — Browser WebSocket client
 - `packages/react` — React hooks and providers (LiveComponentsProvider, Live.use())
+- `packages/vue` — Vue 3 composables (provideLiveConnection, useLive)
 - `packages/redis` — Redis adapters (RedisRoomAdapter for room pub/sub, RedisClusterAdapter for singleton coordination)
 
 ### Security Architecture
