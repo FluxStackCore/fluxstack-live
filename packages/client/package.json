@@ -1,7 +1,7 @@
 {
   "name": "@fluxstack/live-client",
   "version": "0.2.0",
-  "description": "Framework-agnostic browser client for @fluxstack/live",
+  "description": "Browser WebSocket client for @fluxstack/live — connection, state sync, rooms, and file upload (framework-agnostic)",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

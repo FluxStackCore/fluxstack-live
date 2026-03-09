@@ -1,7 +1,7 @@
 {
   "name": "@fluxstack/live-vue",
   "version": "0.1.0",
-  "description": "Vue 3 bindings for @fluxstack/live-client",
+  "description": "Vue 3 composables for @fluxstack/live — useLive(), provideLiveConnection(), reactive state sync",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

@@ -1,7 +1,7 @@
 {
   "name": "@fluxstack/live",
   "version": "0.2.0",
-  "description": "Framework-agnostic Live Components for real-time server-client state synchronization",
+  "description": "Real-time server-client state sync — LiveServer, LiveComponent, rooms, auth, security, and cluster coordination",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

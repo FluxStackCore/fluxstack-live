@@ -1,7 +1,7 @@
 {
   "name": "@fluxstack/live-redis",
   "version": "0.2.0",
-  "description": "Redis adapter for @fluxstack/live — room state persistence and cross-instance pub/sub for horizontal scaling",
+  "description": "Redis adapters for @fluxstack/live — cluster singleton coordination, action forwarding, failover recovery, and cross-instance room pub/sub",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

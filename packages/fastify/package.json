@@ -1,7 +1,7 @@
 {
   "name": "@fluxstack/live-fastify",
   "version": "0.2.0",
-  "description": "Fastify transport adapter for @fluxstack/live",
+  "description": "Fastify WebSocket transport adapter for @fluxstack/live (@fastify/websocket)",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

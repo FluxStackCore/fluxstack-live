@@ -1,7 +1,7 @@
 {
   "name": "@fluxstack/live-react",
   "version": "0.2.0",
-  "description": "React bindings for @fluxstack/live-client",
+  "description": "React hooks and providers for @fluxstack/live — Live.use(), $field(), LiveComponentsProvider",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
