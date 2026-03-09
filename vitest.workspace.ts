@@ -8,4 +8,5 @@ export default defineWorkspace([
   'packages/fastify',
   'packages/client',
   'packages/react',
+  '__tests__',
 ])

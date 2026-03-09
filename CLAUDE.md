@@ -95,10 +95,11 @@ Cluster tests require a running Redis instance. Start one via Docker:
 docker run -d --name fluxstack-test-redis -p 16379:6379 redis:7-alpine
 ```
 
-Tests are in `packages/core/src/__tests__/integration/cluster-sync.test.ts` and run automatically with the rest of the suite (they skip gracefully if Redis is unavailable).
+Tests are in `__tests__/integration/cluster-sync.test.ts` (monorepo root) and run automatically with the rest of the suite (they skip gracefully if Redis is unavailable).
 
 ## Conventions
 
 - All packages use `tsup` for building (ESM output, ES2022 target)
-- Tests use `vitest` and live in `packages/core/src/__tests__/`
+- Unit tests use `vitest` and live in each package's `src/__tests__/`
+- Cross-package integration tests live in `__tests__/` at the monorepo root
 - TypeScript strict mode enabled

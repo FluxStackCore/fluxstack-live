@@ -12,15 +12,15 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import Redis from 'ioredis'
-import { ComponentRegistry } from '../../component/ComponentRegistry'
-import { LiveComponent } from '../../component/LiveComponent'
-import { setLiveComponentContext } from '../../component/context'
-import { StateSignatureManager } from '../../security/StateSignature'
-import { LiveAuthManager } from '../../auth/LiveAuthManager'
-import { RoomEventBus } from '../../rooms/RoomEventBus'
-import { LiveRoomManager } from '../../rooms/LiveRoomManager'
-import { RedisClusterAdapter } from '../../../../redis/src/RedisClusterAdapter'
-import { createMockWS, spyOnConsole } from '../helpers'
+import { ComponentRegistry } from '../../packages/core/src/component/ComponentRegistry'
+import { LiveComponent } from '../../packages/core/src/component/LiveComponent'
+import { setLiveComponentContext } from '../../packages/core/src/component/context'
+import { StateSignatureManager } from '../../packages/core/src/security/StateSignature'
+import { LiveAuthManager } from '../../packages/core/src/auth/LiveAuthManager'
+import { RoomEventBus } from '../../packages/core/src/rooms/RoomEventBus'
+import { LiveRoomManager } from '../../packages/core/src/rooms/LiveRoomManager'
+import { RedisClusterAdapter } from '../../packages/redis/src/RedisClusterAdapter'
+import { createMockWS, spyOnConsole } from '../../packages/core/src/__tests__/helpers'
 
 // ===== Test Singleton Component =====
 
