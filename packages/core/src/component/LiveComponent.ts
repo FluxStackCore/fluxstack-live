@@ -33,6 +33,15 @@ export function _setLiveDebugger(dbg: LiveDebuggerInterface): void {
   _liveDebugger = dbg
 }
 
+export interface ComponentOptions {
+  /** Enable deep diff for plain objects in setState(). Default: false */
+  deepDiff?: boolean
+  /** Enable deep diff for room state updates. Default: true */
+  roomDeepDiff?: boolean
+  /** Max recursion depth for deep diff (component + room). Default: 3 */
+  deepDiffDepth?: number
+}
+
 export abstract class LiveComponent<TState = ComponentState, TPrivate extends Record<string, any> = Record<string, any>> {
   /** Component name for registry lookup - must be defined in subclasses */
   static componentName: string
@@ -94,6 +103,14 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
    */
   static singleton?: boolean
 
+  /**
+   * Component behavior options.
+   *
+   * @example
+   * static $options = { deepDiff: true }
+   */
+  static $options?: ComponentOptions
+
   public readonly id: string
   public state: TState // Proxy wrapper (getter delegates to _stateManager)
   protected ws: GenericWebSocket
@@ -147,6 +164,8 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
       emitFn: (type, payload) => this._messaging.emit(type, payload),
       onStateChangeFn: (changes) => this.onStateChange(changes),
       debugger: _liveDebugger,
+      deepDiff: (ctor as any).$options?.deepDiff ?? false,
+      deepDiffDepth: (ctor as any).$options?.deepDiffDepth,
     })
 
     // Expose proxy state as `this.state`
@@ -163,6 +182,8 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
       getCtx: () => getLiveComponentContext(),
       debugger: _liveDebugger,
       setStateFn: (updates: any) => this.setState(updates),
+      deepDiff: (ctor as any).$options?.roomDeepDiff,
+      deepDiffDepth: (ctor as any).$options?.deepDiffDepth,
     })
 
     // Create direct property accessors (this.count instead of this.state.count)

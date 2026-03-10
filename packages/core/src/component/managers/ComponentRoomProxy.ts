@@ -21,6 +21,10 @@ export interface RoomProxyContext {
   getCtx: () => LiveComponentContext
   debugger?: LiveDebuggerInterface | null
   setStateFn: (updates: any) => void
+  /** Deep diff setting for rooms (from component $options). Default: true */
+  deepDiff?: boolean
+  /** Max recursion depth for deep diff. Default: 3 */
+  deepDiffDepth?: number
 }
 
 export class ComponentRoomProxy {
@@ -39,6 +43,8 @@ export class ComponentRoomProxy {
   private getCtx: () => LiveComponentContext
   private _debugger: LiveDebuggerInterface | null
   private setStateFn: (updates: any) => void
+  private _deepDiff: boolean
+  private _deepDiffDepth: number | undefined
 
   constructor(rctx: RoomProxyContext) {
     this.componentId = rctx.componentId
@@ -47,11 +53,13 @@ export class ComponentRoomProxy {
     this.getCtx = rctx.getCtx
     this._debugger = rctx.debugger ?? null
     this.setStateFn = rctx.setStateFn
+    this._deepDiff = rctx.deepDiff ?? true
+    this._deepDiffDepth = rctx.deepDiffDepth
 
     // Auto-join default room if specified
     if (this.room) {
       this.joinedRooms.add(this.room)
-      this.ctx.roomManager.joinRoom(this.componentId, this.room, this.ws)
+      this.ctx.roomManager.joinRoom(this.componentId, this.room, this.ws, undefined, { deepDiff: this._deepDiff, deepDiffDepth: this._deepDiffDepth })
     }
   }
 
@@ -81,7 +89,7 @@ export class ComponentRoomProxy {
           if (self.joinedRooms.has(roomId)) return
           self.joinedRooms.add(roomId)
           self._roomsCache = null
-          self.ctx.roomManager.joinRoom(self.componentId, roomId, self.ws, initialState)
+          self.ctx.roomManager.joinRoom(self.componentId, roomId, self.ws, initialState, { deepDiff: self._deepDiff, deepDiffDepth: self._deepDiffDepth })
           // onRoomJoin hook is called from LiveComponent
         },
 

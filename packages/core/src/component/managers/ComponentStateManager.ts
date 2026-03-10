@@ -6,6 +6,7 @@
 import type { GenericWebSocket } from '../../transport/types'
 import type { LiveDebuggerInterface } from '../context'
 import type { ComponentState } from '../../protocol/messages'
+import { computeDeepDiff, deepAssign } from '../../utils/deepDiff'
 
 /** Per-class cache for forbidden property names in createDirectStateAccessors */
 const _forbiddenSetCache = new WeakMap<Function, Set<string>>()
@@ -17,6 +18,8 @@ export interface StateManagerOptions<TState> {
   emitFn: (type: string, payload: any) => void
   onStateChangeFn: (changes: Partial<TState>) => void
   debugger?: LiveDebuggerInterface | null
+  deepDiff?: boolean
+  deepDiffDepth?: number
 }
 
 export class ComponentStateManager<TState = ComponentState> {
@@ -24,6 +27,8 @@ export class ComponentStateManager<TState = ComponentState> {
   private _proxyState: TState
   private _inStateChange = false
   private _idBytes: Uint8Array | null = null
+  private _deepDiff: boolean
+  private _deepDiffDepth: number
 
   private componentId: string
   private ws: GenericWebSocket
@@ -37,7 +42,13 @@ export class ComponentStateManager<TState = ComponentState> {
     this.emitFn = opts.emitFn
     this.onStateChangeFn = opts.onStateChangeFn
     this._debugger = opts.debugger ?? null
-    this._state = opts.initialState
+    this._deepDiff = opts.deepDiff ?? false
+    this._deepDiffDepth = opts.deepDiffDepth ?? 3
+    // When deepDiff is enabled, deep-clone initialState so deepAssign
+    // doesn't mutate shared references (e.g. static defaultState).
+    this._state = this._deepDiff
+      ? structuredClone(opts.initialState)
+      : opts.initialState
     this._proxyState = this.createStateProxy(this._state)
   }
 
@@ -80,18 +91,41 @@ export class ComponentStateManager<TState = ComponentState> {
   setState(updates: Partial<TState> | ((prev: TState) => Partial<TState>)): void {
     const newUpdates = typeof updates === 'function' ? updates(this._state) : updates
 
-    const actualChanges: Partial<TState> = {} as Partial<TState>
-    let hasChanges = false
-    for (const key of Object.keys(newUpdates as object) as Array<keyof TState>) {
-      if ((this._state as any)[key] !== (newUpdates as any)[key]) {
-        (actualChanges as any)[key] = (newUpdates as any)[key]
-        hasChanges = true
+    let actualChanges: Partial<TState>
+    let hasChanges: boolean
+
+    if (this._deepDiff) {
+      // Deep diff: recursively compare plain objects, reference-compare everything else
+      const diff = computeDeepDiff(
+        this._state as Record<string, unknown>,
+        newUpdates as Record<string, unknown>,
+        0,
+        this._deepDiffDepth,
+      )
+      if (diff === null) return
+      actualChanges = diff as Partial<TState>
+      hasChanges = true
+    } else {
+      // Shallow diff: reference equality (original behavior)
+      actualChanges = {} as Partial<TState>
+      hasChanges = false
+      for (const key of Object.keys(newUpdates as object) as Array<keyof TState>) {
+        if ((this._state as any)[key] !== (newUpdates as any)[key]) {
+          (actualChanges as any)[key] = (newUpdates as any)[key]
+          hasChanges = true
+        }
       }
     }
 
     if (!hasChanges) return
 
-    Object.assign(this._state as object, actualChanges)
+    // Apply changes to internal state
+    if (this._deepDiff) {
+      deepAssign(this._state, actualChanges)
+    } else {
+      Object.assign(this._state as object, actualChanges)
+    }
+
     this.emitFn('STATE_DELTA', { delta: actualChanges })
     if (!this._inStateChange) {
       this._inStateChange = true

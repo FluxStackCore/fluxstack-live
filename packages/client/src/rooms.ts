@@ -3,6 +3,31 @@
 // Framework-agnostic room system for managing multi-room WebSocket communication.
 // Used by framework-specific adapters (React, Vue, etc.).
 
+// ===== Deep Merge (always-on, retrocompatible) =====
+
+function isPlainObject(v: unknown): v is Record<string, any> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+    && Object.getPrototypeOf(v) === Object.prototype
+}
+
+function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>, seen?: Set<object>): T {
+  if (!seen) seen = new Set()
+  if (seen.has(source as object)) return target
+  seen.add(source as object)
+
+  const result = { ...target }
+  for (const key of Object.keys(source) as Array<keyof T>) {
+    const newVal = source[key]
+    const oldVal = result[key]
+    if (isPlainObject(oldVal) && isPlainObject(newVal)) {
+      result[key] = deepMerge(oldVal as any, newVal as any, seen)
+    } else {
+      result[key] = newVal as T[keyof T]
+    }
+  }
+  return result
+}
+
 type EventHandler<T = any> = (data: T) => void
 type Unsubscribe = () => void
 
@@ -104,7 +129,7 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       }
 
       case 'ROOM_STATE': {
-        room.state = { ...room.state, ...msg.data }
+        room.state = deepMerge(room.state as Record<string, any>, msg.data) as TState
         const stateHandlers = room.handlers.get('$state:change')
         if (stateHandlers) {
           for (const handler of stateHandlers) handler(msg.data)
@@ -207,7 +232,7 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
 
       setState: (updates: Partial<TState>) => {
         if (!this.componentId) return
-        room.state = { ...room.state, ...updates }
+        room.state = deepMerge(room.state as Record<string, any>, updates as Record<string, any>) as TState
         this.sendMessage({
           type: 'ROOM_STATE_SET',
           componentId: this.componentId,

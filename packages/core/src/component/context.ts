@@ -11,7 +11,7 @@ import type { LiveDebugger } from '../debug/LiveDebugger'
 // Extracted to avoid circular dependency with LiveRoomManager
 
 export interface LiveRoomManagerInterface {
-  joinRoom<TState = any>(componentId: string, roomId: string, ws: any, initialState?: TState): { state: TState }
+  joinRoom<TState = any>(componentId: string, roomId: string, ws: any, initialState?: TState, options?: { deepDiff?: boolean; deepDiffDepth?: number }): { state: TState }
   leaveRoom(componentId: string, roomId: string): void
   cleanupComponent(componentId: string): void
   emitToRoom(roomId: string, event: string, data: any, excludeComponentId?: string): number

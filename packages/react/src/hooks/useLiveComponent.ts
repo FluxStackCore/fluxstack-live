@@ -22,6 +22,31 @@ import {
 import type { RoomProxy, RoomServerMessage } from '@fluxstack/live-client'
 import type { WebSocketResponse } from '@fluxstack/live'
 
+// ===== Deep Merge (always-on, retrocompatible) =====
+
+function isPlainObject(v: unknown): v is Record<string, any> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+    && Object.getPrototypeOf(v) === Object.prototype
+}
+
+function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>, seen?: Set<object>): T {
+  if (!seen) seen = new Set()
+  if (seen.has(source as object)) return target
+  seen.add(source as object)
+
+  const result = { ...target }
+  for (const key of Object.keys(source) as Array<keyof T>) {
+    const newVal = source[key]
+    const oldVal = result[key]
+    if (isPlainObject(oldVal) && isPlainObject(newVal)) {
+      result[key] = deepMerge(oldVal as any, newVal as any, seen)
+    } else {
+      result[key] = newVal as T[keyof T]
+    }
+  }
+  return result
+}
+
 // ===== Types =====
 
 export interface FieldOptions {
@@ -484,7 +509,7 @@ export function useLiveComponent<
         case 'STATE_DELTA':
           if (message.payload?.delta) {
             const oldState = storeRef.current?.getState().state ?? stateData
-            const mergedState = { ...oldState, ...message.payload.delta } as TState
+            const mergedState = deepMerge(oldState, message.payload.delta) as TState
             updateState(mergedState)
             onStateChange?.(mergedState, oldState)
           }
@@ -524,9 +549,9 @@ export function useLiveComponent<
     if (binaryDecoder && componentId) {
       unregisterBinary = registerBinaryHandler(componentId, (payload: Uint8Array) => {
         try {
-          const delta = binaryDecoder(payload)
+          const delta = binaryDecoder(payload) as Partial<TState>
           const oldState = storeRef.current?.getState().state ?? stateData
-          const mergedState = { ...oldState, ...delta } as TState
+          const mergedState = deepMerge(oldState, delta) as TState
           updateState(mergedState)
           onStateChange?.(mergedState, oldState)
         } catch (e) {

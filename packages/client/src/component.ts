@@ -13,6 +13,31 @@
 import type { WebSocketResponse } from '@fluxstack/live'
 import type { LiveConnection } from './connection'
 
+// ===== Deep Merge (always-on, retrocompatible) =====
+
+function isPlainObject(v: unknown): v is Record<string, any> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+    && Object.getPrototypeOf(v) === Object.prototype
+}
+
+function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>, seen?: Set<object>): T {
+  if (!seen) seen = new Set()
+  if (seen.has(source as object)) return target
+  seen.add(source as object)
+
+  const result = { ...target }
+  for (const key of Object.keys(source) as Array<keyof T>) {
+    const newVal = source[key]
+    const oldVal = result[key]
+    if (isPlainObject(oldVal) && isPlainObject(newVal)) {
+      result[key] = deepMerge(oldVal as any, newVal as any, seen)
+    } else {
+      result[key] = newVal as T[keyof T]
+    }
+  }
+  return result
+}
+
 export interface LiveComponentOptions<TState = Record<string, any>> {
   /** Initial state to merge with server defaults */
   initialState?: Partial<TState>
@@ -257,8 +282,8 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
 
     return this.connection.registerBinaryHandler(this._componentId, (payload: Uint8Array) => {
       try {
-        const delta = decoder(payload)
-        this._state = { ...this._state, ...delta } as TState
+        const delta = decoder(payload) as Partial<TState>
+        this._state = deepMerge(this._state, delta) as TState
         this.notifyStateChange(this._state, delta as Partial<TState>)
       } catch (e) {
         console.error('Binary decode error:', e)
@@ -282,7 +307,7 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
       case 'STATE_UPDATE': {
         const newState = (msg as any).payload?.state
         if (newState) {
-          this._state = { ...this._state, ...newState }
+          this._state = deepMerge(this._state, newState)
           this.notifyStateChange(this._state, null)
         }
         break
@@ -291,7 +316,7 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
       case 'STATE_DELTA': {
         const delta = (msg as any).payload?.delta
         if (delta) {
-          this._state = { ...this._state, ...delta }
+          this._state = deepMerge(this._state, delta)
           this.notifyStateChange(this._state, delta)
         }
         break

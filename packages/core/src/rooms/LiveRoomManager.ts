@@ -8,6 +8,7 @@ import { queueWsMessage, queuePreSerialized } from '../transport/WsSendBatcher'
 import { liveLog } from '../debug/LiveLogger'
 import { MAX_ROOM_STATE_SIZE, ROOM_NAME_REGEX } from '../protocol/constants'
 import type { IRoomPubSubAdapter } from './adapters'
+import { computeDeepDiff, deepAssign } from '../utils/deepDiff'
 
 export interface RoomMessage {
   type: 'ROOM_JOIN' | 'ROOM_LEAVE' | 'ROOM_EMIT' | 'ROOM_STATE_SET' | 'ROOM_STATE_GET'
@@ -33,6 +34,10 @@ interface Room<TState = any> {
   lastActivity: number
   /** Estimated serialized state size in bytes (for size limit checks) */
   stateSize?: number
+  /** Whether deep diff is enabled for this room's state. Default: true */
+  deepDiff: boolean
+  /** Max recursion depth for deep diff. Default: 3 */
+  deepDiffDepth: number
 }
 
 export class LiveRoomManager {
@@ -52,8 +57,9 @@ export class LiveRoomManager {
 
   /**
    * Component joins a room
+   * @param options.deepDiff - Enable/disable deep diff for this room's state. Default: true
    */
-  joinRoom<TState = any>(componentId: string, roomId: string, ws: GenericWebSocket, initialState?: TState): { state: TState } {
+  joinRoom<TState = any>(componentId: string, roomId: string, ws: GenericWebSocket, initialState?: TState, options?: { deepDiff?: boolean; deepDiffDepth?: number }): { state: TState } {
     // Validate room name format (uses pre-compiled regex from constants)
     if (!roomId || !ROOM_NAME_REGEX.test(roomId)) {
       throw new Error('Invalid room name. Must be 1-64 alphanumeric characters, hyphens, underscores, dots, or colons.')
@@ -69,7 +75,9 @@ export class LiveRoomManager {
         state: (initialState || {}) as TState,
         members: new Map(),
         createdAt: now,
-        lastActivity: now
+        lastActivity: now,
+        deepDiff: options?.deepDiff ?? true,
+        deepDiffDepth: options?.deepDiffDepth ?? 3,
       }
       this.rooms.set(roomId, room)
       liveLog('rooms', componentId, `Room '${roomId}' created`)
@@ -240,14 +248,42 @@ export class LiveRoomManager {
 
   /**
    * Update room state.
-   * Mutates state in-place with Object.assign to avoid full-object spread.
+   * When deepDiff is enabled (default), deep-diffs plain objects to send only changed fields.
+   * When disabled, uses shallow diff (reference equality) like classic behavior.
    */
   setRoomState(roomId: string, updates: any, excludeComponentId?: string): void {
     const room = this.rooms.get(roomId)
     if (!room) return
 
-    // Mutate in-place instead of spread (avoids creating a new object)
-    Object.assign(room.state as object, updates)
+    let actualChanges: Record<string, unknown>
+
+    if (room.deepDiff) {
+      // Deep diff: only send fields that actually changed
+      const diff = computeDeepDiff(
+        room.state as Record<string, unknown>,
+        updates as Record<string, unknown>,
+        0,
+        room.deepDiffDepth,
+      )
+      if (diff === null) return // nothing changed
+      actualChanges = diff
+
+      // Mutate in-place with recursive merge
+      deepAssign(room.state, actualChanges)
+    } else {
+      // Shallow diff: reference equality
+      actualChanges = {}
+      let hasChanges = false
+      for (const key of Object.keys(updates)) {
+        if (room.state[key] !== updates[key]) {
+          actualChanges[key] = updates[key]
+          hasChanges = true
+        }
+      }
+      if (!hasChanges) return
+
+      Object.assign(room.state, actualChanges)
+    }
 
     // Size check: estimate via update delta instead of full state re-serialization.
     if (room.stateSize === undefined) {
@@ -257,7 +293,7 @@ export class LiveRoomManager {
         throw new Error('Room state exceeds maximum size limit')
       }
     } else {
-      const deltaSize = JSON.stringify(updates).length
+      const deltaSize = JSON.stringify(actualChanges).length
       room.stateSize += deltaSize
       if (room.stateSize > MAX_ROOM_STATE_SIZE) {
         // Re-check precisely if we're near the limit
@@ -273,14 +309,14 @@ export class LiveRoomManager {
     room.lastActivity = now
 
     // Propagate state change to other instances (fire-and-forget)
-    this.pubsub?.publishStateChange(roomId, updates)?.catch(() => {})
+    this.pubsub?.publishStateChange(roomId, actualChanges)?.catch(() => {})
 
     this.broadcastToRoom(roomId, {
       type: 'ROOM_STATE',
       componentId: '',
       roomId,
       event: '$state:update',
-      data: { state: updates },
+      data: { state: actualChanges },
       timestamp: now
     }, excludeComponentId)
   }
