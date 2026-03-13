@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Real-time server-client state sync — LiveServer, LiveComponent, rooms, auth, security, and cluster coordination",
   "type": "module",
   "main": "./dist/index.js",
@@ -18,7 +18,9 @@
       "types": "./dist/build/index.d.ts"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",

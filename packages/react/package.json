@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-react",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "React hooks and providers for @fluxstack/live — Live.use(), $field(), LiveComponentsProvider",
   "type": "module",
   "main": "./dist/index.js",
@@ -13,7 +13,9 @@
       "types": "./dist/index.d.ts"
     }
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -21,8 +23,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.2.0",
-    "@fluxstack/live-client": "^0.2.0"
+    "@fluxstack/live": "^0.3.0",
+    "@fluxstack/live-client": "^0.3.0"
   },
   "peerDependencies": {
     "react": ">=18.0.0",

@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-client",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Browser WebSocket client for @fluxstack/live — connection, state sync, rooms, and file upload (framework-agnostic)",
   "type": "module",
   "main": "./dist/index.js",
@@ -14,7 +14,9 @@
     },
     "./browser": "./dist/live-client.browser.global.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -22,7 +24,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.2.0"
+    "@fluxstack/live": "^0.3.0"
   },
   "devDependencies": {
     "tsup": "^8.4.0",
