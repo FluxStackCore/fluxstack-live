@@ -79,12 +79,130 @@ function App() {
 
 - **Auto-discovery**: Point `componentsPath` to a directory and components are registered automatically
 - **Singletons**: `static singleton = true` — one instance shared by all clients
-- **Rooms**: Built-in room system with typed events and cross-instance pub/sub
+- **Typed Rooms**: `LiveRoom<TState, TEvents>` with end-to-end type inference and binary msgpack codec
 - **Auth**: Per-component and per-action authorization (`static auth`, `static actionAuth`)
 - **State signing**: HMAC-SHA256 state signing for tamper detection + rehydration on reconnect
 - **Rate limiting**: Per-action rate limits (`static actionRateLimit`)
-- **Binary delta**: Efficient binary state diffs for high-frequency updates (games, real-time)
+- **Binary delta**: Deep diff + msgpack — only changed fields sent over the wire, zero npm dependencies
 - **Horizontal scaling**: Cluster adapter for multi-server singleton coordination
+
+## Typed Rooms (LiveRoom)
+
+Define rooms as classes with typed state, events, and metadata. The binary codec (msgpack) is used automatically — no configuration needed.
+
+### Room Definition
+
+```typescript
+import { LiveRoom } from '@fluxstack/live'
+
+export class ChatRoom extends LiveRoom<
+  { messages: Message[]; userCount: number },           // TState
+  { 'message:new': Message; 'user:joined': { name: string } },  // TEvents
+  { topic: string }                                      // TMeta (optional)
+> {
+  static prefix = 'chat'  // rooms created as "chat:{id}"
+
+  onJoin(componentId: string, context?: { userId?: string }) {
+    this.setState({ userCount: this.state.userCount + 1 })
+    this.emit('user:joined', { name: context?.userId ?? 'Anonymous' })
+  }
+
+  onLeave(componentId: string) {
+    this.setState({ userCount: this.state.userCount - 1 })
+  }
+
+  sendMessage(from: string, text: string) {
+    const msg = { from, text, timestamp: Date.now() }
+    this.emit('message:new', msg)  // binary msgpack broadcast to all members
+    return msg
+  }
+}
+```
+
+### Server Component
+
+```typescript
+import { LiveComponent } from '@fluxstack/live'
+import { ChatRoom } from './rooms/ChatRoom'
+
+export class LiveChat extends LiveComponent<{ messages: Message[] }> {
+  static componentName = 'LiveChat'
+  static defaultState = { messages: [] }
+  static publicActions = ['send'] as const
+
+  constructor(initialState: any, ws: any, options: any) {
+    super(initialState, ws, options)
+    const room = this.$room(ChatRoom, 'general')  // fully typed
+    room.join()
+    room.on('message:new', (msg) => {              // msg is typed as Message
+      this.setState({ messages: [...this.state.messages, msg] })
+    })
+  }
+
+  send(payload: { text: string }) {
+    const room = this.$room(ChatRoom, 'general')
+    room.emit('message:new', { from: 'user', text: payload.text })
+  }
+}
+```
+
+### Client (React)
+
+```tsx
+import { Live } from '@fluxstack/live-react'
+import type { LiveChat } from '../server/components/LiveChat'
+import type { ChatRoom } from '../server/rooms/ChatRoom'
+
+function Chat() {
+  const { state, call, $room } = Live.use<LiveChat>('LiveChat')
+
+  // Listen to binary room events (typed!)
+  $room<ChatRoom>('chat:general').on('message:new', (msg) => {
+    console.log(msg.from, msg.text)  // fully typed
+  })
+
+  return (
+    <div>
+      {state.messages.map(m => <p key={m.timestamp}>{m.text}</p>)}
+      <button onClick={() => call('send', { text: 'Hello!' })}>Send</button>
+    </div>
+  )
+}
+```
+
+### Binary Protocol
+
+Room events and state updates are automatically serialized with msgpack (zero npm dependencies). The wire format:
+
+```
+[frameType:u8][compIdLen:u8][compId:utf8][roomIdLen:u8][roomId:utf8][eventLen:u16BE][event:utf8][payload:msgpack]
+```
+
+- Frame type `0x02`: Room event broadcast
+- Frame type `0x03`: Room state update (deep diff — only changed fields)
+
+The server encodes the payload once and prepends a per-member header, so broadcast cost is O(1) encode + O(n) header prepend.
+
+### Custom Codec
+
+Override the default msgpack codec per room:
+
+```typescript
+export class MyRoom extends LiveRoom<...> {
+  static prefix = 'my'
+  static $options = { codec: 'json' }        // JSON over binary frames
+  // or: static $options = { codec: myCustomCodec }  // { encode, decode }
+}
+```
+
+### State Delta Sync
+
+Room state updates use deep diff by default. When you call `setState({ score: 10 })`, the server:
+
+1. Computes `computeDeepDiff(currentState, updates)` — only changed fields
+2. Encodes the delta with msgpack
+3. Broadcasts the binary frame to all room members
+4. Client applies `deepMerge(localState, delta)` — preserves unchanged fields
 
 ## Horizontal Scaling (Cluster)
 
