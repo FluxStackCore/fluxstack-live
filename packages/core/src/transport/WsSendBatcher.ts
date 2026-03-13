@@ -192,6 +192,16 @@ function deduplicateDeltas(messages: PendingMessage[]): PendingMessage[] {
 }
 
 /**
+ * Send a binary message immediately (bypass batching).
+ * Binary frames are never batched — they are self-framing.
+ */
+export function sendBinaryImmediate(ws: GenericWebSocket, data: Uint8Array): void {
+  if (ws && ws.readyState === 1) {
+    ws.send(data)
+  }
+}
+
+/**
  * Send a message immediately (bypass batching).
  * Used for ACTION_RESPONSE and other request-response patterns
  * where the client is awaiting an immediate response.

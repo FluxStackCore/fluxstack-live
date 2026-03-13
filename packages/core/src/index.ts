@@ -20,7 +20,7 @@ export type {
   HttpRequest,
   HttpResponse,
 } from './transport/types'
-export { queueWsMessage, sendImmediate } from './transport/WsSendBatcher'
+export { queueWsMessage, sendImmediate, sendBinaryImmediate } from './transport/WsSendBatcher'
 
 // ===== Protocol Messages =====
 export type {
@@ -68,6 +68,31 @@ export { RoomStateManager, createTypedRoomState, type RoomStateData, type RoomIn
 export { LiveRoomManager } from './rooms/LiveRoomManager'
 export type { IRoomStorageAdapter, IRoomPubSubAdapter } from './rooms/adapters'
 export { InMemoryRoomAdapter } from './rooms/InMemoryRoomAdapter'
+export { LiveRoom } from './rooms/LiveRoom'
+export type {
+  LiveRoomClass,
+  LiveRoomOptions,
+  RoomJoinContext,
+  RoomLeaveContext,
+  RoomEventContext,
+  InferRoomState,
+  InferRoomMeta,
+  InferRoomEvents,
+} from './rooms/LiveRoom'
+export { RoomRegistry } from './rooms/RoomRegistry'
+export {
+  msgpackCodec,
+  jsonCodec,
+  resolveCodec,
+  buildRoomFrame,
+  buildRoomFrameTail,
+  prependMemberHeader,
+  parseRoomFrame,
+  BINARY_ROOM_EVENT,
+  BINARY_ROOM_STATE,
+  type RoomCodec,
+  type RoomCodecOption,
+} from './rooms/RoomCodec'
 
 // ===== Debug & Logging =====
 export {
@@ -114,7 +139,7 @@ export {
 } from './component/ComponentRegistry'
 
 // ===== DI Context =====
-export { setLiveComponentContext, getLiveComponentContext, type LiveComponentContext } from './component/context'
+export { setLiveComponentContext, getLiveComponentContext, type LiveComponentContext, type LiveRoomManagerInterface } from './component/context'
 
 // ===== Cluster Adapter =====
 export type {

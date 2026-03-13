@@ -14,7 +14,8 @@ import type { LiveDebuggerInterface } from './context'
 import type { GenericWebSocket } from '../transport/types'
 import type { LiveAuthContext, LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
-import type { BroadcastMessage, ComponentState, ServerRoomHandle, ServerRoomProxy } from '../protocol/messages'
+import type { BroadcastMessage, ComponentState, ServerRoomProxy } from '../protocol/messages'
+import type { LiveRoom, LiveRoomClass } from '../rooms/LiveRoom'
 
 // Managers
 import { ComponentStateManager } from './managers/ComponentStateManager'
@@ -40,9 +41,14 @@ export interface ComponentOptions {
   roomDeepDiff?: boolean
   /** Max recursion depth for deep diff (component + room). Default: 3 */
   deepDiffDepth?: number
+  /** When true, room state can only be set from server-side code. Client ROOM_STATE_SET is rejected. Default: false */
+  serverOnlyRoomState?: boolean
 }
 
-export abstract class LiveComponent<TState = ComponentState, TPrivate extends Record<string, any> = Record<string, any>> {
+export abstract class LiveComponent<
+  TState = ComponentState,
+  TPrivate extends Record<string, any> = Record<string, any>
+> {
   /** Component name for registry lookup - must be defined in subclasses */
   static componentName: string
   /** Default state - must be defined in subclasses */
@@ -184,6 +190,7 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
       setStateFn: (updates: any) => this.setState(updates),
       deepDiff: (ctor as any).$options?.roomDeepDiff,
       deepDiffDepth: (ctor as any).$options?.deepDiffDepth,
+      serverOnlyState: (ctor as any).$options?.serverOnlyRoomState,
     })
 
     // Create direct property accessors (this.count instead of this.state.count)
@@ -202,8 +209,26 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
   // $room - Unified Room System
   // ========================================
 
-  public get $room(): ServerRoomProxy {
-    return this._roomProxyManager.$room
+  /**
+   * Unified room accessor.
+   *
+   * Usage:
+   * - `this.$room` — default room handle (legacy)
+   * - `this.$room('roomId')` — untyped room handle (legacy)
+   * - `this.$room(ChatRoom, 'lobby')` — typed handle with custom methods
+   */
+  public get $room(): ServerRoomProxy & {
+    <R extends LiveRoom<any, any, any>>(roomClass: LiveRoomClass<R>, instanceId: string): R & {
+      readonly id: string
+      join: (payload?: any) => { rejected?: false } | { rejected: true; reason: string }
+      leave: () => void
+      emit: R['emit']
+      on: <K extends string>(event: K, handler: (data: any) => void) => () => void
+      setState: (updates: Partial<R['state']>) => void
+      readonly memberCount: number
+    }
+  } {
+    return this._roomProxyManager.$room as any
   }
 
   /**
@@ -335,11 +360,7 @@ export abstract class LiveComponent<TState = ComponentState, TPrivate extends Re
     this._roomProxyManager.onRoomEvent(event, handler)
   }
 
-  protected emitRoomEventWithState(
-    event: string,
-    data: any,
-    stateUpdates: Partial<TState>
-  ): number {
+  protected emitRoomEventWithState(event: string, data: any, stateUpdates: Partial<TState>): number {
     return this._roomProxyManager.emitRoomEventWithState(event, data, stateUpdates)
   }
 

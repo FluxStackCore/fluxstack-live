@@ -9,6 +9,7 @@ vi.mock('../../transport/WsSendBatcher', () => ({
   queueWsMessage: vi.fn(),
   queuePreSerialized: vi.fn(),
   sendImmediate: vi.fn(),
+  sendBinaryImmediate: vi.fn(),
 }))
 
 // Mock LiveLogger to suppress output
@@ -39,7 +40,8 @@ describe('LiveRoomManager', () => {
       const ws = createMockWS()
       const result = manager.joinRoom('comp-1', 'chat:lobby', ws, { messages: [] })
 
-      expect(result.state).toEqual({ messages: [] })
+      expect('rejected' in result && result.rejected).toBeFalsy()
+      expect((result as any).state).toEqual({ messages: [] })
     })
 
     it('adds member to existing room', () => {

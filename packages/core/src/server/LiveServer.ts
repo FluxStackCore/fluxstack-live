@@ -26,6 +26,9 @@ import { sanitizePayload } from '../security/sanitize'
 import type { LiveAuthProvider } from '../auth/types'
 import type { IRoomPubSubAdapter } from '../rooms/adapters'
 import type { IClusterAdapter } from '../cluster/types'
+import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
+import { RoomRegistry } from '../rooms/RoomRegistry'
+import type { LiveRoomClass } from '../rooms/LiveRoom'
 
 export interface LiveServerOptions {
   /** Transport adapter (Elysia, Express, etc.) */
@@ -63,6 +66,8 @@ export interface LiveServerOptions {
    *  component state is mirrored to a shared store (Redis), and actions on
    *  remote singletons are forwarded to the owner instance. */
   cluster?: IClusterAdapter
+  /** LiveRoom classes to register. These define typed rooms with lifecycle hooks. */
+  rooms?: LiveRoomClass[]
 }
 
 export class LiveServer {
@@ -77,6 +82,7 @@ export class LiveServer {
   public readonly connectionManager: WebSocketConnectionManager
   public readonly registry: ComponentRegistry
   public readonly rateLimiter: RateLimiterRegistry
+  public readonly roomRegistry: RoomRegistry
 
   private transport: LiveTransport
   private options: LiveServerOptions
@@ -95,6 +101,15 @@ export class LiveServer {
     this.fileUploadManager = new FileUploadManager(options.fileUpload)
     this.connectionManager = new WebSocketConnectionManager(options.connection)
     this.rateLimiter = new RateLimiterRegistry(options.rateLimitMaxTokens, options.rateLimitRefillRate)
+
+    // Room registry + wire to room manager
+    this.roomRegistry = new RoomRegistry()
+    this.roomManager.roomRegistry = this.roomRegistry
+    if (options.rooms) {
+      for (const roomClass of options.rooms) {
+        this.roomRegistry.register(roomClass)
+      }
+    }
 
     this.registry = new ComponentRegistry({
       authManager: this.authManager,
@@ -120,6 +135,15 @@ export class LiveServer {
    */
   useAuth(provider: LiveAuthProvider): this {
     this.authManager.register(provider)
+    return this
+  }
+
+  /**
+   * Register a LiveRoom class.
+   * Can be called before start() to register room types dynamically.
+   */
+  useRoom(roomClass: LiveRoomClass): this {
+    this.roomRegistry.register(roomClass)
     return this
   }
 
@@ -274,7 +298,7 @@ export class LiveServer {
 
       // Room messages
       if (message.type === 'ROOM_JOIN' || message.type === 'ROOM_LEAVE' || message.type === 'ROOM_EMIT' || message.type === 'ROOM_STATE_SET' || message.type === 'ROOM_STATE_GET') {
-        this.handleRoomMessage(ws, message)
+        await this.handleRoomMessage(ws, message)
         return
       }
 
@@ -375,12 +399,24 @@ export class LiveServer {
 
   // ===== Room Message Router =====
 
-  private handleRoomMessage(ws: GenericWebSocket, message: LiveMessage): void {
+  private async handleRoomMessage(ws: GenericWebSocket, message: LiveMessage): Promise<void> {
     const { componentId } = message
     const roomId = (message as any).roomId || message.payload?.roomId
 
     switch (message.type) {
       case 'ROOM_JOIN': {
+        // Block client join for LiveRoom-backed rooms (must use server-side $room().join())
+        if (this.roomRegistry.resolveFromId(roomId)) {
+          sendImmediate(ws, JSON.stringify({
+            type: 'ERROR',
+            componentId,
+            error: 'Room requires server-side join via component action',
+            requestId: message.requestId,
+            timestamp: Date.now()
+          }))
+          break
+        }
+
         // Per-connection room limit
         const connRooms = ws.data?.rooms as Set<string> | undefined
         if (connRooms && connRooms.size >= MAX_ROOMS_PER_CONNECTION) {
@@ -394,7 +430,37 @@ export class LiveServer {
           break
         }
 
+        // Auth: check if auth provider allows joining this room
+        if (this.authManager.hasProviders()) {
+          const authContext = ws.data?.authContext
+          const authResult = await this.authManager.authorizeRoom(
+            authContext || ANONYMOUS_CONTEXT,
+            roomId,
+          )
+          if (!authResult.allowed) {
+            sendImmediate(ws, JSON.stringify({
+              type: 'ERROR',
+              componentId,
+              error: authResult.reason || 'Room access denied',
+              requestId: message.requestId,
+              timestamp: Date.now()
+            }))
+            break
+          }
+        }
+
         const result = this.roomManager.joinRoom(componentId, roomId, ws, message.payload?.initialState)
+
+        if ('rejected' in result && result.rejected) {
+          sendImmediate(ws, JSON.stringify({
+            type: 'ERROR',
+            componentId,
+            error: result.reason,
+            requestId: message.requestId,
+            timestamp: Date.now()
+          }))
+          break
+        }
 
         // Track rooms per connection
         if (!ws.data!.rooms) ws.data!.rooms = new Set<string>()
@@ -420,13 +486,59 @@ export class LiveServer {
           timestamp: Date.now()
         }))
         break
-      case 'ROOM_EMIT':
+      case 'ROOM_EMIT': {
+        // Security: must be a member of the room to emit
+        if (!this.roomManager.isInRoom(componentId, roomId)) {
+          sendImmediate(ws, JSON.stringify({
+            type: 'ERROR',
+            componentId,
+            error: 'Not a member of this room',
+            requestId: message.requestId,
+            timestamp: Date.now()
+          }))
+          break
+        }
         this.roomManager.emitToRoom(roomId, message.payload?.event, message.payload?.data, componentId)
         break
-      case 'ROOM_STATE_SET':
+      }
+      case 'ROOM_STATE_SET': {
+        // Security: must be a member of the room
+        if (!this.roomManager.isInRoom(componentId, roomId)) {
+          sendImmediate(ws, JSON.stringify({
+            type: 'ERROR',
+            componentId,
+            error: 'Not a member of this room',
+            requestId: message.requestId,
+            timestamp: Date.now()
+          }))
+          break
+        }
+        // Security: block client writes when serverOnlyState is enabled
+        if (this.roomManager.isServerOnlyState(roomId)) {
+          sendImmediate(ws, JSON.stringify({
+            type: 'ERROR',
+            componentId,
+            error: 'Room state is server-only',
+            requestId: message.requestId,
+            timestamp: Date.now()
+          }))
+          break
+        }
         this.roomManager.setRoomState(roomId, message.payload?.state, componentId)
         break
+      }
       case 'ROOM_STATE_GET': {
+        // Security: must be a member of the room to read state
+        if (!this.roomManager.isInRoom(componentId, roomId)) {
+          sendImmediate(ws, JSON.stringify({
+            type: 'ERROR',
+            componentId,
+            error: 'Not a member of this room',
+            requestId: message.requestId,
+            timestamp: Date.now()
+          }))
+          break
+        }
         const state = this.roomManager.getRoomState(roomId)
         sendImmediate(ws, JSON.stringify({
           type: 'ROOM_STATE',

@@ -35,6 +35,14 @@ type ExtractActions<T> = T extends { new(...args: any[]): infer Instance }
     : Record<string, never>
   : Record<string, never>
 
+/** Extract TRoom from LiveComponent<TState, TPrivate, TRoom> via the $room getter */
+type ExtractRoomState<T> = T extends { new(...args: any[]): { $room: { state: infer S } } }
+  ? S : any
+
+type ExtractRoomEvents<T> = T extends { new(...args: any[]): { $room: { emit: <K extends keyof infer E>(event: K, data: any) => any } } }
+  ? E extends Record<string, any> ? E : Record<string, any>
+  : Record<string, any>
+
 // ===== Options =====
 
 interface LiveUseOptions<TState> extends UseLiveComponentOptions {
@@ -49,13 +57,13 @@ function useLive<
 >(
   ComponentClass: T,
   options?: LiveUseOptions<ExtractState<T>>,
-): LiveProxyWithBroadcasts<ExtractState<T>, ExtractActions<T>, TBroadcasts> {
+): LiveProxyWithBroadcasts<ExtractState<T>, ExtractActions<T>, TBroadcasts, ExtractRoomState<T>, ExtractRoomEvents<T>> {
   const componentName = ComponentClass.componentName
   const defaultState = (ComponentClass as any).defaultState || {}
   const { initialState, ...restOptions } = options || {}
   const mergedState = { ...defaultState, ...initialState } as ExtractState<T>
 
-  return useLiveComponent<ExtractState<T>, ExtractActions<T>, TBroadcasts>(
+  return useLiveComponent<ExtractState<T>, ExtractActions<T>, TBroadcasts, ExtractRoomState<T>, ExtractRoomEvents<T>>(
     componentName,
     mergedState,
     restOptions,

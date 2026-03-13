@@ -11,14 +11,16 @@ import type { LiveDebugger } from '../debug/LiveDebugger'
 // Extracted to avoid circular dependency with LiveRoomManager
 
 export interface LiveRoomManagerInterface {
-  joinRoom<TState = any>(componentId: string, roomId: string, ws: any, initialState?: TState, options?: { deepDiff?: boolean; deepDiffDepth?: number }): { state: TState }
-  leaveRoom(componentId: string, roomId: string): void
+  joinRoom<TState = any>(componentId: string, roomId: string, ws: any, initialState?: TState, options?: { deepDiff?: boolean; deepDiffDepth?: number; serverOnlyState?: boolean }, joinContext?: { userId?: string; payload?: any }): { state: TState; rejected?: false } | { rejected: true; reason: string }
+  leaveRoom(componentId: string, roomId: string, leaveReason?: 'leave' | 'disconnect' | 'cleanup'): void
   cleanupComponent(componentId: string): void
   emitToRoom(roomId: string, event: string, data: any, excludeComponentId?: string): number
   setRoomState(roomId: string, updates: any, excludeComponentId?: string): void
   getRoomState<TState = any>(roomId: string): TState
   isInRoom(componentId: string, roomId: string): boolean
   getComponentRooms(componentId: string): string[]
+  getMemberCount?(roomId: string): number
+  getRoomInstance?(roomId: string): import('../rooms/LiveRoom').LiveRoom<any, any, any> | undefined
   getStats(): any
 }
 

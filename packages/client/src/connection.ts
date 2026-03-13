@@ -55,6 +55,7 @@ export class LiveConnection {
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private componentCallbacks = new Map<string, ComponentCallback>()
   private binaryCallbacks = new Map<string, (payload: Uint8Array) => void>()
+  private roomBinaryHandlers = new Set<(frame: Uint8Array) => void>()
   private pendingRequests = new Map<string, {
     resolve: (value: any) => void
     reject: (error: any) => void
@@ -401,20 +402,34 @@ export class LiveConnection {
     })
   }
 
-  /** Parse and route a binary BINARY_STATE_DELTA frame */
+  /** Parse and route binary frames (state delta, room events, room state) */
   private handleBinaryMessage(buffer: Uint8Array): void {
-    if (buffer.length < 3 || buffer[0] !== 0x01) return  // not BINARY_STATE_DELTA
+    if (buffer.length < 3) return
 
-    const idLen = buffer[1]
-    if (buffer.length < 2 + idLen) return
+    const frameType = buffer[0]
 
-    const componentId = new TextDecoder().decode(buffer.subarray(2, 2 + idLen))
-    const payload = buffer.subarray(2 + idLen)
+    if (frameType === 0x01) {
+      // BINARY_STATE_DELTA: [0x01][idLen:u8][compId:utf8][payload]
+      const idLen = buffer[1]
+      if (buffer.length < 2 + idLen) return
+      const componentId = new TextDecoder().decode(buffer.subarray(2, 2 + idLen))
+      const payload = buffer.subarray(2 + idLen)
 
-    const callback = this.binaryCallbacks.get(componentId)
-    if (callback) {
-      callback(payload)
+      const callback = this.binaryCallbacks.get(componentId)
+      if (callback) callback(payload)
+    } else if (frameType === 0x02 || frameType === 0x03) {
+      // BINARY_ROOM_EVENT (0x02) or BINARY_ROOM_STATE (0x03)
+      // Route to all registered room binary handlers (RoomManager instances)
+      for (const callback of this.roomBinaryHandlers) {
+        callback(buffer)
+      }
     }
+  }
+
+  /** Register a handler for binary room frames (0x02 / 0x03). Returns unsubscribe. */
+  registerRoomBinaryHandler(callback: (frame: Uint8Array) => void): () => void {
+    this.roomBinaryHandlers.add(callback)
+    return () => { this.roomBinaryHandlers.delete(callback) }
   }
 
   /** Register a binary message handler for a component */
@@ -463,6 +478,7 @@ export class LiveConnection {
     this.disconnect()
     this.componentCallbacks.clear()
     this.binaryCallbacks.clear()
+    this.roomBinaryHandlers.clear()
     for (const [, req] of this.pendingRequests) {
       clearTimeout(req.timeout)
       req.reject(new Error('Connection destroyed'))

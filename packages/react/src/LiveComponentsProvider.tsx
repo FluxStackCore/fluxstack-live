@@ -19,6 +19,7 @@ export interface LiveComponentsContextValue {
   sendBinaryAndWait: (data: ArrayBuffer, requestId: string, timeout?: number) => Promise<WebSocketResponse>
   registerComponent: (componentId: string, callback: (message: WebSocketResponse) => void) => () => void
   registerBinaryHandler: (componentId: string, callback: (payload: Uint8Array) => void) => () => void
+  registerRoomBinaryHandler: (callback: (frame: Uint8Array) => void) => () => void
   unregisterComponent: (componentId: string) => void
   reconnect: () => void
   authenticate: (credentials: LiveAuthOptions) => Promise<boolean>
@@ -105,6 +106,10 @@ export function LiveComponentsProvider({
     return conn.registerBinaryHandler(componentId, callback)
   }, [conn])
 
+  const registerRoomBinaryHandler = useCallback((callback: (frame: Uint8Array) => void) => {
+    return conn.registerRoomBinaryHandler(callback)
+  }, [conn])
+
   const unregisterComponent = useCallback((componentId: string) => {
     conn.unregisterComponent(componentId)
   }, [conn])
@@ -132,6 +137,7 @@ export function LiveComponentsProvider({
     sendBinaryAndWait,
     registerComponent,
     registerBinaryHandler,
+    registerRoomBinaryHandler,
     unregisterComponent,
     reconnect,
     authenticate,

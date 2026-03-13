@@ -31,6 +31,134 @@ function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>,
 type EventHandler<T = any> = (data: T) => void
 type Unsubscribe = () => void
 
+// ===== Binary Room Frame Constants =====
+
+const BINARY_ROOM_EVENT = 0x02
+const BINARY_ROOM_STATE = 0x03
+
+// ===== Lightweight msgpack decoder (client-side, decode-only) =====
+
+const _decoder = new TextDecoder()
+
+function msgpackDecode(buf: Uint8Array): unknown {
+  return _decodeAt(buf, 0).value
+}
+
+function _decodeAt(buf: Uint8Array, offset: number): { value: unknown; offset: number } {
+  if (offset >= buf.length) return { value: null, offset }
+  const byte = buf[offset]
+  const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
+
+  if (byte < 0x80) return { value: byte, offset: offset + 1 }
+  if (byte >= 0x80 && byte <= 0x8f) return _decodeMap(buf, offset + 1, byte & 0x0f)
+  if (byte >= 0x90 && byte <= 0x9f) return _decodeArr(buf, offset + 1, byte & 0x0f)
+  if (byte >= 0xa0 && byte <= 0xbf) {
+    const len = byte & 0x1f
+    return { value: _decoder.decode(buf.subarray(offset + 1, offset + 1 + len)), offset: offset + 1 + len }
+  }
+  if (byte >= 0xe0) return { value: byte - 256, offset: offset + 1 }
+
+  switch (byte) {
+    case 0xc0: return { value: null, offset: offset + 1 }
+    case 0xc2: return { value: false, offset: offset + 1 }
+    case 0xc3: return { value: true, offset: offset + 1 }
+    case 0xc4: { const l = buf[offset + 1]; return { value: buf.slice(offset + 2, offset + 2 + l), offset: offset + 2 + l } }
+    case 0xc5: { const l = view.getUint16(offset + 1, false); return { value: buf.slice(offset + 3, offset + 3 + l), offset: offset + 3 + l } }
+    case 0xc6: { const l = view.getUint32(offset + 1, false); return { value: buf.slice(offset + 5, offset + 5 + l), offset: offset + 5 + l } }
+    case 0xcb: return { value: view.getFloat64(offset + 1, false), offset: offset + 9 }
+    case 0xcc: return { value: buf[offset + 1], offset: offset + 2 }
+    case 0xcd: return { value: view.getUint16(offset + 1, false), offset: offset + 3 }
+    case 0xce: return { value: view.getUint32(offset + 1, false), offset: offset + 5 }
+    case 0xd0: return { value: view.getInt8(offset + 1), offset: offset + 2 }
+    case 0xd1: return { value: view.getInt16(offset + 1, false), offset: offset + 3 }
+    case 0xd2: return { value: view.getInt32(offset + 1, false), offset: offset + 5 }
+    case 0xd9: { const l = buf[offset + 1]; return { value: _decoder.decode(buf.subarray(offset + 2, offset + 2 + l)), offset: offset + 2 + l } }
+    case 0xda: { const l = view.getUint16(offset + 1, false); return { value: _decoder.decode(buf.subarray(offset + 3, offset + 3 + l)), offset: offset + 3 + l } }
+    case 0xdb: { const l = view.getUint32(offset + 1, false); return { value: _decoder.decode(buf.subarray(offset + 5, offset + 5 + l)), offset: offset + 5 + l } }
+    case 0xdc: return _decodeArr(buf, offset + 3, view.getUint16(offset + 1, false))
+    case 0xdd: return _decodeArr(buf, offset + 5, view.getUint32(offset + 1, false))
+    case 0xde: return _decodeMap(buf, offset + 3, view.getUint16(offset + 1, false))
+    case 0xdf: return _decodeMap(buf, offset + 5, view.getUint32(offset + 1, false))
+  }
+  return { value: null, offset: offset + 1 }
+}
+
+function _decodeArr(buf: Uint8Array, offset: number, count: number): { value: unknown[]; offset: number } {
+  const arr: unknown[] = new Array(count)
+  for (let i = 0; i < count; i++) { const r = _decodeAt(buf, offset); arr[i] = r.value; offset = r.offset }
+  return { value: arr, offset }
+}
+
+function _decodeMap(buf: Uint8Array, offset: number, count: number): { value: Record<string, unknown>; offset: number } {
+  const obj: Record<string, unknown> = {}
+  for (let i = 0; i < count; i++) {
+    const k = _decodeAt(buf, offset); offset = k.offset
+    const v = _decodeAt(buf, offset); offset = v.offset
+    obj[String(k.value)] = v.value
+  }
+  return { value: obj, offset }
+}
+
+/** Parse a binary room frame: [frameType][compIdLen][compId][roomIdLen][roomId][eventLen:u16][event][payload] */
+function parseRoomFrame(buf: Uint8Array): {
+  frameType: number; componentId: string; roomId: string; event: string; payload: Uint8Array
+} | null {
+  if (buf.length < 6) return null
+  let offset = 0
+  const frameType = buf[offset++]
+  const compIdLen = buf[offset++]
+  if (offset + compIdLen > buf.length) return null
+  const componentId = _decoder.decode(buf.subarray(offset, offset + compIdLen)); offset += compIdLen
+  const roomIdLen = buf[offset++]
+  if (offset + roomIdLen > buf.length) return null
+  const roomId = _decoder.decode(buf.subarray(offset, offset + roomIdLen)); offset += roomIdLen
+  if (offset + 2 > buf.length) return null
+  const eventLen = (buf[offset] << 8) | buf[offset + 1]; offset += 2
+  if (offset + eventLen > buf.length) return null
+  const event = _decoder.decode(buf.subarray(offset, offset + eventLen)); offset += eventLen
+  return { frameType, componentId, roomId, event, payload: buf.subarray(offset) }
+}
+
+/** Reserved property names on RoomHandle/RoomProxy (never fall through to state) */
+const ROOM_RESERVED_KEYS = new Set<string | symbol>([
+  'id', 'joined', 'state', 'join', 'leave', 'emit', 'on', 'onSystem', 'setState',
+  'call', 'apply', 'bind', 'prototype', 'length', 'name', 'arguments', 'caller',
+  Symbol.toPrimitive, Symbol.toStringTag, Symbol.hasInstance,
+])
+
+/** Wrap a handle/proxy so unknown property access falls through to state */
+function wrapWithStateProxy<T extends object>(
+  target: T,
+  getState: () => any,
+  setStateFn: (updates: any) => void,
+): T {
+  return new Proxy(target, {
+    get(obj, prop, receiver) {
+      if (ROOM_RESERVED_KEYS.has(prop) || typeof prop === 'symbol') {
+        return Reflect.get(obj, prop, receiver)
+      }
+      const desc = Object.getOwnPropertyDescriptor(obj, prop)
+      if (desc) return Reflect.get(obj, prop, receiver)
+      if (prop in obj) return Reflect.get(obj, prop, receiver)
+      const st = getState()
+      return st?.[prop]
+    },
+    set(_obj, prop, value) {
+      if (typeof prop === 'symbol') return false
+      setStateFn({ [prop]: value })
+      return true
+    },
+  })
+}
+
+/** Reserved keys on RoomHandle/RoomProxy — cannot be state fields */
+type RoomReservedKeys = 'id' | 'joined' | 'state' | 'join' | 'leave' | 'emit' | 'on' | 'onSystem' | 'setState'
+
+/** State fields accessible directly on handle/proxy (excludes reserved method names) */
+type RoomStateFields<TState> = TState extends Record<string, any>
+  ? { readonly [K in Exclude<keyof TState, RoomReservedKeys>]: TState[K] }
+  : unknown
+
 /** Message from client to server */
 export interface RoomClientMessage {
   type: 'ROOM_JOIN' | 'ROOM_LEAVE' | 'ROOM_EMIT' | 'ROOM_STATE_GET' | 'ROOM_STATE_SET'
@@ -52,7 +180,7 @@ export interface RoomServerMessage {
 }
 
 /** Interface of an individual room handle */
-export interface RoomHandle<TState = any, TEvents extends Record<string, any> = Record<string, any>> {
+export type RoomHandle<TState = any, TEvents extends Record<string, any> = Record<string, any>> = {
   readonly id: string
   readonly joined: boolean
   readonly state: TState
@@ -62,11 +190,19 @@ export interface RoomHandle<TState = any, TEvents extends Record<string, any> = 
   on: <K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>) => Unsubscribe
   onSystem: (event: string, handler: EventHandler) => Unsubscribe
   setState: (updates: Partial<TState>) => void
-}
+} & RoomStateFields<TState>
+
+/** Infer TEvents from a LiveRoom class (via $events brand) or use T directly as events map */
+export type InferRoomEvents<T> =
+  T extends { $events: infer E extends Record<string, any> } ? E :
+  T extends Record<string, any> ? T :
+  Record<string, any>
 
 /** Proxy interface for $room - callable as function or object */
-export interface RoomProxy<TState = any, TEvents extends Record<string, any> = Record<string, any>> {
-  (roomId: string): RoomHandle<TState, TEvents>
+export type RoomProxy<TState = any, TEvents extends Record<string, any> = Record<string, any>> = {
+  /** Get a typed room handle. Pass the Room class or events interface as generic:
+   * `$room<CounterRoom>('counter:global').on('counter:updated', data => ...)` */
+  <T = TEvents>(roomId: string): RoomHandle<any, InferRoomEvents<T>>
   readonly id: string | null
   readonly joined: boolean
   readonly state: TState
@@ -76,7 +212,7 @@ export interface RoomProxy<TState = any, TEvents extends Record<string, any> = R
   on: <K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>) => Unsubscribe
   onSystem: (event: string, handler: EventHandler) => Unsubscribe
   setState: (updates: Partial<TState>) => void
-}
+} & RoomStateFields<TState>
 
 export interface RoomManagerOptions {
   componentId: string | null
@@ -84,6 +220,8 @@ export interface RoomManagerOptions {
   sendMessage: (msg: any) => void
   sendMessageAndWait: (msg: any, timeout?: number) => Promise<any>
   onMessage: (handler: (msg: RoomServerMessage) => void) => Unsubscribe
+  /** Optional: register for binary room frames (0x02 ROOM_EVENT, 0x03 ROOM_STATE) */
+  onBinaryMessage?: (handler: (frame: Uint8Array) => void) => Unsubscribe
 }
 
 /** Client-side room manager. Framework-agnostic. */
@@ -99,13 +237,31 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
   private sendMessage: (msg: any) => void
   private sendMessageAndWait: (msg: any, timeout?: number) => Promise<any>
   private globalUnsubscribe: Unsubscribe | null = null
+  private binaryUnsubscribe: Unsubscribe | null = null
+  private onBinaryMessage: ((handler: (frame: Uint8Array) => void) => Unsubscribe) | null = null
+  private onMessageFactory: ((handler: (msg: RoomServerMessage) => void) => Unsubscribe) | null = null
 
   constructor(options: RoomManagerOptions) {
     this.componentId = options.componentId
     this.defaultRoom = options.defaultRoom || null
     this.sendMessage = options.sendMessage
     this.sendMessageAndWait = options.sendMessageAndWait
+    this.onBinaryMessage = options.onBinaryMessage ?? null
+    this.onMessageFactory = options.onMessage
     this.globalUnsubscribe = options.onMessage((msg) => this.handleServerMessage(msg))
+    if (options.onBinaryMessage) {
+      this.binaryUnsubscribe = options.onBinaryMessage((frame) => this.handleBinaryFrame(frame))
+    }
+  }
+
+  /** Re-subscribe message and binary handlers (needed after destroy/remount in React Strict Mode) */
+  resubscribe(): void {
+    if (!this.globalUnsubscribe && this.onMessageFactory) {
+      this.globalUnsubscribe = this.onMessageFactory((msg) => this.handleServerMessage(msg))
+    }
+    if (!this.binaryUnsubscribe && this.onBinaryMessage) {
+      this.binaryUnsubscribe = this.onBinaryMessage((frame) => this.handleBinaryFrame(frame))
+    }
   }
 
   private handleServerMessage(msg: RoomServerMessage): void {
@@ -129,10 +285,12 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       }
 
       case 'ROOM_STATE': {
-        room.state = deepMerge(room.state as Record<string, any>, msg.data) as TState
+        // Server sends data: { state: actualChanges } — extract the actual changes
+        const stateChanges = msg.data?.state ?? msg.data
+        room.state = deepMerge(room.state as Record<string, any>, stateChanges) as TState
         const stateHandlers = room.handlers.get('$state:change')
         if (stateHandlers) {
-          for (const handler of stateHandlers) handler(msg.data)
+          for (const handler of stateHandlers) handler(stateChanges)
         }
         break
       }
@@ -145,6 +303,38 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       case 'ROOM_LEFT':
         room.joined = false
         break
+    }
+  }
+
+  /** Handle binary room frames (0x02 ROOM_EVENT, 0x03 ROOM_STATE) */
+  private handleBinaryFrame(frame: Uint8Array): void {
+    const parsed = parseRoomFrame(frame)
+    if (!parsed) return
+    if (parsed.componentId !== this.componentId) return
+
+    const room = this.rooms.get(parsed.roomId)
+    if (!room) return
+
+    const data = msgpackDecode(parsed.payload)
+
+    if (parsed.frameType === BINARY_ROOM_EVENT) {
+      // Dispatch to event handlers
+      const handlers = room.handlers.get(parsed.event)
+      if (handlers) {
+        for (const handler of handlers) {
+          try { handler(data) } catch (error) {
+            console.error(`[Room:${parsed.roomId}] Handler error for '${parsed.event}':`, error)
+          }
+        }
+      }
+    } else if (parsed.frameType === BINARY_ROOM_STATE) {
+      // State update: data is { state: changes } or just changes
+      const stateChanges = (data as any)?.state ?? data
+      room.state = deepMerge(room.state as Record<string, any>, stateChanges as Record<string, any>) as TState
+      const stateHandlers = room.handlers.get('$state:change')
+      if (stateHandlers) {
+        for (const handler of stateHandlers) handler(stateChanges)
+      }
     }
   }
 
@@ -165,7 +355,8 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
 
     const room = this.getOrCreateRoom(roomId)
 
-    const handle: RoomHandle<TState, TEvents> = {
+    // RoomStateFields are fulfilled at runtime by the Proxy wrapper
+    const handle = {
       get id() { return roomId },
       get joined() { return room.joined },
       get state() { return room.state },
@@ -243,8 +434,13 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       },
     }
 
-    this.handles.set(roomId, handle)
-    return handle
+    const proxied = wrapWithStateProxy(
+      handle,
+      () => room.state,
+      (updates: Partial<TState>) => handle.setState(updates),
+    )
+    this.handles.set(roomId, proxied as RoomHandle<TState, TEvents>)
+    return proxied as RoomHandle<TState, TEvents>
   }
 
   /** Create the $room proxy */
@@ -299,6 +495,16 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       },
     })
 
+    // Wrap top-level proxy so $room.players reads from default room state
+    if (this.defaultRoom && defaultHandle) {
+      const room = this.getOrCreateRoom(this.defaultRoom)
+      return wrapWithStateProxy(
+        proxyFn,
+        () => room.state,
+        (updates: Partial<TState>) => defaultHandle.setState(updates),
+      ) as RoomProxy<TState, TEvents>
+    }
+
     return proxyFn
   }
 
@@ -316,9 +522,12 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
     this.componentId = id
   }
 
-  /** Cleanup */
+  /** Cleanup — unsubscribes handlers but keeps factory refs for resubscribe() */
   destroy(): void {
     this.globalUnsubscribe?.()
+    this.globalUnsubscribe = null
+    this.binaryUnsubscribe?.()
+    this.binaryUnsubscribe = null
     for (const [, room] of this.rooms) {
       room.handlers.clear()
     }

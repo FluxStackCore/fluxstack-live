@@ -178,12 +178,14 @@ function createStore<T>(initialState: T) {
 export function useLiveComponent<
   TState extends Record<string, any>,
   TActions = {},
-  TBroadcasts extends Record<string, any> = Record<string, any>
+  TBroadcasts extends Record<string, any> = Record<string, any>,
+  TRoomState = any,
+  TRoomEvents extends Record<string, any> = Record<string, any>
 >(
   componentName: string,
   initialState: TState,
   options: UseLiveComponentOptions = {},
-): LiveProxyWithBroadcasts<TState, TActions, TBroadcasts> {
+): LiveProxyWithBroadcasts<TState, TActions, TBroadcasts, TRoomState, TRoomEvents> {
   const {
     debounce = 150,
     optimistic = true,
@@ -210,6 +212,7 @@ export function useLiveComponent<
     sendMessageAndWait,
     registerComponent,
     registerBinaryHandler,
+    registerRoomBinaryHandler,
     unregisterComponent,
   } = useLiveComponents()
 
@@ -630,21 +633,31 @@ export function useLiveComponent<
         roomMessageHandlers.current.add(handler)
         return () => { roomMessageHandlers.current.delete(handler) }
       },
+      onBinaryMessage: (handler) => {
+        return registerRoomBinaryHandler(handler)
+      },
     })
 
     roomManagerRef.current = manager
     return manager
-  }, [componentId, room, sendMessage, sendMessageAndWait])
+  }, [componentId, room, sendMessage, sendMessageAndWait, registerRoomBinaryHandler])
 
   useEffect(() => {
     roomManagerRef.current?.setComponentId(componentId)
   }, [componentId])
 
+  // ===== Room Manager Subscriptions (survives React Strict Mode remount) =====
+  useEffect(() => {
+    roomManagerRef.current?.resubscribe()
+    return () => {
+      roomManagerRef.current?.destroy()
+    }
+  }, [roomManager])
+
   // ===== Cleanup =====
   useEffect(() => {
     return () => {
       debounceTimers.current.forEach(t => clearTimeout(t))
-      roomManagerRef.current?.destroy()
       if (mountedRef.current) unmount()
     }
   }, [unmount])
@@ -661,7 +674,7 @@ export function useLiveComponent<
 
   // ===== Proxy =====
   const proxy = useMemo(() => {
-    return new Proxy({} as LiveProxyWithBroadcasts<TState, TActions, TBroadcasts>, {
+    return new Proxy({} as LiveProxyWithBroadcasts<TState, TActions, TBroadcasts, TRoomState, TRoomEvents>, {
       get(_, prop: string | symbol) {
         if (typeof prop === 'symbol') {
           if (prop === Symbol.toStringTag) return 'LiveComponent'
@@ -756,7 +769,9 @@ export function useLiveComponent<
 export function createLiveComponent<
   TState extends Record<string, any>,
   TActions = {},
-  TBroadcasts extends Record<string, any> = Record<string, any>
+  TBroadcasts extends Record<string, any> = Record<string, any>,
+  TRoomState = any,
+  TRoomEvents extends Record<string, any> = Record<string, any>
 >(
   componentName: string,
   defaultOptions: Omit<UseLiveComponentOptions, keyof HybridComponentOptions> = {},
@@ -764,7 +779,7 @@ export function createLiveComponent<
   return function useComponent(
     initialState: TState,
     options: UseLiveComponentOptions = {},
-  ): LiveProxyWithBroadcasts<TState, TActions, TBroadcasts> {
-    return useLiveComponent<TState, TActions, TBroadcasts>(componentName, initialState, { ...defaultOptions, ...options })
+  ): LiveProxyWithBroadcasts<TState, TActions, TBroadcasts, TRoomState, TRoomEvents> {
+    return useLiveComponent<TState, TActions, TBroadcasts, TRoomState, TRoomEvents>(componentName, initialState, { ...defaultOptions, ...options })
   }
 }
