@@ -9,7 +9,6 @@ import type { LiveTransport, GenericWebSocket, WebSocketConfig, HttpRouteDefinit
 import type { LiveMessage, WebSocketResponse } from '../protocol/messages'
 import { RoomEventBus } from '../rooms/RoomEventBus'
 import { LiveRoomManager } from '../rooms/LiveRoomManager'
-import { LiveDebugger } from '../debug/LiveDebugger'
 import { LiveAuthManager } from '../auth/LiveAuthManager'
 import { StateSignatureManager, type StateSignatureConfig } from '../security/StateSignature'
 import { PerformanceMonitor, type PerformanceConfig } from '../monitoring/PerformanceMonitor'
@@ -18,7 +17,7 @@ import { WebSocketConnectionManager, type ConnectionConfig } from '../connection
 import { ComponentRegistry } from '../component/ComponentRegistry'
 import { setLiveComponentContext } from '../component/context'
 import { RateLimiterRegistry } from '../connection/RateLimiter'
-import { liveLog, _setLoggerDebugger } from '../debug/LiveLogger'
+import { liveLog } from '../debug/LiveLogger'
 import { decodeBinaryChunk } from '../protocol/binary'
 import { DEFAULT_WS_PATH, MAX_MESSAGE_SIZE, MAX_ROOMS_PER_CONNECTION } from '../protocol/constants'
 import { sendImmediate } from '../transport/WsSendBatcher'
@@ -74,7 +73,6 @@ export class LiveServer {
   // Public singletons (accessible for transport adapters & advanced usage)
   public readonly roomEvents: RoomEventBus
   public readonly roomManager: LiveRoomManager
-  public readonly debugger: LiveDebugger
   public readonly authManager: LiveAuthManager
   public readonly stateSignature: StateSignatureManager
   public readonly performanceMonitor: PerformanceMonitor
@@ -94,7 +92,6 @@ export class LiveServer {
     // Create all singletons
     this.roomEvents = new RoomEventBus()
     this.roomManager = new LiveRoomManager(this.roomEvents, options.roomPubSub)
-    this.debugger = new LiveDebugger(options.debug ?? false)
     this.authManager = new LiveAuthManager()
     this.stateSignature = new StateSignatureManager(options.stateSignature)
     this.performanceMonitor = new PerformanceMonitor(options.performance)
@@ -113,20 +110,15 @@ export class LiveServer {
 
     this.registry = new ComponentRegistry({
       authManager: this.authManager,
-      debugger: this.debugger,
       stateSignature: this.stateSignature,
       performanceMonitor: this.performanceMonitor,
       cluster: options.cluster,
     })
 
-    // Wire logger -> debugger
-    _setLoggerDebugger(this.debugger)
-
     // Set global context for LiveComponent base class
     setLiveComponentContext({
       roomEvents: this.roomEvents,
       roomManager: this.roomManager,
-      debugger: this.debugger,
     })
   }
 
@@ -225,7 +217,6 @@ export class LiveServer {
     }
 
     this.connectionManager.registerConnection(ws, connectionId)
-    this.debugger.trackConnection(connectionId)
 
     sendImmediate(ws, JSON.stringify({
       type: 'CONNECTION_ESTABLISHED',
@@ -388,7 +379,6 @@ export class LiveServer {
       this.connectionManager.cleanupConnection(connectionId)
       this.rateLimiter.remove(connectionId)
     }
-    this.debugger.trackDisconnection(connectionId || '', componentCount)
 
     liveLog('websocket', null, `Connection closed: ${connectionId} (${componentCount} components)`)
   }

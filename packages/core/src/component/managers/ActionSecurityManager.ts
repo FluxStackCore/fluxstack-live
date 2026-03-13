@@ -3,8 +3,6 @@
 // Handles action validation, blocked actions, publicActions, rate limiting, Zod schemas.
 // Extracted from LiveComponent for single-responsibility.
 
-import type { LiveDebuggerInterface } from '../context'
-
 const BLOCKED_ACTIONS: ReadonlySet<string> = new Set([
   'constructor', 'destroy', 'executeAction', 'getSerializableState',
   'onMount', 'onDestroy', 'onConnect', 'onDisconnect',
@@ -36,8 +34,6 @@ export interface ActionSecurityContext {
   componentId: string
   /** Emit function for sending ERROR messages */
   emitFn: (type: string, payload: any) => void
-  /** Debugger interface */
-  debugger?: LiveDebuggerInterface | null
 }
 
 export class ActionSecurityManager {
@@ -118,15 +114,11 @@ export class ActionSecurityManager {
         payload = result.data ?? payload
       }
 
-      // Debug tracking
-      ctx.debugger?.trackActionCall(componentId, action, payload)
-
       // onAction hook
       let hookResult: void | false | Promise<void | false>
       try {
         hookResult = await component.onAction(action, payload)
       } catch (hookError: any) {
-        ctx.debugger?.trackActionError(componentId, action, hookError.message, Date.now() - actionStart)
         ctx.emitFn('ERROR', {
           action,
           error: `Action '${action}' failed pre-validation`
@@ -134,20 +126,15 @@ export class ActionSecurityManager {
         throw hookError
       }
       if (hookResult === false) {
-        ctx.debugger?.trackActionError(componentId, action, 'Action cancelled', Date.now() - actionStart)
         throw new Error(`Action '${action}' was cancelled`)
       }
 
       // Execute action
       const result = await method.call(component, payload)
 
-      ctx.debugger?.trackActionResult(componentId, action, result, Date.now() - actionStart)
-
       return result
     } catch (error: any) {
       if (!error.message?.includes('was cancelled') && !error.message?.includes('pre-validation')) {
-        ctx.debugger?.trackActionError(componentId, action, error.message, Date.now() - actionStart)
-
         ctx.emitFn('ERROR', {
           action,
           error: error.message

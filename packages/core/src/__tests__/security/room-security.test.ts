@@ -22,7 +22,6 @@ vi.mock('../../transport/WsSendBatcher', () => ({
 vi.mock('../../debug/LiveLogger', () => ({
   liveLog: vi.fn(),
   liveWarn: vi.fn(),
-  _setLoggerDebugger: vi.fn(),
 }))
 
 import { sendImmediate } from '../../transport/WsSendBatcher'

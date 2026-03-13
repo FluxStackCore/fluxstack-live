@@ -10,14 +10,6 @@ function createTestRegistry() {
   const authManager = new LiveAuthManager()
   const stateSignature = new StateSignatureManager({ secret: 'test-secret-32chars-minimum-ok!' })
 
-  const debugger_ = {
-    trackComponentMount: () => {},
-    trackComponentUnmount: () => {},
-    trackAction: () => {},
-    trackStateChange: () => {},
-    isEnabled: false,
-  }
-
   const performanceMonitor = {
     initializeComponent: () => {},
     recordRenderTime: () => {},
@@ -27,7 +19,6 @@ function createTestRegistry() {
 
   const registry = new ComponentRegistry({
     authManager,
-    debugger: debugger_ as any,
     stateSignature,
     performanceMonitor: performanceMonitor as any,
   })

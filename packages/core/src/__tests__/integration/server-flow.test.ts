@@ -85,21 +85,6 @@ function createTestRegistry() {
   // Set global context for LiveComponent
   setLiveComponentContext({ roomEvents, roomManager })
 
-  const debugger_ = {
-    trackComponentMount: () => {},
-    trackComponentUnmount: () => {},
-    trackConnection: () => {},
-    trackDisconnection: () => {},
-    trackAction: () => {},
-    trackStateChange: () => {},
-    trackActionCall: () => {},
-    trackActionResult: () => {},
-    trackActionError: () => {},
-    trackRoomEmit: () => {},
-    isEnabled: false,
-    enabled: false,
-  }
-
   const performanceMonitor = {
     initializeComponent: () => {},
     recordRenderTime: () => {},
@@ -109,7 +94,6 @@ function createTestRegistry() {
 
   const registry = new ComponentRegistry({
     authManager,
-    debugger: debugger_ as any,
     stateSignature,
     performanceMonitor: performanceMonitor as any,
   })

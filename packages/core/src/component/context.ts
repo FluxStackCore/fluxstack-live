@@ -5,7 +5,6 @@
 // via setLiveComponentContext(), called by LiveServer.start().
 
 import type { RoomEventBus } from '../rooms/RoomEventBus'
-import type { LiveDebugger } from '../debug/LiveDebugger'
 
 // ===== Room Manager Interface =====
 // Extracted to avoid circular dependency with LiveRoomManager
@@ -24,17 +23,6 @@ export interface LiveRoomManagerInterface {
   getStats(): any
 }
 
-// ===== Debugger Interface =====
-
-export interface LiveDebuggerInterface {
-  enabled: boolean
-  trackStateChange(componentId: string, delta: Record<string, unknown>, fullState: Record<string, unknown>, source?: string): void
-  trackActionCall(componentId: string, action: string, payload: unknown): void
-  trackActionResult(componentId: string, action: string, result: unknown, duration: number): void
-  trackActionError(componentId: string, action: string, error: string, duration: number): void
-  trackRoomEmit(componentId: string, roomId: string, event: string, data: unknown): void
-}
-
 // ===== Logger Interface =====
 
 export interface LiveLoggerInterface {
@@ -47,7 +35,6 @@ export interface LiveLoggerInterface {
 export interface LiveComponentContext {
   roomEvents: RoomEventBus
   roomManager: LiveRoomManagerInterface
-  debugger?: LiveDebuggerInterface
 }
 
 let _ctx: LiveComponentContext | null = null

@@ -9,7 +9,7 @@
 // running LiveServer.
 
 import type { GenericWebSocket } from '../../transport/types'
-import type { LiveComponentContext, LiveDebuggerInterface } from '../context'
+import type { LiveComponentContext } from '../context'
 import type { ServerRoomHandle, ServerRoomProxy } from '../../protocol/messages'
 import type { LiveRoom, LiveRoomClass } from '../../rooms/LiveRoom'
 import { liveLog, liveWarn } from '../../debug/LiveLogger'
@@ -21,7 +21,6 @@ export interface RoomProxyContext {
   defaultRoom?: string
   /** Lazy getter — only called when room features are used */
   getCtx: () => LiveComponentContext
-  debugger?: LiveDebuggerInterface | null
   setStateFn: (updates: any) => void
   /** Deep diff setting for rooms (from component $options). Default: true */
   deepDiff?: boolean
@@ -92,7 +91,6 @@ export class ComponentRoomProxy {
   private componentId: string
   private ws: GenericWebSocket
   private getCtx: () => LiveComponentContext
-  private _debugger: LiveDebuggerInterface | null
   private setStateFn: (updates: any) => void
   private _deepDiff: boolean
   private _deepDiffDepth: number | undefined
@@ -103,7 +101,6 @@ export class ComponentRoomProxy {
     this.ws = rctx.ws
     this.room = rctx.defaultRoom
     this.getCtx = rctx.getCtx
-    this._debugger = rctx.debugger ?? null
     this.setStateFn = rctx.setStateFn
     this._deepDiff = rctx.deepDiff ?? true
     this._deepDiffDepth = rctx.deepDiffDepth
@@ -383,8 +380,6 @@ export class ComponentRoomProxy {
     const notified = this.ctx.roomEvents.emit(this.roomType, this.room, event, data, excludeId)
 
     liveLog('rooms', this.componentId, `[${this.componentId}] Room event '${event}' -> ${notified} components`)
-
-    this._debugger?.trackRoomEmit(this.componentId, this.room, event, data)
 
     return notified
   }

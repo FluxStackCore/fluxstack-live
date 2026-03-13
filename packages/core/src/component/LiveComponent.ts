@@ -10,7 +10,6 @@
 //   - ComponentRoomProxy: $room, $rooms, room events
 
 import { getLiveComponentContext } from './context'
-import type { LiveDebuggerInterface } from './context'
 import type { GenericWebSocket } from '../transport/types'
 import type { LiveAuthContext, LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
@@ -25,14 +24,6 @@ import { ComponentRoomProxy } from './managers/ComponentRoomProxy'
 
 // Re-export EMIT_OVERRIDE_KEY for external consumers
 export { EMIT_OVERRIDE_KEY }
-
-// ===== Debug Instrumentation (injectable to avoid client-side import) =====
-let _liveDebugger: LiveDebuggerInterface | null = null
-
-/** @internal Called by ComponentRegistry to inject the debugger instance */
-export function _setLiveDebugger(dbg: LiveDebuggerInterface): void {
-  _liveDebugger = dbg
-}
 
 export interface ComponentOptions {
   /** Enable deep diff for plain objects in setState(). Default: false */
@@ -169,7 +160,6 @@ export abstract class LiveComponent<
       ws: this.ws,
       emitFn: (type, payload) => this._messaging.emit(type, payload),
       onStateChangeFn: (changes) => this.onStateChange(changes),
-      debugger: _liveDebugger,
       deepDiff: (ctor as any).$options?.deepDiff ?? false,
       deepDiffDepth: (ctor as any).$options?.deepDiffDepth,
     })
@@ -186,7 +176,6 @@ export abstract class LiveComponent<
       ws: this.ws,
       defaultRoom: this.room,
       getCtx: () => getLiveComponentContext(),
-      debugger: _liveDebugger,
       setStateFn: (updates: any) => this.setState(updates),
       deepDiff: (ctor as any).$options?.roomDeepDiff,
       deepDiffDepth: (ctor as any).$options?.deepDiffDepth,
@@ -332,7 +321,6 @@ export abstract class LiveComponent<
       componentClass: this.constructor as any,
       componentId: this.id,
       emitFn: (type, p) => this.emit(type, p),
-      debugger: _liveDebugger,
     })
   }
 

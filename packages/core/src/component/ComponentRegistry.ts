@@ -4,14 +4,13 @@
 // state signing, singleton support, and auto-discovery.
 
 import type { LiveComponent } from './LiveComponent'
-import { _setLiveDebugger, EMIT_OVERRIDE_KEY } from './LiveComponent'
+import { EMIT_OVERRIDE_KEY } from './LiveComponent'
 import type { GenericWebSocket, LiveWSData } from '../transport/types'
 import { queueWsMessage, sendImmediate } from '../transport/WsSendBatcher'
 import type { LiveMessage, BroadcastMessage, ComponentDefinition } from '../protocol/messages'
 import type { LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
 import type { LiveAuthManager } from '../auth/LiveAuthManager'
-import type { LiveDebugger } from '../debug/LiveDebugger'
 import type { StateSignatureManager, SignedState } from '../security/StateSignature'
 import type { PerformanceMonitor } from '../monitoring/PerformanceMonitor'
 import { liveLog, registerComponentLogging, unregisterComponentLogging } from '../debug/LiveLogger'
@@ -50,7 +49,6 @@ export interface StateMigration {
 
 export interface ComponentRegistryDeps {
   authManager: LiveAuthManager
-  debugger: LiveDebugger
   stateSignature: StateSignatureManager
   performanceMonitor: PerformanceMonitor
   cluster?: IClusterAdapter
@@ -78,19 +76,14 @@ export class ComponentRegistry {
   private cluster?: IClusterAdapter
 
   private authManager: LiveAuthManager
-  private debugger: LiveDebugger
   private stateSignature: StateSignatureManager
   private performanceMonitor: PerformanceMonitor
 
   constructor(deps: ComponentRegistryDeps) {
     this.authManager = deps.authManager
-    this.debugger = deps.debugger
     this.stateSignature = deps.stateSignature
     this.performanceMonitor = deps.performanceMonitor
     this.cluster = deps.cluster
-
-    // Inject debugger into LiveComponent base class
-    _setLiveDebugger(deps.debugger)
 
     this.setupHealthMonitoring()
     this.setupClusterHandlers()
@@ -458,14 +451,6 @@ export class ComponentRegistry {
         ;(component as any).emit('ERROR', { action: 'onMount', error: `Mount initialization failed: ${err?.message || err}` })
       }
 
-      this.debugger.trackComponentMount(
-        component.id,
-        componentName,
-        component.getSerializableState() as Record<string, unknown>,
-        options?.room,
-        options?.debugLabel
-      )
-
       return { componentId: component.id, initialState: component.getSerializableState(), signedState }
     } catch (error: any) {
       console.error(`Failed to mount component ${componentName}:`, error)
@@ -629,7 +614,6 @@ export class ComponentRegistry {
       if (this.removeSingletonConnection(componentId, undefined, 'unmount')) return
     }
 
-    this.debugger.trackComponentUnmount(componentId)
     component.destroy?.()
     this.unsubscribeFromAllRooms(componentId)
     this.components.delete(componentId)

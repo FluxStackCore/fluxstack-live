@@ -32,17 +32,5 @@ export type { ChunkedUploadOptions, ChunkedUploadState } from './hooks/useChunke
 export { useLiveChunkedUpload } from './hooks/useLiveChunkedUpload'
 export type { LiveChunkedUploadOptions } from './hooks/useLiveChunkedUpload'
 
-// Debugger Hook
-export { useLiveDebugger } from './hooks/useLiveDebugger'
-export type {
-  DebugEvent,
-  DebugEventType,
-  ComponentSnapshot,
-  DebugSnapshot,
-  DebugFilter,
-  UseLiveDebuggerReturn,
-  UseLiveDebuggerOptions,
-} from './hooks/useLiveDebugger'
-
 // Re-export client types for convenience
 export type { LiveAuthOptions } from '@fluxstack/live-client'

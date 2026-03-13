@@ -96,14 +96,6 @@ export {
 
 // ===== Debug & Logging =====
 export {
-  LiveDebugger,
-  type DebugEventType,
-  type DebugEvent,
-  type ComponentSnapshot,
-  type DebugSnapshot,
-  type DebugWsMessage,
-} from './debug/LiveDebugger'
-export {
   liveLog,
   liveWarn,
   registerComponentLogging,

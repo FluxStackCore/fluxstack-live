@@ -4,7 +4,6 @@
 // Extracted from LiveComponent for single-responsibility.
 
 import type { GenericWebSocket } from '../../transport/types'
-import type { LiveDebuggerInterface } from '../context'
 import type { ComponentState } from '../../protocol/messages'
 import { computeDeepDiff, deepAssign } from '../../utils/deepDiff'
 
@@ -17,7 +16,6 @@ export interface StateManagerOptions<TState> {
   ws: GenericWebSocket
   emitFn: (type: string, payload: any) => void
   onStateChangeFn: (changes: Partial<TState>) => void
-  debugger?: LiveDebuggerInterface | null
   deepDiff?: boolean
   deepDiffDepth?: number
 }
@@ -34,14 +32,12 @@ export class ComponentStateManager<TState = ComponentState> {
   private ws: GenericWebSocket
   private emitFn: (type: string, payload: any) => void
   private onStateChangeFn: (changes: Partial<TState>) => void
-  private _debugger: LiveDebuggerInterface | null
 
   constructor(opts: StateManagerOptions<TState>) {
     this.componentId = opts.componentId
     this.ws = opts.ws
     this.emitFn = opts.emitFn
     this.onStateChangeFn = opts.onStateChangeFn
-    this._debugger = opts.debugger ?? null
     this._deepDiff = opts.deepDiff ?? false
     this._deepDiffDepth = opts.deepDiffDepth ?? 3
     // When deepDiff is enabled, deep-clone initialState so deepAssign
@@ -73,12 +69,6 @@ export class ComponentStateManager<TState = ComponentState> {
               console.error(`[${self.componentId}] onStateChange error:`, err?.message || err)
             } finally { self._inStateChange = false }
           }
-          self._debugger?.trackStateChange(
-            self.componentId,
-            changes as Record<string, unknown>,
-            target as Record<string, unknown>,
-            'proxy'
-          )
         }
         return true
       },
@@ -133,12 +123,6 @@ export class ComponentStateManager<TState = ComponentState> {
         console.error(`[${this.componentId}] onStateChange error:`, err?.message || err)
       } finally { this._inStateChange = false }
     }
-    this._debugger?.trackStateChange(
-      this.componentId,
-      actualChanges as Record<string, unknown>,
-      this._state as Record<string, unknown>,
-      'setState'
-    )
   }
 
   sendBinaryDelta(
