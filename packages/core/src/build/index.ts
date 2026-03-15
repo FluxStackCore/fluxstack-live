@@ -73,7 +73,9 @@ function extractBlock(src: string, start: number): string {
 
 /** Pull out `static defaultState = { ... }` and strip TS type casts. */
 function extractDefaultState(classBody: string): string {
-  const m = classBody.match(/static\s+defaultState\s*=\s*/)
+  // Handle optional TS type annotation: `static defaultState: SomeType = { ... }`
+  // Supports simple types (State), generics (Record<string, any>), namespaced (Ns.State)
+  const m = classBody.match(/static\s+defaultState\s*(?::[^=]+)?=\s*/)
   if (!m) return '{}'
 
   const objStart = classBody.indexOf('{', m.index! + m[0].length)
