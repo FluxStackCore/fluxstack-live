@@ -2,8 +2,28 @@
 //
 // Tracks and reports on component performance metrics.
 
-import { EventEmitter } from 'events'
 import { liveLog, liveWarn } from '../debug/LiveLogger'
+
+// Lazy EventEmitter to avoid crashing in browser/Vite dev
+// (this module is server-only but gets bundled into the barrel export)
+let _EventEmitterBase: any = null
+function getEventEmitterBase(): any {
+  if (!_EventEmitterBase) {
+    try {
+      _EventEmitterBase = require('events').EventEmitter
+    } catch {
+      // Minimal shim for browser — class is server-only and won't be instantiated
+      _EventEmitterBase = class {
+        on() { return this }
+        off() { return this }
+        emit() { return false }
+        removeListener() { return this }
+        removeAllListeners() { return this }
+      }
+    }
+  }
+  return _EventEmitterBase
+}
 
 export interface ComponentPerformanceMetrics {
   componentId: string
@@ -37,7 +57,7 @@ export interface PerformanceConfig {
   alertsEnabled?: boolean
 }
 
-export class PerformanceMonitor extends EventEmitter {
+export class PerformanceMonitor extends (getEventEmitterBase()) {
   private components = new Map<string, ComponentPerformanceMetrics>()
   private alerts: PerformanceAlert[] = []
   private config: Required<PerformanceConfig>

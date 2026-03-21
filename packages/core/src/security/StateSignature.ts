@@ -4,8 +4,24 @@
 // Supports: key rotation, compression (gzip), encryption (AES-256-CBC),
 // hybrid anti-replay nonces (stateless HMAC + replay detection), state backups, and state migrations.
 
-import { createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto'
-import { gzipSync, gunzipSync } from 'zlib'
+// Lazy imports for Node.js built-ins (avoid crashing in browser/Vite dev)
+let _crypto: typeof import('crypto') | null = null
+let _zlib: typeof import('zlib') | null = null
+
+function getCrypto() {
+  if (!_crypto) {
+    try { _crypto = require('crypto') } catch { throw new Error('StateSignature requires Node.js crypto module (server-only)') }
+  }
+  return _crypto!
+}
+
+function getZlib() {
+  if (!_zlib) {
+    try { _zlib = require('zlib') } catch { throw new Error('StateSignature requires Node.js zlib module (server-only)') }
+  }
+  return _zlib!
+}
+
 import { liveLog, liveWarn } from '../debug/LiveLogger'
 
 export interface SignedState {
@@ -79,12 +95,12 @@ export class StateSignatureManager {
 
     // Generate random secret if none provided
     if (!this.config.secret) {
-      this.config.secret = randomBytes(32).toString('hex')
+      this.config.secret = getCrypto().randomBytes(32).toString('hex')
       liveWarn('state', null, 'No LIVE_STATE_SECRET provided. Using random key (state will not persist across restarts).')
     }
 
     this.secret = Buffer.from(this.config.secret, 'utf-8')
-    this.encryptionSalt = randomBytes(16)
+    this.encryptionSalt = getCrypto().randomBytes(16)
 
     if (this.config.rotationEnabled) {
       this.setupKeyRotation()
@@ -101,9 +117,9 @@ export class StateSignatureManager {
    */
   private generateNonce(): string {
     const ts = Date.now().toString()
-    const rand = randomBytes(8).toString('hex')
+    const rand = getCrypto().randomBytes(8).toString('hex')
     const payload = `${ts}:${rand}`
-    const mac = createHmac('sha256', this.secret).update(payload).digest('hex').slice(0, 16)
+    const mac = getCrypto().createHmac('sha256', this.secret).update(payload).digest('hex').slice(0, 16)
     return `${ts}:${rand}:${mac}`
   }
 
@@ -131,13 +147,13 @@ export class StateSignatureManager {
 
     // Verify HMAC — try current key first, then previous keys (rotation)
     const payload = `${ts}:${rand}`
-    const expectedMac = createHmac('sha256', this.secret).update(payload).digest('hex').slice(0, 16)
+    const expectedMac = getCrypto().createHmac('sha256', this.secret).update(payload).digest('hex').slice(0, 16)
     if (this.timingSafeEqual(mac, expectedMac)) {
       return { valid: true }
     }
 
     for (const prevSecret of this.previousSecrets) {
-      const prevMac = createHmac('sha256', prevSecret).update(payload).digest('hex').slice(0, 16)
+      const prevMac = getCrypto().createHmac('sha256', prevSecret).update(payload).digest('hex').slice(0, 16)
       if (this.timingSafeEqual(mac, prevMac)) {
         return { valid: true }
       }
@@ -158,7 +174,7 @@ export class StateSignatureManager {
 
     // Compression
     if ((options?.compress ?? this.config.compressionEnabled) && dataStr.length > 1024) {
-      const compressedBuf = gzipSync(Buffer.from(dataStr, 'utf-8'))
+      const compressedBuf = getZlib().gzipSync(Buffer.from(dataStr, 'utf-8'))
       const compressedB64 = compressedBuf.toString('base64')
       if (compressedB64.length < dataStr.length * 0.9) {
         dataStr = compressedB64
@@ -168,9 +184,9 @@ export class StateSignatureManager {
 
     // Encryption
     if (this.config.encryptionEnabled) {
-      const iv = randomBytes(16)
+      const iv = getCrypto().randomBytes(16)
       const key = this.deriveEncryptionKey()
-      const cipher = createCipheriv('aes-256-cbc', key, iv)
+      const cipher = getCrypto().createCipheriv('aes-256-cbc', key, iv)
       let encryptedData = cipher.update(dataStr, 'utf-8', 'base64')
       encryptedData += cipher.final('base64')
       dataStr = iv.toString('base64') + ':' + encryptedData
@@ -256,14 +272,14 @@ export class StateSignatureManager {
       const [ivB64, encryptedData] = dataStr.split(':')
       const iv = Buffer.from(ivB64, 'base64')
       const key = this.deriveEncryptionKey()
-      const decipher = createDecipheriv('aes-256-cbc', key, iv)
+      const decipher = getCrypto().createDecipheriv('aes-256-cbc', key, iv)
       dataStr = decipher.update(encryptedData, 'base64', 'utf-8')
       dataStr += decipher.final('utf-8')
     }
 
     // Decompress
     if (signedState.compressed) {
-      const decompressed = gunzipSync(Buffer.from(dataStr, 'base64'))
+      const decompressed = getZlib().gunzipSync(Buffer.from(dataStr, 'base64'))
       dataStr = decompressed.toString('utf-8')
     }
 
@@ -299,7 +315,7 @@ export class StateSignatureManager {
 
   private computeSignatureWithKey(signedState: SignedState, key: Buffer): string {
     const payload = `${signedState.componentId}:${signedState.version}:${signedState.timestamp}:${signedState.data}${signedState.nonce ? ':' + signedState.nonce : ''}`
-    return createHmac('sha256', key).update(payload).digest('hex')
+    return getCrypto().createHmac('sha256', key).update(payload).digest('hex')
   }
 
   private timingSafeEqual(a: string, b: string): boolean {
@@ -317,7 +333,7 @@ export class StateSignatureManager {
 
   private deriveEncryptionKey(): Buffer {
     if (this.cachedEncryptionKey) return this.cachedEncryptionKey
-    this.cachedEncryptionKey = scryptSync(this.secret, this.encryptionSalt, 32) as Buffer
+    this.cachedEncryptionKey = getCrypto().scryptSync(this.secret, this.encryptionSalt, 32) as Buffer
     return this.cachedEncryptionKey
   }
 
@@ -327,7 +343,7 @@ export class StateSignatureManager {
       if (this.previousSecrets.length > 3) {
         this.previousSecrets.pop()
       }
-      this.secret = randomBytes(32)
+      this.secret = getCrypto().randomBytes(32)
       this.cachedEncryptionKey = null
       liveLog('state', null, 'Key rotation completed')
     }, this.config.rotationInterval)

@@ -2,9 +2,29 @@
 //
 // Advanced connection management with pooling, load balancing, and health monitoring.
 
-import { EventEmitter } from 'events'
 import type { GenericWebSocket } from '../transport/types'
 import { liveLog, liveWarn } from '../debug/LiveLogger'
+
+// Lazy EventEmitter to avoid crashing in browser/Vite dev
+// (this module is server-only but gets bundled into the barrel export)
+let _EventEmitterBase: any = null
+function getEventEmitterBase(): any {
+  if (!_EventEmitterBase) {
+    try {
+      _EventEmitterBase = require('events').EventEmitter
+    } catch {
+      // Minimal shim for browser — class is server-only and won't be instantiated
+      _EventEmitterBase = class {
+        on() { return this }
+        off() { return this }
+        emit() { return false }
+        removeListener() { return this }
+        removeAllListeners() { return this }
+      }
+    }
+  }
+  return _EventEmitterBase
+}
 
 export interface ConnectionConfig {
   maxConnections: number
@@ -50,7 +70,7 @@ export interface QueuedMessage {
   maxRetries: number
 }
 
-export class WebSocketConnectionManager extends EventEmitter {
+export class WebSocketConnectionManager extends (getEventEmitterBase()) {
   private connections = new Map<string, GenericWebSocket>()
   private connectionMetrics = new Map<string, ConnectionMetrics>()
   private connectionPools = new Map<string, Set<string>>()

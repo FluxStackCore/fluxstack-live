@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-elysia",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Elysia.js WebSocket transport adapter for @fluxstack/live (Bun runtime)",
   "type": "module",
   "main": "./dist/index.js",
@@ -8,7 +8,6 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "bun": "./src/index.ts",
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
     }

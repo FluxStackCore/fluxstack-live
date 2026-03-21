@@ -1,0 +1,92 @@
+/**
+ * Configuration-related types
+ * Centralized type definitions for all configuration interfaces
+ */
+
+import type {
+  LoggerConfig,
+  PluginsConfig
+} from "../config"
+
+// Re-export all configuration types from config
+export type {
+  FluxStackConfig,
+  AppConfig,
+  ServerConfig,
+  ClientConfig,
+  BuildConfig,
+  ClientBuildConfig,
+  OptimizationConfig,
+  CorsConfig,
+  LoggerConfig,
+  PluginsConfig,
+  MonitoringConfig,
+  MetricsConfig,
+  ProfilingConfig,
+  SystemConfig,
+} from "../config"
+
+// Legacy type aliases (for backward compatibility)
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
+export type BuildTarget = 'bun' | 'node' | 'docker'
+export type LogFormat = 'json' | 'pretty'
+export type LoggingConfig = LoggerConfig
+export type PluginConfig = PluginsConfig
+
+// Configuration loading types (deprecated - kept for backward compatibility)
+export interface ConfigLoadOptions {
+  env?: string
+  validate?: boolean
+  strict?: boolean
+}
+
+export interface ConfigLoadResult<T = unknown> {
+  config: T
+  errors: ValidationError[]
+  warnings: ValidationWarning[]
+}
+
+export interface ValidationResult {
+  valid: boolean
+  errors: ValidationError[]
+  warnings: ValidationWarning[]
+}
+
+export interface ValidationError {
+  path: string
+  message: string
+  value?: unknown
+}
+
+export interface ValidationWarning {
+  path: string
+  message: string
+  value?: unknown
+}
+
+// Additional configuration utility types
+export interface ConfigOverride {
+  path: string
+  value: unknown
+  source: 'env' | 'file' | 'runtime'
+}
+
+export interface ConfigMergeOptions {
+  deep?: boolean
+  arrays?: 'replace' | 'merge' | 'concat'
+  overrideArrays?: boolean
+}
+
+export interface ConfigValidationOptions {
+  strict?: boolean
+  allowUnknown?: boolean
+  stripUnknown?: boolean
+  warnings?: boolean
+}
+
+export interface ConfigSource {
+  type: 'file' | 'env' | 'default' | 'override'
+  path?: string
+  priority: number
+  data: unknown
+}
