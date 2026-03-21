@@ -16,6 +16,7 @@ import { FileUploadManager, type FileUploadConfig } from '../upload/FileUploadMa
 import { WebSocketConnectionManager, type ConnectionConfig } from '../connection/WebSocketConnectionManager'
 import { ComponentRegistry } from '../component/ComponentRegistry'
 import { setLiveComponentContext } from '../component/context'
+import type { LiveComponent } from '../component/LiveComponent'
 import { RateLimiterRegistry } from '../connection/RateLimiter'
 import { liveLog } from '../debug/LiveLogger'
 import { decodeBinaryChunk } from '../protocol/binary'
@@ -67,6 +68,9 @@ export interface LiveServerOptions {
   cluster?: IClusterAdapter
   /** LiveRoom classes to register. These define typed rooms with lifecycle hooks. */
   rooms?: LiveRoomClass[]
+  /** LiveComponent classes to register statically (e.g. from production bundles).
+   *  Uses `static componentName` for the registry key, falling back to `class.name`. */
+  components?: Array<new (...args: any[]) => LiveComponent<any>>
 }
 
 export class LiveServer {
@@ -114,6 +118,14 @@ export class LiveServer {
       performanceMonitor: this.performanceMonitor,
       cluster: options.cluster,
     })
+
+    // Register statically-provided component classes (used in production bundles)
+    if (options.components) {
+      for (const componentClass of options.components) {
+        const name = (componentClass as any).componentName || componentClass.name
+        this.registry.registerComponentClass(name, componentClass as any)
+      }
+    }
 
     // Set global context for LiveComponent base class
     setLiveComponentContext({
