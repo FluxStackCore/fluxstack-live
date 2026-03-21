@@ -25,16 +25,25 @@ Live Components turn server-side classes into reactive state that syncs automati
 import { Elysia } from 'elysia'
 import { LiveServer } from '@fluxstack/live'
 import { ElysiaTransport } from '@fluxstack/live-elysia'
+import { join } from 'path'
+
+// Add this import AFTER first run (start() generates this file)
+import { liveComponentClasses } from './components/auto-generated-components'
 
 const app = new Elysia()
 const server = new LiveServer({
   transport: new ElysiaTransport(app),
-  componentsPath: './src/components',  // auto-discovers LiveComponent classes
+  componentsPath: join(import.meta.dir, 'components'), // auto-discovers on start()
+  components: liveComponentClasses,                     // included in production bundle
 })
 
 await server.start()
 app.listen(3000)
 ```
+
+> **First run:** Start the server with just `componentsPath` (without the import). `start()` generates `auto-generated-components.ts` in the components directory. Then add the import and `components: liveComponentClasses` to your code.
+>
+> **Why both?** In dev, `componentsPath` discovers components via dynamic `import()` from the filesystem — no setup needed. But production bundlers (like `bun build`) compile everything into one file, so dynamic filesystem imports are lost and the server would start with 0 components. The `components[]` import gives the bundler a static import chain to follow, ensuring all component classes end up in the bundle.
 
 ### Component
 
@@ -77,7 +86,7 @@ function App() {
 
 ## Features
 
-- **Auto-discovery**: Point `componentsPath` to a directory and components are registered automatically
+- **Auto-discovery**: Point `componentsPath` to a directory — `start()` discovers components and generates `auto-generated-components.ts` automatically
 - **Singletons**: `static singleton = true` — one instance shared by all clients
 - **Typed Rooms**: `LiveRoom<TState, TEvents>` with end-to-end type inference and binary msgpack codec
 - **Auth**: Per-component and per-action authorization (`static auth`, `static actionAuth`)

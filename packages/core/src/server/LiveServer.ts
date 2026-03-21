@@ -29,6 +29,7 @@ import type { IClusterAdapter } from '../cluster/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
 import { RoomRegistry } from '../rooms/RoomRegistry'
 import type { LiveRoomClass } from '../rooms/LiveRoom'
+import { generateLiveComponentsFile } from '../build/index'
 
 export interface LiveServerOptions {
   /** Transport adapter (Elysia, Express, etc.) */
@@ -157,6 +158,13 @@ export class LiveServer {
   async start(): Promise<void> {
     // Auto-discover components if path provided
     if (this.options.componentsPath) {
+      // Generate auto-generated-components.ts in the components dir (creates if missing)
+      const count = generateLiveComponentsFile({ componentsDir: this.options.componentsPath })
+      if (count >= 0) {
+        liveLog('lifecycle', null, `Generated auto-components file (${count} components) in ${this.options.componentsPath}`)
+      }
+
+      // Runtime discovery — dynamically import and register all components
       await this.registry.autoDiscoverComponents(this.options.componentsPath)
     }
 
