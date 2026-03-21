@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Real-time server-client state sync — LiveServer, LiveComponent, rooms, auth, security, and cluster coordination",
   "type": "module",
   "main": "./dist/index.js",
