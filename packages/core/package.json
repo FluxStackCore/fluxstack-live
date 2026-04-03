@@ -1,19 +1,22 @@
 {
   "name": "@fluxstack/live",
-  "version": "0.3.3",
+  "version": "0.5.1",
   "description": "Real-time server-client state sync — LiveServer, LiveComponent, rooms, auth, security, and cluster coordination",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.cjs"
     },
     "./build": {
+      "types": "./dist/build/index.d.ts",
       "import": "./dist/build/index.js",
-      "types": "./dist/build/index.d.ts"
+      "require": "./dist/build/index.cjs"
     }
   },
   "files": [
@@ -51,5 +54,8 @@
     "directory": "packages/core"
   },
   "license": "MIT",
-  "author": "FluxStack Team"
+  "author": "FluxStack Team",
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

@@ -51,11 +51,14 @@ export { PROTOCOL_VERSION, DEFAULT_WS_PATH, DEFAULT_CHUNK_SIZE } from './protoco
 // ===== Auth System =====
 export type {
   LiveAuthCredentials,
+  LiveAuthSession,
   LiveAuthUser,
   LiveAuthContext,
   LiveAuthProvider,
   LiveComponentAuth,
+  LiveComponentAuthorize,
   LiveActionAuth,
+  LiveActionAuthorize,
   LiveActionAuthMap,
   LiveAuthResult,
 } from './auth/types'

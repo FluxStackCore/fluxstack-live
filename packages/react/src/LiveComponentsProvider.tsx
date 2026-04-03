@@ -4,7 +4,7 @@
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
 import { LiveConnection } from '@fluxstack/live-client'
-import type { LiveAuthOptions, LiveConnectionOptions } from '@fluxstack/live-client'
+import type { LiveAuthOptions, LiveConnectionOptions, LiveClientAuth } from '@fluxstack/live-client'
 import type { WebSocketMessage, WebSocketResponse } from '@fluxstack/live'
 
 export interface LiveComponentsContextValue {
@@ -13,7 +13,8 @@ export interface LiveComponentsContextValue {
   error: string | null
   connectionId: string | null
   authenticated: boolean
-
+  /** Auth context with session data from the server */
+  $auth: LiveClientAuth
   sendMessage: (message: WebSocketMessage) => Promise<void>
   sendMessageAndWait: (message: WebSocketMessage, timeout?: number) => Promise<WebSocketResponse>
   sendBinaryAndWait: (data: ArrayBuffer, requestId: string, timeout?: number) => Promise<WebSocketResponse>
@@ -50,6 +51,7 @@ export function LiveComponentsProvider({
   const [error, setError] = useState<string | null>(null)
   const [connectionId, setConnectionId] = useState<string | null>(null)
   const [authenticated, setAuthenticated] = useState(false)
+  const [$auth, set$auth] = useState<LiveClientAuth>({ authenticated: false, session: null })
 
   // Create connection once
   if (!connectionRef.current) {
@@ -74,6 +76,7 @@ export function LiveComponentsProvider({
       setError(state.error)
       setConnectionId(state.connectionId)
       setAuthenticated(state.authenticated)
+      set$auth(state.auth)
     })
 
     if (autoConnect) {
@@ -132,6 +135,7 @@ export function LiveComponentsProvider({
     error,
     connectionId,
     authenticated,
+    $auth,
     sendMessage,
     sendMessageAndWait,
     sendBinaryAndWait,

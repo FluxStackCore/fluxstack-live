@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>@fluxstack/live — Auth Demo</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>@fluxstack/live — Auth Demo</h1>
+    <div id="status" class="status disconnected">Disconnected</div>
+  </header>
+
+  <!-- Auth Section -->
+  <section class="card">
+    <h2>Authentication</h2>
+    <div id="authStatus" class="auth-status">Not authenticated</div>
+    <div id="sessionData" class="session-data"></div>
+    <div class="token-buttons">
+      <button onclick="login('admin-token')" class="btn admin">Admin</button>
+      <button onclick="login('pro-token')" class="btn pro">Pro User</button>
+      <button onclick="login('free-token')" class="btn free">Free User</button>
+      <button onclick="login('bot-token')" class="btn bot">Bot</button>
+      <button onclick="logout()" class="btn logout" id="logoutBtn" style="display:none">Logout</button>
+    </div>
+  </section>
+
+  <!-- Public Counter -->
+  <section class="card">
+    <h2>Public Counter <span class="badge public">No auth</span></h2>
+    <div class="counter">
+      <button onclick="counterAction('decrement')">−</button>
+      <span id="count">0</span>
+      <button onclick="counterAction('increment')">+</button>
+    </div>
+  </section>
+
+  <!-- Protected Notes -->
+  <section class="card">
+    <h2>Protected Notes <span class="badge protected">Auth required</span></h2>
+    <div id="notesError" class="error" style="display:none"></div>
+    <div id="notesContent" style="display:none">
+      <div id="profileInfo" class="profile-info"></div>
+      <div class="note-form">
+        <input id="noteInput" placeholder="Write a note..." onkeydown="if(event.key==='Enter')addNote()">
+        <button onclick="addNote()" class="btn">Add</button>
+      </div>
+      <div id="notesList"></div>
+      <div class="actions">
+        <button onclick="notesGetProfile()" class="btn small">getProfile()</button>
+        <button onclick="notesAdminClear()" class="btn small admin">adminClear()</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Pro Dashboard -->
+  <section class="card">
+    <h2>Pro Dashboard <span class="badge pro">Pro/Enterprise only</span></h2>
+    <div id="proError" class="error" style="display:none"></div>
+    <div id="proContent" style="display:none">
+      <div id="proStats"></div>
+      <button onclick="proGetStats()" class="btn small">getStats()</button>
+    </div>
+  </section>
+
+  <!-- Log -->
+  <section class="card">
+    <h2>Log</h2>
+    <div id="log" class="log"></div>
+  </section>
+
+  <script src="/live-client.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

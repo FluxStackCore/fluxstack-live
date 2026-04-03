@@ -1,21 +1,24 @@
 {
   "name": "@fluxstack/live-client",
-  "version": "0.3.0",
+  "version": "0.5.1",
   "description": "Browser WebSocket client for @fluxstack/live — connection, state sync, rooms, and file upload (framework-agnostic)",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "bun": "./src/index.ts",
       "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.cjs"
     },
     "./browser": "./dist/live-client.browser.global.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "scripts": {
     "build": "tsup",
@@ -24,7 +27,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.3.0"
+    "@fluxstack/live": "^0.5.1"
   },
   "devDependencies": {
     "tsup": "^8.4.0",
@@ -38,5 +41,9 @@
     "url": "https://github.com/FluxStackCore/fluxstack-live",
     "directory": "packages/client"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "keywords": ["websocket", "client", "realtime", "state-sync", "live-components", "fluxstack"],
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

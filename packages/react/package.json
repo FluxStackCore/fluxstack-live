@@ -1,20 +1,23 @@
 {
   "name": "@fluxstack/live-react",
-  "version": "0.3.0",
+  "version": "0.5.1",
   "description": "React hooks and providers for @fluxstack/live — Live.use(), $field(), LiveComponentsProvider",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "bun": "./src/index.ts",
       "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.cjs"
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "src"
   ],
   "scripts": {
     "build": "tsup",
@@ -23,8 +26,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.3.0",
-    "@fluxstack/live-client": "^0.3.0"
+    "@fluxstack/live": "^0.5.1",
+    "@fluxstack/live-client": "^0.5.1"
   },
   "peerDependencies": {
     "react": ">=18.0.0",
@@ -45,5 +48,9 @@
     "url": "https://github.com/FluxStackCore/fluxstack-live",
     "directory": "packages/react"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "keywords": ["react", "hooks", "realtime", "websocket", "live-components", "fluxstack"],
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

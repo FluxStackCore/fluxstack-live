@@ -1,15 +1,17 @@
 {
   "name": "@fluxstack/live-fastify",
-  "version": "0.2.0",
+  "version": "0.5.1",
   "description": "Fastify WebSocket transport adapter for @fluxstack/live (@fastify/websocket)",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "sideEffects": false,
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.cjs"
     }
   },
   "files": ["dist"],
@@ -20,8 +22,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.2.0",
-    "@fluxstack/live-client": "^0.2.0",
+    "@fluxstack/live": "^0.5.1",
+    "@fluxstack/live-client": "^0.5.1",
     "fastify-plugin": "^5.0.0"
   },
   "peerDependencies": {
@@ -45,5 +47,9 @@
     "url": "https://github.com/FluxStackCore/fluxstack-live",
     "directory": "packages/fastify"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "keywords": ["fastify", "websocket", "transport", "realtime", "live-components", "fluxstack"],
+  "engines": {
+    "node": ">=18.0.0"
+  }
 }

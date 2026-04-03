@@ -18,7 +18,9 @@
     "test": "vitest",
     "test:run": "vitest run",
     "lint": "tsc --noEmit",
-    "clean": "rm -rf packages/*/dist node_modules"
+    "clean": "rm -rf packages/*/dist node_modules",
+    "publish:dry": "bash scripts/publish.sh",
+    "publish:npm": "bash scripts/publish.sh --publish"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

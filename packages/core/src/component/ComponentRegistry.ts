@@ -269,7 +269,7 @@ export class ComponentRegistry {
       // Auth check
       const authContext = ws.data?.authContext || ANONYMOUS_CONTEXT
       const componentAuth = (ComponentClass as any).auth as LiveComponentAuth | undefined
-      const authResult = this.authManager.authorizeComponent(authContext, componentAuth)
+      const authResult = await this.authManager.authorizeComponent(authContext, componentAuth)
       if (!authResult.allowed) throw new Error(`AUTH_DENIED: ${authResult.reason}`)
 
       // Singleton check
@@ -491,7 +491,7 @@ export class ComponentRegistry {
       // Auth check
       const authContext = ws.data?.authContext || ANONYMOUS_CONTEXT
       const componentAuth = (ComponentClass as any).auth as LiveComponentAuth | undefined
-      const authResult = this.authManager.authorizeComponent(authContext, componentAuth)
+      const authResult = await this.authManager.authorizeComponent(authContext, componentAuth)
       if (!authResult.allowed) return { success: false, error: `AUTH_DENIED: ${authResult.reason}` }
 
       const clientState = this.stateSignature.extractData(signedState) as Record<string, any>
@@ -647,7 +647,7 @@ export class ComponentRegistry {
     if (actionAuth) {
       const authContext = (component as any).$auth || ANONYMOUS_CONTEXT
       const componentName = componentClass.componentName || componentClass.name
-      const authResult = await this.authManager.authorizeAction(authContext, componentName, action, actionAuth)
+      const authResult = await this.authManager.authorizeAction(authContext, componentName, action, actionAuth, undefined, payload)
       if (!authResult.allowed) throw new Error(`AUTH_DENIED: ${authResult.reason}`)
     }
 

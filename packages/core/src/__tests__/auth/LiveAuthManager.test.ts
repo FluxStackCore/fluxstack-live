@@ -55,7 +55,7 @@ describe('LiveAuthManager', () => {
       const result = await manager.authenticate({ token: 'valid' })
 
       expect(result.authenticated).toBe(true)
-      expect(result.user?.id).toBe('user-1')
+      expect(result.session?.id).toBe('user-1')
 
       // No warnings should be logged for null returns
       const providerWarns = consoleSpy.calls.warn.filter(
@@ -71,8 +71,8 @@ describe('LiveAuthManager', () => {
       const result = await manager.authenticate({ token: 'valid-token' })
 
       expect(result.authenticated).toBe(true)
-      expect(result.user?.id).toBe('user-42')
-      expect(result.user?.roles).toContain('editor')
+      expect(result.session?.id).toBe('user-42')
+      expect(result.session?.roles).toContain('editor')
     })
 
     it('should return ANONYMOUS_CONTEXT when all providers fail', async () => {

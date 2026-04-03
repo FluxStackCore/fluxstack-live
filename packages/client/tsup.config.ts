@@ -4,7 +4,7 @@ export default defineConfig([
   // ESM build for npm/bundler consumption
   {
     entry: ['src/index.ts'],
-    format: ['esm'],
+    format: ['esm', 'cjs'],
     dts: true,
     sourcemap: true,
     clean: true,

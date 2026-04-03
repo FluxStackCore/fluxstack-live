@@ -301,7 +301,10 @@ export class LiveServer {
         sendImmediate(ws, JSON.stringify({
           type: 'AUTH_RESPONSE',
           success: authContext.authenticated,
-          payload: authContext.authenticated ? { userId: authContext.user?.id } : { error: 'Authentication failed' },
+          payload: authContext.authenticated
+            ? { authenticated: true, session: authContext.session }
+            : { authenticated: false, error: 'Authentication failed' },
+          requestId: message.requestId,
           timestamp: Date.now()
         }))
         return

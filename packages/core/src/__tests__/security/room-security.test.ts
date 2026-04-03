@@ -377,7 +377,7 @@ describe('Room Security - LiveServer', () => {
       expect(authorizeFn).toHaveBeenCalledTimes(1)
       const [calledCtx, calledRoomId] = authorizeFn.mock.calls[0]
       expect(calledCtx.authenticated).toBe(true)
-      expect(calledCtx.user.id).toBe('user-1')
+      expect(calledCtx.session.id).toBe('user-1')
       expect(calledRoomId).toBe('admin-room')
     })
 

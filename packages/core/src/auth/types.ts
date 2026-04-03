@@ -24,22 +24,28 @@ export interface LiveAuthCredentials {
   [key: string]: unknown
 }
 
-// ===== Authenticated user =====
+// ===== Auth session =====
 
 /**
- * Authenticated user information.
+ * Authenticated session data.
  * Returned by LiveAuthProvider after validation.
+ *
+ * Shape is generic — the dev defines what goes here (user, bot, service, device, etc.)
+ * Only `id` is required. Everything else is up to the provider.
  */
-export interface LiveAuthUser {
-  /** Unique user identifier */
+export interface LiveAuthSession {
+  /** Unique identifier for the authenticated entity */
   id: string
-  /** Roles assigned to the user (e.g., 'admin', 'moderator') */
+  /** Roles (e.g., 'admin', 'moderator', 'service') */
   roles?: string[]
   /** Granular permissions (e.g., 'chat.write', 'chat.admin') */
   permissions?: string[]
-  /** Additional fields (name, email, etc.) */
+  /** Additional fields — dev defines freely */
   [key: string]: unknown
 }
+
+/** @deprecated Use LiveAuthSession instead */
+export type LiveAuthUser = LiveAuthSession
 
 // ===== Auth context =====
 
@@ -48,26 +54,28 @@ export interface LiveAuthUser {
  * Provides type-safe helpers for checking roles and permissions.
  */
 export interface LiveAuthContext {
-  /** Whether the user is authenticated */
+  /** Whether the connection is authenticated */
   readonly authenticated: boolean
-  /** User data (undefined if not authenticated) */
-  readonly user?: LiveAuthUser
+  /** Session data (undefined if not authenticated). Shape defined by your provider. */
+  readonly session?: LiveAuthSession
+  /** @deprecated Use `session` instead */
+  readonly user?: LiveAuthSession
   /** Original token used for authentication */
   readonly token?: string
   /** Timestamp of when authentication occurred */
   readonly authenticatedAt?: number
 
-  /** Check if user has a specific role */
+  /** Check if session has a specific role */
   hasRole(role: string): boolean
-  /** Check if user has ANY of the roles */
+  /** Check if session has ANY of the roles */
   hasAnyRole(roles: string[]): boolean
-  /** Check if user has ALL roles */
+  /** Check if session has ALL roles */
   hasAllRoles(roles: string[]): boolean
-  /** Check if user has a specific permission */
+  /** Check if session has a specific permission */
   hasPermission(permission: string): boolean
-  /** Check if user has ALL permissions */
+  /** Check if session has ALL permissions */
   hasAllPermissions(permissions: string[]): boolean
-  /** Check if user has ANY of the permissions */
+  /** Check if session has ANY of the permissions */
   hasAnyPermission(permissions: string[]): boolean
 }
 
@@ -109,11 +117,43 @@ export interface LiveAuthProvider {
   ): Promise<boolean>
 }
 
+// ===== Auth authorize functions =====
+
+/**
+ * Custom authorization function for component mount.
+ * Return true/false, or a LiveAuthResult for a custom denial reason.
+ */
+export type LiveComponentAuthorize = (
+  auth: LiveAuthContext,
+) => boolean | LiveAuthResult | Promise<boolean | LiveAuthResult>
+
+/**
+ * Custom authorization function for a specific action.
+ * Receives the auth context and the action payload.
+ */
+export type LiveActionAuthorize = (
+  auth: LiveAuthContext,
+  payload: unknown,
+) => boolean | LiveAuthResult | Promise<boolean | LiveAuthResult>
+
 // ===== Component auth config =====
 
 /**
  * Declarative auth configuration for a LiveComponent.
  * Defined as a static property on the class.
+ *
+ * By default, all components are public (no auth required).
+ * Use `required: true` to require authentication.
+ * Use `authorize` for custom logic (DB checks, feature flags, plans, etc.)
+ *
+ * Auth rules are composable — create reusable objects and share across components:
+ * @example
+ * // auth/rules.ts
+ * export const adminOnly = { required: true, roles: ['admin'] }
+ * export const proOnly = { required: true, authorize: async (auth) => checkPlan(auth.session?.id) }
+ *
+ * // components/MyComponent.ts
+ * static auth = adminOnly
  */
 export interface LiveComponentAuth {
   /** Whether authentication is required to mount the component. Default: false */
@@ -122,16 +162,32 @@ export interface LiveComponentAuth {
   roles?: string[]
   /** Required permissions (AND logic - all must be present) */
   permissions?: string[]
+  /**
+   * Custom authorization function. Runs AFTER declarative checks (required, roles, permissions).
+   * Return true to allow, false to deny, or a LiveAuthResult for a custom reason.
+   */
+  authorize?: LiveComponentAuthorize
 }
 
 /**
  * Per-action auth configuration.
+ *
+ * @example
+ * static actionAuth = {
+ *   deleteUser: { roles: ['admin'], permissions: ['users.delete'] },
+ *   editProfile: { authorize: async (auth, payload) => auth.session?.id === payload.userId },
+ * }
  */
 export interface LiveActionAuth {
   /** Required roles for this action (OR logic) */
   roles?: string[]
   /** Required permissions for this action (AND logic) */
   permissions?: string[]
+  /**
+   * Custom authorization function. Runs AFTER declarative checks (roles, permissions).
+   * Receives the auth context and the action payload.
+   */
+  authorize?: LiveActionAuthorize
 }
 
 /** Map of action name -> auth configuration */

@@ -13,6 +13,7 @@
 export { LiveConnection } from './connection'
 export type {
   LiveAuthOptions,
+  LiveClientAuth,
   LiveConnectionOptions,
   LiveConnectionState,
 } from './connection'

@@ -32,12 +32,21 @@ export interface LiveConnectionOptions {
   debug?: boolean
 }
 
+/** Auth state exposed to the client */
+export interface LiveClientAuth {
+  authenticated: boolean
+  /** Session data from the server. Shape defined by your LiveAuthProvider. */
+  session: Record<string, unknown> | null
+}
+
 export interface LiveConnectionState {
   connected: boolean
   connecting: boolean
   error: string | null
   connectionId: string | null
   authenticated: boolean
+  /** Auth context with session data */
+  auth: LiveClientAuth
 }
 
 type StateChangeCallback = (state: LiveConnectionState) => void
@@ -68,6 +77,7 @@ export class LiveConnection {
     error: null,
     connectionId: null,
     authenticated: false,
+    auth: { authenticated: false, session: null },
   }
 
   constructor(options: LiveConnectionOptions = {}) {
@@ -104,24 +114,14 @@ export class LiveConnection {
   }
 
   private getWebSocketUrl(): string {
-    const auth = this.options.auth
-    let baseUrl: string
-
     if (this.options.url) {
-      baseUrl = this.options.url
+      return this.options.url
     } else if (typeof window === 'undefined') {
-      baseUrl = 'ws://localhost:3000/api/live/ws'
+      return 'ws://localhost:3000/api/live/ws'
     } else {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      baseUrl = `${protocol}//${window.location.host}/api/live/ws`
+      return `${protocol}//${window.location.host}/api/live/ws`
     }
-
-    if (auth?.token) {
-      const separator = baseUrl.includes('?') ? '&' : '?'
-      return `${baseUrl}${separator}token=${encodeURIComponent(auth.token)}`
-    }
-
-    return baseUrl
   }
 
   private log(message: string, data?: any) {
@@ -189,7 +189,7 @@ export class LiveConnection {
 
       ws.onclose = (event) => {
         this.log('Disconnected', { code: event.code, reason: event.reason })
-        this.setState({ connected: false, connecting: false, connectionId: null })
+        this.setState({ connected: false, connecting: false, connectionId: null, authenticated: false, auth: { authenticated: false, session: null } })
         this.stopHeartbeat()
 
         // Server rejected connection due to CSRF origin validation — don't retry
@@ -275,13 +275,17 @@ export class LiveConnection {
         authenticated: (response as any).authenticated || false,
       })
 
-      // If auth credentials provided but not via token query, send AUTH message
+      // Send AUTH message if credentials provided (always via socket, never in URL)
       const auth = this.options.auth
-      if (auth && !auth.token && Object.keys(auth).some(k => auth[k])) {
+      if (auth && Object.keys(auth).some(k => auth[k])) {
         this.sendMessageAndWait({ type: 'AUTH', payload: auth } as any)
           .then(authResp => {
-            if ((authResp as any).authenticated) {
-              this.setState({ authenticated: true })
+            const payload = (authResp as any).payload
+            if (payload?.authenticated) {
+              this.setState({
+                authenticated: true,
+                auth: { authenticated: true, session: payload.session || null },
+              })
             }
           })
           .catch(() => {})
@@ -290,7 +294,15 @@ export class LiveConnection {
 
     // Handle auth response
     if (response.type === 'AUTH_RESPONSE') {
-      this.setState({ authenticated: (response as any).authenticated || false })
+      const payload = (response as any).payload
+      const authenticated = payload?.authenticated || false
+      this.setState({
+        authenticated,
+        auth: {
+          authenticated,
+          session: authenticated ? (payload?.session || null) : null,
+        },
+      })
     }
 
     // Handle pending requests (request-response pattern)
@@ -460,8 +472,15 @@ export class LiveConnection {
         { type: 'AUTH', payload: credentials } as any,
         5000
       )
-      const success = (response as any).authenticated || false
-      this.setState({ authenticated: success })
+      const payload = (response as any).payload
+      const success = payload?.authenticated || false
+      this.setState({
+        authenticated: success,
+        auth: {
+          authenticated: success,
+          session: success ? (payload?.session || null) : null,
+        },
+      })
       return success
     } catch {
       return false

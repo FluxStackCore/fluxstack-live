@@ -35,21 +35,21 @@ export function createMockWS(overrides?: Partial<LiveWSData>): GenericWebSocket 
 // ===== Auth Helpers =====
 
 export function createAuthenticatedWS(
-  user: { id: string; roles?: string[]; permissions?: string[] },
+  session: { id: string; roles?: string[]; permissions?: string[]; [key: string]: unknown },
   token = 'test-token',
 ): GenericWebSocket & { _messages: string[] } {
-  const authContext = new AuthenticatedContext(user, token)
+  const authContext = new AuthenticatedContext(session, token)
   return createMockWS({ authContext })
 }
 
 export function createSuccessProvider(
   name: string,
-  user: { id: string; roles?: string[]; permissions?: string[] },
+  session: { id: string; roles?: string[]; permissions?: string[] },
 ): LiveAuthProvider {
   return {
     name,
     async authenticate() {
-      return new AuthenticatedContext(user)
+      return new AuthenticatedContext(session)
     },
   }
 }

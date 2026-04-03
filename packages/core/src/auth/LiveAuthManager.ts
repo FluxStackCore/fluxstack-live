@@ -132,11 +132,12 @@ export class LiveAuthManager {
 
   /**
    * Verify auth context meets component requirements.
+   * Checks in order: required → roles → permissions → custom authorize().
    */
-  authorizeComponent(
+  async authorizeComponent(
     authContext: LiveAuthContext,
     authConfig: LiveComponentAuth | undefined
-  ): LiveAuthResult {
+  ): Promise<LiveAuthResult> {
     if (!authConfig) {
       return { allowed: true }
     }
@@ -163,18 +164,34 @@ export class LiveAuthManager {
       }
     }
 
+    // Custom authorize function (runs after declarative checks pass)
+    if (authConfig.authorize) {
+      try {
+        const result = await authConfig.authorize(authContext)
+        if (typeof result === 'boolean') {
+          if (!result) return { allowed: false, reason: 'Denied by custom authorize' }
+        } else {
+          if (!result.allowed) return result
+        }
+      } catch (error: any) {
+        return { allowed: false, reason: `Authorization error: ${error.message}` }
+      }
+    }
+
     return { allowed: true }
   }
 
   /**
    * Verify auth context allows executing a specific action.
+   * Checks in order: roles → permissions → custom authorize() → provider authorizeAction().
    */
   async authorizeAction(
     authContext: LiveAuthContext,
     componentName: string,
     action: string,
     actionAuth: LiveActionAuth | undefined,
-    providerName?: string
+    providerName?: string,
+    payload?: unknown
   ): Promise<LiveAuthResult> {
     if (!actionAuth) {
       return { allowed: true }
@@ -195,6 +212,20 @@ export class LiveAuthManager {
       }
       if (!authContext.hasAllPermissions(actionAuth.permissions)) {
         return { allowed: false, reason: `Insufficient permissions for action '${action}'. Required all: ${actionAuth.permissions.join(', ')}` }
+      }
+    }
+
+    // Custom authorize function (runs after declarative checks pass)
+    if (actionAuth.authorize) {
+      try {
+        const result = await actionAuth.authorize(authContext, payload)
+        if (typeof result === 'boolean') {
+          if (!result) return { allowed: false, reason: `Action '${action}' denied by custom authorize` }
+        } else {
+          if (!result.allowed) return result
+        }
+      } catch (error: any) {
+        return { allowed: false, reason: `Action '${action}' authorization error: ${error.message}` }
       }
     }
 

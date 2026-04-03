@@ -75,6 +75,7 @@ export interface LiveComponentProxy<
   readonly $componentId: string | null
   readonly $dirty: boolean
   readonly $authenticated: boolean
+  readonly $auth: { authenticated: boolean; session: Record<string, unknown> | null }
 
   $call: (action: string, payload?: any) => Promise<void>
   $callAndWait: <R = any>(action: string, payload?: any, timeout?: number) => Promise<R>
@@ -148,7 +149,7 @@ export interface UseLiveComponentOptions extends HybridComponentOptions {
 // ===== Reserved Props =====
 
 const RESERVED_PROPS = new Set([
-  '$state', '$connected', '$loading', '$error', '$status', '$componentId', '$dirty', '$authenticated',
+  '$state', '$connected', '$loading', '$error', '$status', '$componentId', '$dirty', '$authenticated', '$auth',
   '$call', '$callAndWait', '$fire', '$mount', '$unmount', '$refresh', '$set', '$onBroadcast', '$updateLocal',
   '$room', '$rooms', '$field', '$sync',
   'then', 'toJSON', 'valueOf', 'toString',
@@ -208,6 +209,7 @@ export function useLiveComponent<
   const {
     connected,
     authenticated: wsAuthenticated,
+    $auth: wsAuth,
     sendMessage,
     sendMessageAndWait,
     registerComponent,
@@ -690,6 +692,7 @@ export function useLiveComponent<
           case '$componentId': return componentId
           case '$dirty': return pendingChanges.current.size > 0
           case '$authenticated': return wsAuthenticated
+          case '$auth': return wsAuth
           case '$call': return call
           case '$callAndWait': return callAndWait
           case '$fire': return fire
@@ -753,7 +756,7 @@ export function useLiveComponent<
       ownKeys() {
         return [
           ...Object.keys(stateData),
-          '$state', '$connected', '$loading', '$error', '$status', '$componentId', '$dirty', '$authenticated',
+          '$state', '$connected', '$loading', '$error', '$status', '$componentId', '$dirty', '$authenticated', '$auth',
           '$call', '$callAndWait', '$fire', '$mount', '$unmount', '$refresh', '$set', '$field', '$sync',
           '$onBroadcast', '$updateLocal', '$room', '$rooms',
         ]

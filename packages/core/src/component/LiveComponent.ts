@@ -243,8 +243,8 @@ export abstract class LiveComponent<
     }
     this._authContext = context
     this._authContextSet = true
-    if (context.authenticated && context.user?.id && !this.userId) {
-      this.userId = context.user.id
+    if (context.authenticated && context.session?.id && !this.userId) {
+      this.userId = context.session.id
     }
   }
 
