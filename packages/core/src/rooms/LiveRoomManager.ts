@@ -422,10 +422,10 @@ export class LiveRoomManager {
     } else {
       // Rough estimate between recalculations
       const deltaSize = JSON.stringify(actualChanges).length
-      room.stateSize += deltaSize
+      room.stateSize = (room.stateSize ?? 0) + deltaSize
     }
 
-    if (room.stateSize > MAX_ROOM_STATE_SIZE) {
+    if ((room.stateSize ?? 0) > MAX_ROOM_STATE_SIZE) {
       // Always re-check precisely before rejecting
       const precise = JSON.stringify(room.state).length
       room.stateSize = precise
