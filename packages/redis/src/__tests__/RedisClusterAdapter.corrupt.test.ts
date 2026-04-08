@@ -1,24 +1,23 @@
 // Verify: JSON.parse with try-catch in Redis adapters
-// Before fix: corrupted data in Redis would crash the server
+// Before fix: corrupted data in Redis would crash with SyntaxError
 // After fix: returns null gracefully
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest'
 import Redis from 'ioredis'
 import { RedisClusterAdapter } from '../RedisClusterAdapter'
 
 const REDIS_HOST = '127.0.0.1'
 const REDIS_PORT = 16379
+const TEST_PREFIX = 'test:corrupt:'
 
 describe('RedisClusterAdapter — corrupted data handling', () => {
   let redis: Redis
-  let subscriber: Redis
   let adapter: RedisClusterAdapter
 
   beforeAll(async () => {
+    const test = new Redis({ host: REDIS_HOST, port: REDIS_PORT, lazyConnect: true })
     try {
-      redis = new Redis({ host: REDIS_HOST, port: REDIS_PORT, lazyConnect: true })
-      await redis.connect()
-      const test = new Redis({ host: REDIS_HOST, port: REDIS_PORT, lazyConnect: true })
       await test.connect()
+      await test.ping()
       await test.disconnect()
     } catch {
       throw new Error(
@@ -26,25 +25,37 @@ describe('RedisClusterAdapter — corrupted data handling', () => {
         `Run: docker run -d --name fluxstack-test-redis -p ${REDIS_PORT}:6379 redis:7-alpine`
       )
     }
+  })
 
-    subscriber = redis.duplicate()
-    adapter = new RedisClusterAdapter({ redis, subscriber })
+  beforeEach(async () => {
+    redis = new Redis({ host: REDIS_HOST, port: REDIS_PORT, db: 15 })
+    await redis.flushdb()
+    adapter = new RedisClusterAdapter({
+      redis,
+      prefix: TEST_PREFIX,
+      stateTtl: 60,
+      singletonTtl: 10,
+      heartbeatInterval: 60_000,
+    })
     await adapter.start()
   })
 
-  afterAll(async () => {
+  afterEach(async () => {
     await adapter.shutdown()
     await redis.quit()
-    await subscriber.quit()
   })
 
   it('loadState should return null for corrupted JSON instead of throwing', async () => {
-    const componentId = 'test-corrupt-component'
-    // Must match the adapter's internal key format: prefix + 'state:' + componentId
-    const key = `fluxstack:cluster:state:${componentId}`
+    const componentId = 'corrupt-comp'
 
-    // Inject corrupted JSON directly into Redis
-    await redis.set(key, '{invalid json!!!}')
+    // First save valid state so we know the key format works
+    await adapter.saveState(componentId, 'TestComp', { count: 1 })
+    const valid = await adapter.loadState(componentId)
+    expect(valid).toBeTruthy()
+
+    // Now overwrite with corrupted JSON using the same key pattern
+    // The adapter uses: prefix + 'state:' + componentId
+    await redis.set(`${TEST_PREFIX}state:${componentId}`, '{invalid json!!!}')
 
     // Before fix: JSON.parse throws SyntaxError (crashes the caller)
     // After fix: returns null gracefully
@@ -56,36 +67,27 @@ describe('RedisClusterAdapter — corrupted data handling', () => {
       threw = true
     }
 
-    // Should NOT throw
     expect(threw).toBe(false)
-    // Should return null
     expect(result).toBeNull()
-
-    // Cleanup
-    await redis.del(key)
   })
 
   it('loadState should work normally with valid JSON', async () => {
-    const componentId = 'test-valid-component'
-
-    await adapter.saveState(componentId, 'TestComponent', { count: 42 })
-    const result = await adapter.loadState(componentId)
-
+    await adapter.saveState('valid-comp', 'TestComp', { count: 42 })
+    const result = await adapter.loadState('valid-comp')
     expect(result).toBeTruthy()
     expect(result!.state).toEqual({ count: 42 })
-
-    // Cleanup
-    await adapter.deleteState(componentId)
   })
 
   it('loadSingletonState should return null for corrupted JSON', async () => {
-    const key = 'fluxstack:cluster:singleton-state:CorruptSingleton'
+    // Save valid first to confirm key pattern
+    await adapter.saveSingletonState('TestSingleton', { value: 1 })
+    const valid = await adapter.loadSingletonState('TestSingleton')
+    expect(valid).toBeTruthy()
 
-    await redis.set(key, 'not-json-at-all')
+    // Overwrite with corrupted data
+    await redis.set(`${TEST_PREFIX}singleton-state:TestSingleton`, 'not-json')
 
-    const result = await adapter.loadSingletonState('CorruptSingleton')
+    const result = await adapter.loadSingletonState('TestSingleton')
     expect(result).toBeNull()
-
-    await redis.del(key)
   })
 })
