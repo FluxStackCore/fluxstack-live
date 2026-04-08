@@ -325,6 +325,23 @@ export class FileUploadManager {
     return this.activeUploads.get(uploadId) || null
   }
 
+  /** Cancel an active upload. Called when client disconnects. */
+  cancelUpload(uploadId: string): boolean {
+    return this.activeUploads.delete(uploadId)
+  }
+
+  /** Cancel all uploads for a given componentId. Called on connection close. */
+  cancelComponentUploads(componentId: string): number {
+    let cancelled = 0
+    for (const [uploadId, upload] of this.activeUploads) {
+      if (upload.componentId === componentId) {
+        this.activeUploads.delete(uploadId)
+        cancelled++
+      }
+    }
+    return cancelled
+  }
+
   getStats() {
     return {
       activeUploads: this.activeUploads.size,

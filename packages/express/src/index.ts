@@ -359,12 +359,17 @@ export function live(app: Express, options: ExpressLiveOptions = {}): LiveMiddle
       })
     })
 
-    // Handle graceful shutdown
+    // Handle graceful shutdown (remove previous handlers to avoid accumulation)
+    if ((app as any).__liveShutdownHandler) {
+      process.removeListener('SIGINT', (app as any).__liveShutdownHandler)
+      process.removeListener('SIGTERM', (app as any).__liveShutdownHandler)
+    }
     const onShutdown = async () => {
       if (liveServer) await liveServer.shutdown()
       httpServer.close()
       process.exit(0)
     }
+    ;(app as any).__liveShutdownHandler = onShutdown
     process.on('SIGINT', onShutdown)
     process.on('SIGTERM', onShutdown)
 

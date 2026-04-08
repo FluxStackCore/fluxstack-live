@@ -85,7 +85,9 @@ export function LiveComponentsProvider({
 
     return () => {
       unsub()
-      conn.destroy()
+      // In StrictMode, React mounts/unmounts twice. Use disconnect() instead
+      // of destroy() so the connection can be reused on the second mount.
+      conn.disconnect()
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 

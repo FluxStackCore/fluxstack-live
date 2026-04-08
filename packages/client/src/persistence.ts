@@ -25,7 +25,11 @@ export function persistState(
     localStorage.setItem(`${STORAGE_KEY_PREFIX}${name}`, JSON.stringify({
       componentName: name, signedState, room, userId, lastUpdate: Date.now(),
     }))
-  } catch {}
+  } catch (e) {
+    if (typeof console !== 'undefined') {
+      console.warn(`[fluxstack] Failed to persist state for '${name}':`, e instanceof Error ? e.message : e)
+    }
+  }
 }
 
 export function getPersistedState(enabled: boolean, name: string): PersistedState | null {

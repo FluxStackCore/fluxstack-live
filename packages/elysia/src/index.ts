@@ -96,24 +96,33 @@ export class ElysiaTransport implements LiveTransport {
     })
   }
 
+  async shutdown(): Promise<void> {
+    // Elysia/Bun manages WebSocket lifecycle internally
+  }
+
   registerHttpRoutes(routes: HttpRouteDefinition[]): void {
     for (const route of routes) {
       const handler = async (ctx: any) => {
-        const request = {
-          params: ctx.params || {},
-          query: ctx.query || {},
-          body: ctx.body,
-          headers: ctx.headers || {},
-        }
-
-        const response = await route.handler(request)
-        ctx.set.status = response.status ?? 200
-        if (response.headers) {
-          for (const [key, value] of Object.entries(response.headers)) {
-            ctx.set.headers[key] = value
+        try {
+          const request = {
+            params: ctx.params || {},
+            query: ctx.query || {},
+            body: ctx.body,
+            headers: ctx.headers || {},
           }
+
+          const response = await route.handler(request)
+          ctx.set.status = response.status ?? 200
+          if (response.headers) {
+            for (const [key, value] of Object.entries(response.headers)) {
+              ctx.set.headers[key] = value
+            }
+          }
+          return response.body
+        } catch (error: any) {
+          ctx.set.status = 500
+          return { error: error.message }
         }
-        return response.body
       }
 
       switch (route.method) {
@@ -163,7 +172,9 @@ function wrapElysiaWs(elysiaWs: any): GenericWebSocket {
 
   const ws: GenericWebSocket = {
     send(data: string | ArrayBuffer | Uint8Array, compress?: boolean) {
-      return raw.send(data, compress)
+      if (raw.readyState === 1) {
+        return raw.send(data, compress)
+      }
     },
     close(code?: number, reason?: string) {
       raw.close(code, reason)
