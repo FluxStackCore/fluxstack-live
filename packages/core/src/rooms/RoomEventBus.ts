@@ -56,6 +56,14 @@ export function createTypedRoomEventBus<TRoomEvents extends Record<string, Recor
         if (subscriptions.get(key)?.size === 0) {
           subscriptions.delete(key)
         }
+        // Cleanup reverse index eagerly to prevent memory leak
+        const keys = componentIndex.get(componentId)
+        if (keys) {
+          keys.delete(key)
+          if (keys.size === 0) {
+            componentIndex.delete(componentId)
+          }
+        }
       }
     },
 
@@ -185,7 +193,14 @@ export class RoomEventBus {
       if (this.subscriptions.get(key)?.size === 0) {
         this.subscriptions.delete(key)
       }
-      // Cleanup reverse index (lazy: remove key entry only in unsubscribeAll)
+      // Cleanup reverse index eagerly to prevent memory leak
+      const keys = this.componentIndex.get(componentId)
+      if (keys) {
+        keys.delete(key)
+        if (keys.size === 0) {
+          this.componentIndex.delete(componentId)
+        }
+      }
     }
   }
 

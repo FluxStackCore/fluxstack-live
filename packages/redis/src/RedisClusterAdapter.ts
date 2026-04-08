@@ -138,7 +138,12 @@ export class RedisClusterAdapter implements IClusterAdapter {
 
   async loadState(componentId: string): Promise<ClusterComponentState | null> {
     const raw = await this.redis.get(this.stateKey(componentId))
-    return raw ? JSON.parse(raw) : null
+    if (!raw) return null
+    try {
+      return JSON.parse(raw)
+    } catch {
+      return null
+    }
   }
 
   async deleteState(componentId: string): Promise<void> {

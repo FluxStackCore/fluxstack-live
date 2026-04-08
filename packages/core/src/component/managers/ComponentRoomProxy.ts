@@ -426,7 +426,7 @@ export class ComponentRoomProxy {
     if (this.joinedRooms.size > 0 && this._cachedCtx) {
       for (const roomId of this.joinedRooms) {
         // leaveRoom is async but destroy() is sync — fire-and-forget during cleanup
-        this._cachedCtx.roomManager.leaveRoom(this.componentId, roomId)?.catch?.(() => {})
+        this._cachedCtx.roomManager.leaveRoom(this.componentId, roomId).catch(() => {})
       }
     }
     this.joinedRooms.clear()

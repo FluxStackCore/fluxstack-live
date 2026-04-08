@@ -414,8 +414,13 @@ export class LiveServer {
     const connectionId = ws.data?.connectionId
     const componentCount = ws.data?.components?.size || 0
 
+    // Clean up rooms for each componentId (NOT connectionId — rooms are keyed by componentId)
+    if (ws.data?.components) {
+      for (const componentId of ws.data.components.keys()) {
+        await this.roomManager.cleanupComponent(componentId as string)
+      }
+    }
     this.registry.cleanupConnection(ws)
-    await this.roomManager.cleanupComponent(connectionId || '')
     if (connectionId) {
       this.connectionManager.cleanupConnection(connectionId)
       this.rateLimiter.remove(connectionId)

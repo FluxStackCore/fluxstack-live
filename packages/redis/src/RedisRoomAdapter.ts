@@ -170,7 +170,10 @@ export class RedisRoomAdapter implements IRoomPubSubAdapter {
     // 1. Persist state update to Redis (for new instances joining later)
     const key = this.stateKey(roomId)
     const current = await this.redis.get(key)
-    const state = current ? JSON.parse(current) : {}
+    let state: Record<string, unknown> = {}
+    if (current) {
+      try { state = JSON.parse(current) } catch { /* corrupted state, start fresh */ }
+    }
     Object.assign(state, updates)
     if (this.stateTtl > 0) {
       await this.redis.set(key, JSON.stringify(state), 'EX', this.stateTtl)
@@ -196,7 +199,8 @@ export class RedisRoomAdapter implements IRoomPubSubAdapter {
    */
   async getPersistedState<T = any>(roomId: string): Promise<T | null> {
     const raw = await this.redis.get(this.stateKey(roomId))
-    return raw ? JSON.parse(raw) : null
+    if (!raw) return null
+    try { return JSON.parse(raw) } catch { return null }
   }
 
   /**
