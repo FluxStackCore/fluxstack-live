@@ -245,16 +245,32 @@ export class LiveConnection {
     }
   }
 
+  private consecutiveHeartbeatFailures = 0
+  private static readonly MAX_HEARTBEAT_FAILURES = 3
+
   private startHeartbeat(): void {
     this.stopHeartbeat()
+    this.consecutiveHeartbeatFailures = 0
     this.heartbeatInterval = setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
+        let failed = false
         for (const componentId of this.componentCallbacks.keys()) {
           this.sendMessage({
             type: 'COMPONENT_PING',
             componentId,
             timestamp: Date.now(),
-          }).catch(() => {})
+          }).catch(() => { failed = true })
+        }
+        if (failed) {
+          this.consecutiveHeartbeatFailures++
+          this.log(`Heartbeat failed (${this.consecutiveHeartbeatFailures}/${LiveConnection.MAX_HEARTBEAT_FAILURES})`)
+          if (this.consecutiveHeartbeatFailures >= LiveConnection.MAX_HEARTBEAT_FAILURES) {
+            this.log('Too many heartbeat failures, reconnecting...')
+            this.setState({ error: 'Heartbeat failed' })
+            this.reconnect()
+          }
+        } else {
+          this.consecutiveHeartbeatFailures = 0
         }
       }
     }, this.options.heartbeatInterval)

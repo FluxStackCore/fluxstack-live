@@ -86,11 +86,11 @@ describe('LiveRoomManager binary broadcast', () => {
       registry.register(CounterRoom as any)
     })
 
-    it('uses sendBinaryImmediate for emitToRoom', () => {
+    it('uses sendBinaryImmediate for emitToRoom', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'counter:global', ws1)
-      manager.joinRoom('comp-2', 'counter:global', ws2)
+      await manager.joinRoom('comp-1', 'counter:global', ws1)
+      await manager.joinRoom('comp-2', 'counter:global', ws2)
 
       vi.clearAllMocks()
       manager.emitToRoom('counter:global', 'counter:updated', { count: 42 })
@@ -100,11 +100,11 @@ describe('LiveRoomManager binary broadcast', () => {
       expect(queuePreSerialized).not.toHaveBeenCalled()
     })
 
-    it('sends parseable binary ROOM_EVENT frames', () => {
+    it('sends parseable binary ROOM_EVENT frames', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'counter:global', ws1)
-      manager.joinRoom('comp-2', 'counter:global', ws2)
+      await manager.joinRoom('comp-1', 'counter:global', ws1)
+      await manager.joinRoom('comp-2', 'counter:global', ws2)
 
       vi.clearAllMocks()
       manager.emitToRoom('counter:global', 'counter:updated', { count: 10, updatedBy: 'Alice' })
@@ -129,9 +129,9 @@ describe('LiveRoomManager binary broadcast', () => {
       expect(parsed2!.componentId).toBe('comp-2')
     })
 
-    it('uses sendBinaryImmediate for setRoomState', () => {
+    it('uses sendBinaryImmediate for setRoomState', async () => {
       const ws1 = createMockWS()
-      manager.joinRoom('comp-1', 'counter:global', ws1)
+      await manager.joinRoom('comp-1', 'counter:global', ws1)
 
       vi.clearAllMocks()
       manager.setRoomState('counter:global', { count: 5 })
@@ -140,9 +140,9 @@ describe('LiveRoomManager binary broadcast', () => {
       expect(queuePreSerialized).not.toHaveBeenCalled()
     })
 
-    it('sends parseable binary ROOM_STATE frames', () => {
+    it('sends parseable binary ROOM_STATE frames', async () => {
       const ws1 = createMockWS()
-      manager.joinRoom('comp-1', 'counter:global', ws1)
+      await manager.joinRoom('comp-1', 'counter:global', ws1)
 
       vi.clearAllMocks()
       manager.setRoomState('counter:global', { count: 99 })
@@ -158,11 +158,11 @@ describe('LiveRoomManager binary broadcast', () => {
       expect(data).toEqual({ state: { count: 99 } })
     })
 
-    it('respects excludeComponentId in binary broadcast', () => {
+    it('respects excludeComponentId in binary broadcast', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'counter:global', ws1)
-      manager.joinRoom('comp-2', 'counter:global', ws2)
+      await manager.joinRoom('comp-1', 'counter:global', ws1)
+      await manager.joinRoom('comp-2', 'counter:global', ws2)
 
       vi.clearAllMocks()
       manager.emitToRoom('counter:global', 'counter:updated', { count: 1 }, 'comp-1')
@@ -173,13 +173,13 @@ describe('LiveRoomManager binary broadcast', () => {
       expect(parsed!.componentId).toBe('comp-2')
     })
 
-    it('builds tail once and prepends per-member header', () => {
+    it('builds tail once and prepends per-member header', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
       const ws3 = createMockWS()
-      manager.joinRoom('comp-1', 'counter:global', ws1)
-      manager.joinRoom('comp-2', 'counter:global', ws2)
-      manager.joinRoom('comp-3', 'counter:global', ws3)
+      await manager.joinRoom('comp-1', 'counter:global', ws1)
+      await manager.joinRoom('comp-2', 'counter:global', ws2)
+      await manager.joinRoom('comp-3', 'counter:global', ws3)
 
       vi.clearAllMocks()
       manager.emitToRoom('counter:global', 'counter:updated', { count: 77 })
@@ -204,11 +204,11 @@ describe('LiveRoomManager binary broadcast', () => {
   })
 
   describe('Legacy rooms (JSON text mode)', () => {
-    it('uses queuePreSerialized for legacy rooms', () => {
+    it('uses queuePreSerialized for legacy rooms', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'legacy:room', ws1, { msg: '' })
-      manager.joinRoom('comp-2', 'legacy:room', ws2)
+      await manager.joinRoom('comp-1', 'legacy:room', ws1, { msg: '' })
+      await manager.joinRoom('comp-2', 'legacy:room', ws2)
 
       vi.clearAllMocks()
       manager.emitToRoom('legacy:room', 'chat:msg', { text: 'hello' })
@@ -218,11 +218,11 @@ describe('LiveRoomManager binary broadcast', () => {
       expect(sendBinaryImmediate).not.toHaveBeenCalled()
     })
 
-    it('serializes JSON once and splices componentId per member', () => {
+    it('serializes JSON once and splices componentId per member', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'legacy:room', ws1, {})
-      manager.joinRoom('comp-2', 'legacy:room', ws2)
+      await manager.joinRoom('comp-1', 'legacy:room', ws1, {})
+      await manager.joinRoom('comp-2', 'legacy:room', ws2)
 
       vi.clearAllMocks()
       manager.emitToRoom('legacy:room', 'event:x', { data: 'shared' })
@@ -251,9 +251,9 @@ describe('LiveRoomManager binary broadcast', () => {
       registry.register(JsonRoom as any)
     })
 
-    it('uses binary path with JSON codec', () => {
+    it('uses binary path with JSON codec', async () => {
       const ws1 = createMockWS()
-      manager.joinRoom('comp-1', 'jsonroom:test', ws1)
+      await manager.joinRoom('comp-1', 'jsonroom:test', ws1)
 
       vi.clearAllMocks()
       manager.setRoomState('jsonroom:test', { value: 'updated' })
@@ -275,9 +275,9 @@ describe('LiveRoomManager binary broadcast', () => {
       registry.register(CustomCodecRoom as any)
     })
 
-    it('uses custom codec for encoding', () => {
+    it('uses custom codec for encoding', async () => {
       const ws1 = createMockWS()
-      manager.joinRoom('comp-1', 'custom:test', ws1)
+      await manager.joinRoom('comp-1', 'custom:test', ws1)
 
       vi.clearAllMocks()
       manager.emitToRoom('custom:test', 'event', { data: 42 })
@@ -298,13 +298,13 @@ describe('LiveRoomManager binary broadcast', () => {
   })
 
   describe('broadcast skips closed connections', () => {
-    it('skips WS with readyState !== 1', () => {
+    it('skips WS with readyState !== 1', async () => {
       const wsOpen = createMockWS()
       const wsClosed = { ...createMockWS(), readyState: 3 } as any
 
       registry.register(CounterRoom as any)
-      manager.joinRoom('comp-1', 'counter:test', wsOpen)
-      manager.joinRoom('comp-2', 'counter:test', wsClosed)
+      await manager.joinRoom('comp-1', 'counter:test', wsOpen)
+      await manager.joinRoom('comp-2', 'counter:test', wsClosed)
 
       vi.clearAllMocks()
       const sent = manager.emitToRoom('counter:test', 'evt', {})

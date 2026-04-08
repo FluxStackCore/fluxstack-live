@@ -30,6 +30,9 @@ export const MAX_ROOM_NAME_LENGTH = 64
 /** Room name validation regex */
 export const ROOM_NAME_REGEX = /^[a-zA-Z0-9_:.-]{1,64}$/
 
+/** Maximum JSON nesting depth for incoming messages */
+export const MAX_JSON_DEPTH = 32
+
 /** Maximum outgoing message queue size per WebSocket connection (backpressure) */
 export const MAX_QUEUE_SIZE = 1000
 

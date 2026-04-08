@@ -35,15 +35,15 @@ function createMockWSFast(id: string): GenericWebSocket & { _messages: string[],
   } as any
 }
 
-function populateRoom(
+async function populateRoom(
   manager: LiveRoomManager,
   roomId: string,
   memberCount: number,
-): { members: (GenericWebSocket & { _messages: string[] })[] } {
+): Promise<{ members: (GenericWebSocket & { _messages: string[] })[] }> {
   const members: (GenericWebSocket & { _messages: string[] })[] = []
   for (let i = 0; i < memberCount; i++) {
     const ws = createMockWSFast(`comp-${i}`)
-    manager.joinRoom(`comp-${i}`, roomId, ws)
+    await manager.joinRoom(`comp-${i}`, roomId, ws)
     members.push(ws)
   }
   return { members }
@@ -95,8 +95,8 @@ describe('Room Performance Benchmarks', () => {
   // ===== 1. BROADCAST PERFORMANCE =====
 
   describe('broadcastToRoom / emitToRoom', () => {
-    it('emit to room with 10 members x 1000 iterations', () => {
-      populateRoom(manager, 'bench-10', 10)
+    it('emit to room with 10 members x 1000 iterations', async () => {
+      await populateRoom(manager, 'bench-10', 10)
 
       const result = measure(() => {
         manager.emitToRoom('bench-10', 'test:event', { x: 1, y: 2, text: 'hello world' })
@@ -106,8 +106,8 @@ describe('Room Performance Benchmarks', () => {
       expect(result.totalMs).toBeLessThan(5000) // sanity guard
     })
 
-    it('emit to room with 100 members x 1000 iterations', () => {
-      populateRoom(manager, 'bench-100', 100)
+    it('emit to room with 100 members x 1000 iterations', async () => {
+      await populateRoom(manager, 'bench-100', 100)
 
       const result = measure(() => {
         manager.emitToRoom('bench-100', 'test:event', { x: 1, y: 2, text: 'hello world' })
@@ -117,8 +117,8 @@ describe('Room Performance Benchmarks', () => {
       expect(result.totalMs).toBeLessThan(10000)
     })
 
-    it('emit to room with 500 members x 500 iterations', () => {
-      populateRoom(manager, 'bench-500', 500)
+    it('emit to room with 500 members x 500 iterations', async () => {
+      await populateRoom(manager, 'bench-500', 500)
 
       const result = measure(() => {
         manager.emitToRoom('bench-500', 'test:event', { x: 1, y: 2, text: 'hello world' })
@@ -128,8 +128,8 @@ describe('Room Performance Benchmarks', () => {
       expect(result.totalMs).toBeLessThan(30000)
     })
 
-    it('emit to room with 1000 members x 100 iterations', () => {
-      populateRoom(manager, 'bench-1000', 1000)
+    it('emit to room with 1000 members x 100 iterations', async () => {
+      await populateRoom(manager, 'bench-1000', 1000)
 
       const result = measure(() => {
         manager.emitToRoom('bench-1000', 'test:event', { x: 1, y: 2, text: 'hello world' })
@@ -143,8 +143,8 @@ describe('Room Performance Benchmarks', () => {
   // ===== 2. ROOM STATE UPDATE PERFORMANCE =====
 
   describe('setRoomState', () => {
-    it('state update small object x 1000 iterations (100 members)', () => {
-      populateRoom(manager, 'state-bench', 100)
+    it('state update small object x 1000 iterations (100 members)', async () => {
+      await populateRoom(manager, 'state-bench', 100)
 
       const result = measure(() => {
         manager.setRoomState('state-bench', { count: Math.random(), label: 'updated' })
@@ -154,8 +154,8 @@ describe('Room Performance Benchmarks', () => {
       expect(result.totalMs).toBeLessThan(5000)
     })
 
-    it('state update large object x 100 iterations (100 members)', () => {
-      populateRoom(manager, 'state-large', 100)
+    it('state update large object x 100 iterations (100 members)', async () => {
+      await populateRoom(manager, 'state-large', 100)
       // seed initial state
       const bigState: Record<string, any> = {}
       for (let i = 0; i < 100; i++) {
@@ -175,23 +175,23 @@ describe('Room Performance Benchmarks', () => {
   // ===== 3. JOIN/LEAVE PERFORMANCE =====
 
   describe('joinRoom / leaveRoom', () => {
-    it('join 1000 members sequentially', () => {
-      const result = measure(() => {
+    it('join 1000 members sequentially', async () => {
+      const result = await measureAsync(async () => {
         const ws = createMockWSFast(`join-bench-${Math.random()}`)
-        manager.joinRoom(ws.data.connectionId, 'join-bench', ws)
+        await manager.joinRoom(ws.data.connectionId, 'join-bench', ws)
       }, 1000)
 
       console.log(`[BENCH] joinRoom x1000: ${result.totalMs}ms (${result.avgMs}ms/op, ${result.opsPerSec} ops/s)`)
       expect(result.totalMs).toBeLessThan(5000)
     })
 
-    it('leave 500 members from room with 500', () => {
-      const { members } = populateRoom(manager, 'leave-bench', 500)
+    it('leave 500 members from room with 500', async () => {
+      const { members } = await populateRoom(manager, 'leave-bench', 500)
 
-      const result = measure(() => {
+      const result = await measureAsync(async () => {
         const member = members.pop()
         if (member) {
-          manager.leaveRoom(member.data.connectionId, 'leave-bench')
+          await manager.leaveRoom(member.data.connectionId, 'leave-bench')
         }
       }, 500)
 
@@ -277,16 +277,16 @@ describe('Room Performance Benchmarks', () => {
   // ===== 5. CLEANUP PERFORMANCE =====
 
   describe('cleanupComponent', () => {
-    it('cleanup component in 20 rooms (200 member room)', () => {
+    it('cleanup component in 20 rooms (200 member room)', async () => {
       // Component comp-0 joins 20 rooms, each with 200 other members
       for (let r = 0; r < 20; r++) {
-        populateRoom(manager, `cleanup-room-${r}`, 200)
+        await populateRoom(manager, `cleanup-room-${r}`, 200)
         const targetWs = createMockWSFast('comp-target')
-        manager.joinRoom('comp-target', `cleanup-room-${r}`, targetWs)
+        await manager.joinRoom('comp-target', `cleanup-room-${r}`, targetWs)
       }
 
-      const result = measure(() => {
-        manager.cleanupComponent('comp-target')
+      const result = await measureAsync(async () => {
+        await manager.cleanupComponent('comp-target')
       }, 1)
 
       console.log(`[BENCH] cleanupComponent (20 rooms, 200 members each): ${result.totalMs}ms`)
@@ -371,8 +371,8 @@ describe('Room Performance Benchmarks', () => {
   // ===== 7. COMBINED SCENARIO =====
 
   describe('realistic scenario', () => {
-    it('simulate chat room: 200 users, 100 messages', () => {
-      populateRoom(manager, 'chat-sim', 200)
+    it('simulate chat room: 200 users, 100 messages', async () => {
+      await populateRoom(manager, 'chat-sim', 200)
 
       // Also add event bus listeners (simulating server-side handlers)
       for (let i = 0; i < 200; i++) {
@@ -392,8 +392,8 @@ describe('Room Performance Benchmarks', () => {
       expect(result.totalMs).toBeLessThan(5000)
     })
 
-    it('simulate game room: 50 players, 1000 position updates', () => {
-      populateRoom(manager, 'game-sim', 50)
+    it('simulate game room: 50 players, 1000 position updates', async () => {
+      await populateRoom(manager, 'game-sim', 50)
 
       for (let i = 0; i < 50; i++) {
         roomEvents.on('room', 'game-sim', 'pos:update', `comp-${i}`, () => {})
@@ -414,29 +414,29 @@ describe('Room Performance Benchmarks', () => {
       expect(result.totalMs).toBeLessThan(5000)
     })
 
-    it('simulate join storm: 500 users joining same room rapidly', () => {
-      const result = measure(() => {
+    it('simulate join storm: 500 users joining same room rapidly', async () => {
+      const result = await measureAsync(async () => {
         const id = `storm-${Math.random().toString(36).slice(2, 6)}`
         const ws = createMockWSFast(id)
-        manager.joinRoom(id, 'storm-room', ws)
+        await manager.joinRoom(id, 'storm-room', ws)
       }, 500)
 
       console.log(`[BENCH] Join storm (500 joins): ${result.totalMs}ms (${result.avgMs}ms/join, ${result.opsPerSec} joins/s)`)
       expect(result.totalMs).toBeLessThan(5000)
     })
 
-    it('simulate mass disconnect: 200 users leaving 5 rooms each', () => {
+    it('simulate mass disconnect: 200 users leaving 5 rooms each', async () => {
       // Setup: 200 components in 5 rooms each
       for (let c = 0; c < 200; c++) {
         for (let r = 0; r < 5; r++) {
           const ws = createMockWSFast(`disc-comp-${c}`)
-          manager.joinRoom(`disc-comp-${c}`, `disc-room-${r}`, ws)
+          await manager.joinRoom(`disc-comp-${c}`, `disc-room-${r}`, ws)
         }
       }
 
-      const result = measure(() => {
+      const result = await measureAsync(async () => {
         for (let c = 0; c < 200; c++) {
-          manager.cleanupComponent(`disc-comp-${c}`)
+          await manager.cleanupComponent(`disc-comp-${c}`)
         }
       }, 1)
 
@@ -448,10 +448,10 @@ describe('Room Performance Benchmarks', () => {
   // ===== 8. MEMORY =====
 
   describe('memory usage', () => {
-    it('measure memory for 1000 members in a room', () => {
+    it('measure memory for 1000 members in a room', async () => {
       const memBefore = process.memoryUsage().heapUsed
 
-      populateRoom(manager, 'mem-bench', 1000)
+      await populateRoom(manager, 'mem-bench', 1000)
 
       // Force GC if available
       if (global.gc) global.gc()

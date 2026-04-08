@@ -10,9 +10,9 @@ import type { RoomEventBus } from '../rooms/RoomEventBus'
 // Extracted to avoid circular dependency with LiveRoomManager
 
 export interface LiveRoomManagerInterface {
-  joinRoom<TState = any>(componentId: string, roomId: string, ws: any, initialState?: TState, options?: { deepDiff?: boolean; deepDiffDepth?: number; serverOnlyState?: boolean }, joinContext?: { userId?: string; payload?: any }): { state: TState; rejected?: false } | { rejected: true; reason: string }
-  leaveRoom(componentId: string, roomId: string, leaveReason?: 'leave' | 'disconnect' | 'cleanup'): void
-  cleanupComponent(componentId: string): void
+  joinRoom<TState = any>(componentId: string, roomId: string, ws: any, initialState?: TState, options?: { deepDiff?: boolean; deepDiffDepth?: number; serverOnlyState?: boolean }, joinContext?: { userId?: string; payload?: any }): Promise<{ state: TState; rejected?: false } | { rejected: true; reason: string }>
+  leaveRoom(componentId: string, roomId: string, leaveReason?: 'leave' | 'disconnect' | 'cleanup'): void | Promise<void>
+  cleanupComponent(componentId: string): void | Promise<void>
   emitToRoom(roomId: string, event: string, data: any, excludeComponentId?: string): number
   setRoomState(roomId: string, updates: any, excludeComponentId?: string): void
   getRoomState<TState = any>(roomId: string): TState

@@ -4,7 +4,7 @@
 // Supports: key rotation, compression (gzip), encryption (AES-256-CBC),
 // hybrid anti-replay nonces (stateless HMAC + replay detection), state backups, and state migrations.
 
-import { createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'crypto'
+import { createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync, timingSafeEqual as cryptoTimingSafeEqual } from 'crypto'
 import { gzipSync, gunzipSync } from 'zlib'
 import { liveLog, liveWarn } from '../debug/LiveLogger'
 
@@ -280,6 +280,11 @@ export class StateSignatureManager {
     return backups[backups.length - 1].signedState
   }
 
+  /** Remove all backups for a component. Call when the component is destroyed. */
+  clearBackups(componentId: string): void {
+    this.stateBackups.delete(componentId)
+  }
+
   private backupState(componentId: string, signedState: SignedState): void {
     if (!this.stateBackups.has(componentId)) {
       this.stateBackups.set(componentId, [])
@@ -303,16 +308,14 @@ export class StateSignatureManager {
   }
 
   private timingSafeEqual(a: string, b: string): boolean {
-    if (a.length !== b.length) return false
-    const bufA = Buffer.from(a)
-    const bufB = Buffer.from(b)
-    try {
-      const { timingSafeEqual: tse } = require('crypto')
-      return tse(bufA, bufB)
-    } catch {
-      // Fallback (not timing-safe but functional)
-      return a === b
-    }
+    // Pad to same length to avoid leaking length info via early return
+    const maxLen = Math.max(a.length, b.length)
+    const bufA = Buffer.alloc(maxLen)
+    const bufB = Buffer.alloc(maxLen)
+    Buffer.from(a).copy(bufA)
+    Buffer.from(b).copy(bufB)
+    // Use top-level imported timingSafeEqual (no runtime require, no fallback)
+    return a.length === b.length && cryptoTimingSafeEqual(bufA, bufB)
   }
 
   private deriveEncryptionKey(): Buffer {

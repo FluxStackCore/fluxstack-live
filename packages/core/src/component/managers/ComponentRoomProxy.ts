@@ -109,7 +109,7 @@ export class ComponentRoomProxy {
     // Auto-join default room if specified
     if (this.room) {
       this.joinedRooms.add(this.room)
-      this.ctx.roomManager.joinRoom(this.componentId, this.room, this.ws, undefined, { deepDiff: this._deepDiff, deepDiffDepth: this._deepDiffDepth, serverOnlyState: this._serverOnlyState })
+      this.ctx.roomManager.joinRoom(this.componentId, this.room, this.ws, undefined, { deepDiff: this._deepDiff, deepDiffDepth: this._deepDiffDepth, serverOnlyState: this._serverOnlyState }).catch(() => {})
     }
   }
 
@@ -135,19 +135,19 @@ export class ComponentRoomProxy {
         get id() { return roomId },
         get state() { return self.ctx.roomManager.getRoomState(roomId) },
 
-        join: (initialState?: any) => {
+        join: async (initialState?: any) => {
           if (self.joinedRooms.has(roomId)) return
           self.joinedRooms.add(roomId)
           self._roomsCache = null
-          self.ctx.roomManager.joinRoom(self.componentId, roomId, self.ws, initialState, { deepDiff: self._deepDiff, deepDiffDepth: self._deepDiffDepth, serverOnlyState: self._serverOnlyState })
+          await self.ctx.roomManager.joinRoom(self.componentId, roomId, self.ws, initialState, { deepDiff: self._deepDiff, deepDiffDepth: self._deepDiffDepth, serverOnlyState: self._serverOnlyState })
           // onRoomJoin hook is called from LiveComponent
         },
 
-        leave: () => {
+        leave: async () => {
           if (!self.joinedRooms.has(roomId)) return
           self.joinedRooms.delete(roomId)
           self._roomsCache = null
-          self.ctx.roomManager.leaveRoom(self.componentId, roomId)
+          await self.ctx.roomManager.leaveRoom(self.componentId, roomId)
           // onRoomLeave hook is called from LiveComponent
         },
 
@@ -289,9 +289,9 @@ export class ComponentRoomProxy {
         return self.ctx.roomManager.getMemberCount?.(roomId) ?? 0
       },
 
-      join: (payload?: any): { rejected?: false } | { rejected: true; reason: string } => {
+      join: async (payload?: any): Promise<{ rejected?: false } | { rejected: true; reason: string }> => {
         if (self.joinedRooms.has(roomId)) return {}
-        const result = self.ctx.roomManager.joinRoom(
+        const result = await self.ctx.roomManager.joinRoom(
           self.componentId, roomId, self.ws, undefined, undefined,
           { userId: undefined, payload },
         )
@@ -312,11 +312,11 @@ export class ComponentRoomProxy {
         return {}
       },
 
-      leave: () => {
+      leave: async () => {
         if (!self.joinedRooms.has(roomId)) return
         self.joinedRooms.delete(roomId)
         self._roomsCache = null
-        self.ctx.roomManager.leaveRoom(self.componentId, roomId, 'leave')
+        await self.ctx.roomManager.leaveRoom(self.componentId, roomId, 'leave')
       },
 
       emit: ((event: string, data: any): number => {
@@ -425,7 +425,8 @@ export class ComponentRoomProxy {
     // Only access ctx if we have joined rooms (avoids throwing when no context exists)
     if (this.joinedRooms.size > 0 && this._cachedCtx) {
       for (const roomId of this.joinedRooms) {
-        this._cachedCtx.roomManager.leaveRoom(this.componentId, roomId)
+        // leaveRoom is async but destroy() is sync — fire-and-forget during cleanup
+        this._cachedCtx.roomManager.leaveRoom(this.componentId, roomId)?.catch?.(() => {})
       }
     }
     this.joinedRooms.clear()

@@ -229,7 +229,7 @@ describe('Room Security - LiveServer', () => {
       openConnection(ws)
 
       // Manually create a server-only room via the room manager
-      server.roomManager.joinRoom('comp-1', 'game-state', ws, { hp: 100 }, { serverOnlyState: true })
+      await server.roomManager.joinRoom('comp-1', 'game-state', ws, { hp: 100 }, { serverOnlyState: true })
 
       // Client tries to set state
       vi.clearAllMocks()
@@ -244,7 +244,7 @@ describe('Room Security - LiveServer', () => {
       const ws = createMockWS()
       openConnection(ws)
 
-      server.roomManager.joinRoom('comp-1', 'game-state', ws, { hp: 100 }, { serverOnlyState: true })
+      await server.roomManager.joinRoom('comp-1', 'game-state', ws, { hp: 100 }, { serverOnlyState: true })
 
       // Server-side update should work fine (via room manager directly)
       server.roomManager.setRoomState('game-state', { hp: 50 })
@@ -255,7 +255,7 @@ describe('Room Security - LiveServer', () => {
       const ws = createMockWS()
       openConnection(ws)
 
-      server.roomManager.joinRoom('comp-1', 'game-state', ws, { hp: 100 }, { serverOnlyState: true })
+      await server.roomManager.joinRoom('comp-1', 'game-state', ws, { hp: 100 }, { serverOnlyState: true })
 
       vi.clearAllMocks()
       await sendMessage(ws, roomMsg('ROOM_STATE_GET', 'comp-1', 'game-state', undefined, 'req-get'))
@@ -269,7 +269,7 @@ describe('Room Security - LiveServer', () => {
       const ws = createMockWS()
       openConnection(ws)
 
-      server.roomManager.joinRoom('comp-1', 'game-state', ws, { hp: 100 }, { serverOnlyState: true })
+      await server.roomManager.joinRoom('comp-1', 'game-state', ws, { hp: 100 }, { serverOnlyState: true })
 
       vi.clearAllMocks()
       await sendMessage(ws, roomMsg('ROOM_EMIT', 'comp-1', 'game-state', { event: 'ping', data: {} }))
@@ -283,7 +283,7 @@ describe('Room Security - LiveServer', () => {
       const ws = createMockWS()
       openConnection(ws)
 
-      server.roomManager.joinRoom('comp-1', 'chat', ws, { messages: [] }, { serverOnlyState: false })
+      await server.roomManager.joinRoom('comp-1', 'chat', ws, { messages: [] }, { serverOnlyState: false })
 
       vi.clearAllMocks()
       await sendMessage(ws, roomMsg('ROOM_STATE_SET', 'comp-1', 'chat', { state: { messages: ['hello'] } }))
@@ -457,7 +457,7 @@ describe('Room Security - LiveServer', () => {
       openConnection(ws2)
 
       // comp-1 joins a serverOnlyState room
-      server.roomManager.joinRoom('comp-1', 'game', ws1, { score: 0 }, { serverOnlyState: true })
+      await server.roomManager.joinRoom('comp-1', 'game', ws1, { score: 0 }, { serverOnlyState: true })
 
       // comp-1 (member) tries ROOM_STATE_SET → blocked by serverOnlyState
       vi.clearAllMocks()

@@ -20,7 +20,7 @@ import type { LiveComponent } from '../component/LiveComponent'
 import { RateLimiterRegistry } from '../connection/RateLimiter'
 import { liveLog } from '../debug/LiveLogger'
 import { decodeBinaryChunk } from '../protocol/binary'
-import { DEFAULT_WS_PATH, MAX_MESSAGE_SIZE, MAX_ROOMS_PER_CONNECTION } from '../protocol/constants'
+import { DEFAULT_WS_PATH, MAX_MESSAGE_SIZE, MAX_ROOMS_PER_CONNECTION, MAX_JSON_DEPTH } from '../protocol/constants'
 import { sendImmediate } from '../transport/WsSendBatcher'
 import { sanitizePayload } from '../security/sanitize'
 import type { LiveAuthProvider } from '../auth/types'
@@ -280,6 +280,24 @@ export class LiveServer {
       return
     }
 
+    // Quick depth check: count max consecutive opening braces/brackets to reject
+    // pathologically nested payloads before JSON.parse can cause a stack overflow.
+    let maxDepth = 0
+    let currentDepth = 0
+    for (let i = 0; i < str.length; i++) {
+      const ch = str.charCodeAt(i)
+      if (ch === 123 /* { */ || ch === 91 /* [ */) {
+        currentDepth++
+        if (currentDepth > maxDepth) maxDepth = currentDepth
+        if (maxDepth > MAX_JSON_DEPTH) {
+          sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'JSON nesting too deep', timestamp: Date.now() }))
+          return
+        }
+      } else if (ch === 125 /* } */ || ch === 93 /* ] */) {
+        currentDepth--
+      }
+    }
+
     let message: LiveMessage
     try {
       message = JSON.parse(str)
@@ -392,12 +410,12 @@ export class LiveServer {
     }
   }
 
-  private handleClose(ws: GenericWebSocket, code: number, reason: string): void {
+  private async handleClose(ws: GenericWebSocket, code: number, reason: string): Promise<void> {
     const connectionId = ws.data?.connectionId
     const componentCount = ws.data?.components?.size || 0
 
     this.registry.cleanupConnection(ws)
-    this.roomManager.cleanupComponent(connectionId || '')
+    await this.roomManager.cleanupComponent(connectionId || '')
     if (connectionId) {
       this.connectionManager.cleanupConnection(connectionId)
       this.rateLimiter.remove(connectionId)
@@ -462,7 +480,7 @@ export class LiveServer {
           }
         }
 
-        const result = this.roomManager.joinRoom(componentId, roomId, ws, message.payload?.initialState)
+        const result = await this.roomManager.joinRoom(componentId, roomId, ws, message.payload?.initialState)
 
         if ('rejected' in result && result.rejected) {
           sendImmediate(ws, JSON.stringify({
@@ -489,7 +507,7 @@ export class LiveServer {
         break
       }
       case 'ROOM_LEAVE':
-        this.roomManager.leaveRoom(componentId, roomId)
+        await this.roomManager.leaveRoom(componentId, roomId)
         ;(ws.data?.rooms as Set<string> | undefined)?.delete(roomId)
         sendImmediate(ws, JSON.stringify({
           type: 'ROOM_LEFT',

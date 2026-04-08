@@ -50,6 +50,8 @@ interface Room<TState = any> {
   deepDiffDepth: number
   /** When true, only server-side code can set room state. Client ROOM_STATE_SET is rejected. Default: false */
   serverOnlyState: boolean
+  /** Update counter for periodic size recalculation */
+  _updateCount?: number
   /** LiveRoom instance when backed by a typed room class */
   instance?: LiveRoom<any, any, any>
   /** Resolved binary codec for this room. null = JSON text mode (legacy rooms). */
@@ -79,14 +81,14 @@ export class LiveRoomManager {
    * @param options.deepDiff - Enable/disable deep diff for this room's state. Default: true
    * @param joinContext - Optional context for LiveRoom lifecycle hooks (userId, payload)
    */
-  joinRoom<TState = any>(
+  async joinRoom<TState = any>(
     componentId: string,
     roomId: string,
     ws: GenericWebSocket,
     initialState?: TState,
     options?: { deepDiff?: boolean; deepDiffDepth?: number; serverOnlyState?: boolean },
     joinContext?: { userId?: string; payload?: any },
-  ): { state: TState; rejected?: false } | { rejected: true; reason: string } {
+  ): Promise<{ state: TState; rejected?: false } | { rejected: true; reason: string }> {
     // Validate room name format (uses pre-compiled regex from constants)
     if (!roomId || !ROOM_NAME_REGEX.test(roomId)) {
       throw new Error('Invalid room name. Must be 1-64 alphanumeric characters, hyphens, underscores, dots, or colons.')
@@ -150,13 +152,13 @@ export class LiveRoomManager {
 
     // Call onJoin lifecycle hook for LiveRoom-backed rooms
     if (room.instance) {
-      const result = room.instance.onJoin({
+      const result = await room.instance.onJoin({
         componentId,
         userId: joinContext?.userId,
         payload: joinContext?.payload,
       })
 
-      // Handle sync rejection
+      // Handle rejection (sync or async)
       if (result === false) {
         // If this was a new room and join was rejected, clean up
         if (isNewRoom) {
@@ -164,9 +166,6 @@ export class LiveRoomManager {
         }
         return { rejected: true, reason: 'Join rejected by room' }
       }
-
-      // Note: async onJoin is also supported but result is checked synchronously here.
-      // For async validation, use await in the component action before calling join.
     }
 
     // Call onCreate for new LiveRoom instances (after onJoin succeeds)
@@ -216,13 +215,13 @@ export class LiveRoomManager {
    * Component leaves a room
    * @param leaveReason - Why the component is leaving. Default: 'leave'
    */
-  leaveRoom(componentId: string, roomId: string, leaveReason: 'leave' | 'disconnect' | 'cleanup' = 'leave'): void {
+  async leaveRoom(componentId: string, roomId: string, leaveReason: 'leave' | 'disconnect' | 'cleanup' = 'leave'): Promise<void> {
     const room = this.rooms.get(roomId)
     if (!room) return
 
-    // Call onLeave lifecycle hook for LiveRoom-backed rooms
+    // Call onLeave lifecycle hook for LiveRoom-backed rooms (await async cleanup)
     if (room.instance) {
-      room.instance.onLeave({
+      await room.instance.onLeave({
         componentId,
         reason: leaveReason,
       })
@@ -276,7 +275,7 @@ export class LiveRoomManager {
    * Batches removals: calls onLeave hooks, removes member from all rooms,
    * then sends leave notifications in bulk.
    */
-  cleanupComponent(componentId: string): void {
+  async cleanupComponent(componentId: string): Promise<void> {
     const roomIds = this.componentRooms.get(componentId)
     if (!roomIds || roomIds.size === 0) return
 
@@ -288,9 +287,9 @@ export class LiveRoomManager {
       const room = this.rooms.get(roomId)
       if (!room) continue
 
-      // Call onLeave lifecycle hook for LiveRoom-backed rooms
+      // Call onLeave lifecycle hook for LiveRoom-backed rooms (await async cleanup)
       if (room.instance) {
-        room.instance.onLeave({
+        await room.instance.onLeave({
           componentId,
           reason: 'disconnect',
         })
@@ -352,7 +351,7 @@ export class LiveRoomManager {
     // 0. Call onEvent lifecycle hook for LiveRoom-backed rooms
     if (room.instance) {
       room.instance.onEvent(event, data, {
-        componentId: excludeComponentId ?? '',
+        componentId: excludeComponentId ?? 'server',
       })
     }
 
@@ -412,23 +411,26 @@ export class LiveRoomManager {
       Object.assign(room.state, actualChanges)
     }
 
-    // Size check: estimate via update delta instead of full state re-serialization.
-    if (room.stateSize === undefined) {
-      const fullJson = JSON.stringify(room.state)
-      room.stateSize = fullJson.length
-      if (room.stateSize > MAX_ROOM_STATE_SIZE) {
-        throw new Error('Room state exceeds maximum size limit')
-      }
+    // Size check: recalculate actual size every 10 updates to prevent drift,
+    // and always on first update or when approaching the limit.
+    if (!room._updateCount) room._updateCount = 0
+    room._updateCount++
+
+    const shouldRecalculate = room.stateSize === undefined || room._updateCount % 10 === 0
+    if (shouldRecalculate) {
+      room.stateSize = JSON.stringify(room.state).length
     } else {
+      // Rough estimate between recalculations
       const deltaSize = JSON.stringify(actualChanges).length
       room.stateSize += deltaSize
-      if (room.stateSize > MAX_ROOM_STATE_SIZE) {
-        // Re-check precisely if we're near the limit
-        const precise = JSON.stringify(room.state).length
-        room.stateSize = precise
-        if (precise > MAX_ROOM_STATE_SIZE) {
-          throw new Error('Room state exceeds maximum size limit')
-        }
+    }
+
+    if (room.stateSize > MAX_ROOM_STATE_SIZE) {
+      // Always re-check precisely before rejecting
+      const precise = JSON.stringify(room.state).length
+      room.stateSize = precise
+      if (precise > MAX_ROOM_STATE_SIZE) {
+        throw new Error('Room state exceeds maximum size limit')
       }
     }
 

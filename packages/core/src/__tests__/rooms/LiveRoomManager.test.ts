@@ -36,31 +36,31 @@ describe('LiveRoomManager', () => {
   })
 
   describe('joinRoom()', () => {
-    it('creates room and returns initial state', () => {
+    it('creates room and returns initial state', async () => {
       const ws = createMockWS()
-      const result = manager.joinRoom('comp-1', 'chat:lobby', ws, { messages: [] })
+      const result = await manager.joinRoom('comp-1', 'chat:lobby', ws, { messages: [] })
 
       expect('rejected' in result && result.rejected).toBeFalsy()
       expect((result as any).state).toEqual({ messages: [] })
     })
 
-    it('adds member to existing room', () => {
+    it('adds member to existing room', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'chat:lobby', ws1, { messages: [] })
-      manager.joinRoom('comp-2', 'chat:lobby', ws2)
+      await manager.joinRoom('comp-1', 'chat:lobby', ws1, { messages: [] })
+      await manager.joinRoom('comp-2', 'chat:lobby', ws2)
 
       expect(manager.isInRoom('comp-1', 'chat:lobby')).toBe(true)
       expect(manager.isInRoom('comp-2', 'chat:lobby')).toBe(true)
     })
 
-    it('broadcasts join notification to other members', () => {
+    it('broadcasts join notification to other members', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'chat:lobby', ws1)
+      await manager.joinRoom('comp-1', 'chat:lobby', ws1)
 
       vi.clearAllMocks()
-      manager.joinRoom('comp-2', 'chat:lobby', ws2)
+      await manager.joinRoom('comp-2', 'chat:lobby', ws2)
 
       // Should have broadcast $sub:join to comp-1 (excludes comp-2)
       expect(queuePreSerialized).toHaveBeenCalled()
@@ -70,42 +70,42 @@ describe('LiveRoomManager', () => {
       expect(msg.data.subscriberId).toBe('comp-2')
     })
 
-    it('rejects invalid room names', () => {
+    it('rejects invalid room names', async () => {
       const ws = createMockWS()
-      expect(() => manager.joinRoom('comp-1', '', ws)).toThrow('Invalid room name')
-      expect(() => manager.joinRoom('comp-1', 'room with spaces', ws)).toThrow('Invalid room name')
-      expect(() => manager.joinRoom('comp-1', 'a'.repeat(65), ws)).toThrow('Invalid room name')
+      await expect(manager.joinRoom('comp-1', '', ws)).rejects.toThrow('Invalid room name')
+      await expect(manager.joinRoom('comp-1', 'room with spaces', ws)).rejects.toThrow('Invalid room name')
+      await expect(manager.joinRoom('comp-1', 'a'.repeat(65), ws)).rejects.toThrow('Invalid room name')
     })
 
-    it('accepts valid room name formats', () => {
+    it('accepts valid room name formats', async () => {
       const ws = createMockWS()
       // All of these should be valid
-      expect(() => manager.joinRoom('c1', 'simple', ws)).not.toThrow()
-      expect(() => manager.joinRoom('c2', 'with-hyphens', ws)).not.toThrow()
-      expect(() => manager.joinRoom('c3', 'with_underscores', ws)).not.toThrow()
-      expect(() => manager.joinRoom('c4', 'with.dots', ws)).not.toThrow()
-      expect(() => manager.joinRoom('c5', 'with:colons', ws)).not.toThrow()
-      expect(() => manager.joinRoom('c6', 'MiXeD123', ws)).not.toThrow()
+      await expect(manager.joinRoom('c1', 'simple', ws)).resolves.not.toThrow()
+      await expect(manager.joinRoom('c2', 'with-hyphens', ws)).resolves.not.toThrow()
+      await expect(manager.joinRoom('c3', 'with_underscores', ws)).resolves.not.toThrow()
+      await expect(manager.joinRoom('c4', 'with.dots', ws)).resolves.not.toThrow()
+      await expect(manager.joinRoom('c5', 'with:colons', ws)).resolves.not.toThrow()
+      await expect(manager.joinRoom('c6', 'MiXeD123', ws)).resolves.not.toThrow()
     })
   })
 
   describe('leaveRoom()', () => {
-    it('removes member from room', () => {
+    it('removes member from room', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'chat:lobby', ws)
-      manager.leaveRoom('comp-1', 'chat:lobby')
+      await manager.joinRoom('comp-1', 'chat:lobby', ws)
+      await manager.leaveRoom('comp-1', 'chat:lobby')
 
       expect(manager.isInRoom('comp-1', 'chat:lobby')).toBe(false)
     })
 
-    it('broadcasts leave notification to remaining members', () => {
+    it('broadcasts leave notification to remaining members', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'chat:lobby', ws1)
-      manager.joinRoom('comp-2', 'chat:lobby', ws2)
+      await manager.joinRoom('comp-1', 'chat:lobby', ws1)
+      await manager.joinRoom('comp-2', 'chat:lobby', ws2)
 
       vi.clearAllMocks()
-      manager.leaveRoom('comp-1', 'chat:lobby')
+      await manager.leaveRoom('comp-1', 'chat:lobby')
 
       expect(queuePreSerialized).toHaveBeenCalled()
       const call = (queuePreSerialized as any).mock.calls[0]
@@ -114,10 +114,10 @@ describe('LiveRoomManager', () => {
       expect(msg.data.subscriberId).toBe('comp-1')
     })
 
-    it('schedules empty room cleanup after 5 minutes', () => {
+    it('schedules empty room cleanup after 5 minutes', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'chat:lobby', ws)
-      manager.leaveRoom('comp-1', 'chat:lobby')
+      await manager.joinRoom('comp-1', 'chat:lobby', ws)
+      await manager.leaveRoom('comp-1', 'chat:lobby')
 
       // Room still exists
       const stats = manager.getStats()
@@ -129,59 +129,59 @@ describe('LiveRoomManager', () => {
       expect(stats2.totalRooms).toBe(0)
     })
 
-    it('does not clean up room if someone rejoins before timeout', () => {
+    it('does not clean up room if someone rejoins before timeout', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'chat:lobby', ws1)
-      manager.leaveRoom('comp-1', 'chat:lobby')
+      await manager.joinRoom('comp-1', 'chat:lobby', ws1)
+      await manager.leaveRoom('comp-1', 'chat:lobby')
 
-      manager.joinRoom('comp-2', 'chat:lobby', ws2)
+      await manager.joinRoom('comp-2', 'chat:lobby', ws2)
       vi.advanceTimersByTime(5 * 60 * 1000 + 100)
 
       expect(manager.isInRoom('comp-2', 'chat:lobby')).toBe(true)
     })
 
-    it('is a no-op for non-existent room', () => {
+    it('is a no-op for non-existent room', async () => {
       // Should not throw
-      manager.leaveRoom('comp-1', 'nonexistent')
+      await manager.leaveRoom('comp-1', 'nonexistent')
     })
   })
 
   describe('cleanupComponent()', () => {
-    it('removes component from all rooms', () => {
+    it('removes component from all rooms', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws)
-      manager.joinRoom('comp-1', 'room-b', ws)
-      manager.joinRoom('comp-1', 'room-c', ws)
+      await manager.joinRoom('comp-1', 'room-a', ws)
+      await manager.joinRoom('comp-1', 'room-b', ws)
+      await manager.joinRoom('comp-1', 'room-c', ws)
 
-      manager.cleanupComponent('comp-1')
+      await manager.cleanupComponent('comp-1')
 
       expect(manager.isInRoom('comp-1', 'room-a')).toBe(false)
       expect(manager.isInRoom('comp-1', 'room-b')).toBe(false)
       expect(manager.isInRoom('comp-1', 'room-c')).toBe(false)
     })
 
-    it('broadcasts leave notifications to remaining members', () => {
+    it('broadcasts leave notifications to remaining members', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws1)
-      manager.joinRoom('comp-2', 'room-a', ws2)
+      await manager.joinRoom('comp-1', 'room-a', ws1)
+      await manager.joinRoom('comp-2', 'room-a', ws2)
 
       vi.clearAllMocks()
-      manager.cleanupComponent('comp-1')
+      await manager.cleanupComponent('comp-1')
 
       expect(queuePreSerialized).toHaveBeenCalled()
     })
 
-    it('is a no-op for unknown component', () => {
+    it('is a no-op for unknown component', async () => {
       // Should not throw
-      manager.cleanupComponent('unknown')
+      await manager.cleanupComponent('unknown')
     })
 
-    it('schedules cleanup for empty rooms', () => {
+    it('schedules cleanup for empty rooms', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws)
-      manager.cleanupComponent('comp-1')
+      await manager.joinRoom('comp-1', 'room-a', ws)
+      await manager.cleanupComponent('comp-1')
 
       vi.advanceTimersByTime(5 * 60 * 1000 + 100)
       expect(manager.getStats().totalRooms).toBe(0)
@@ -189,13 +189,13 @@ describe('LiveRoomManager', () => {
   })
 
   describe('emitToRoom()', () => {
-    it('emits event on RoomEventBus and broadcasts to members', () => {
+    it('emits event on RoomEventBus and broadcasts to members', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
       const handler = vi.fn()
 
-      manager.joinRoom('comp-1', 'chat:lobby', ws1)
-      manager.joinRoom('comp-2', 'chat:lobby', ws2)
+      await manager.joinRoom('comp-1', 'chat:lobby', ws1)
+      await manager.joinRoom('comp-2', 'chat:lobby', ws2)
       roomEvents.on('room', 'chat:lobby', 'chat-msg', 'comp-1', handler)
 
       const sent = manager.emitToRoom('chat:lobby', 'chat-msg', { text: 'hello' })
@@ -204,11 +204,11 @@ describe('LiveRoomManager', () => {
       expect(sent).toBe(2) // Both ws1 and ws2
     })
 
-    it('respects excludeComponentId', () => {
+    it('respects excludeComponentId', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'chat:lobby', ws1)
-      manager.joinRoom('comp-2', 'chat:lobby', ws2)
+      await manager.joinRoom('comp-1', 'chat:lobby', ws1)
+      await manager.joinRoom('comp-2', 'chat:lobby', ws2)
 
       vi.clearAllMocks()
       const sent = manager.emitToRoom('chat:lobby', 'msg', { text: 'hi' }, 'comp-1')
@@ -223,9 +223,9 @@ describe('LiveRoomManager', () => {
   })
 
   describe('setRoomState()', () => {
-    it('updates room state', () => {
+    it('updates room state', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'game:1', ws, { score: 0, round: 1 })
+      await manager.joinRoom('comp-1', 'game:1', ws, { score: 0, round: 1 })
 
       manager.setRoomState('game:1', { score: 10 })
 
@@ -233,9 +233,9 @@ describe('LiveRoomManager', () => {
       expect(state).toEqual({ score: 10, round: 1 })
     })
 
-    it('broadcasts state update to members', () => {
+    it('broadcasts state update to members', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'game:1', ws, { score: 0 })
+      await manager.joinRoom('comp-1', 'game:1', ws, { score: 0 })
 
       vi.clearAllMocks()
       manager.setRoomState('game:1', { score: 10 })
@@ -252,9 +252,9 @@ describe('LiveRoomManager', () => {
       manager.setRoomState('nonexistent', { x: 1 })
     })
 
-    it('throws when state exceeds size limit', () => {
+    it('throws when state exceeds size limit', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'big-room', ws, {})
+      await manager.joinRoom('comp-1', 'big-room', ws, {})
 
       // Create a state update that exceeds 10MB
       const bigData = 'x'.repeat(11 * 1024 * 1024)
@@ -264,9 +264,9 @@ describe('LiveRoomManager', () => {
   })
 
   describe('getRoomState()', () => {
-    it('returns room state', () => {
+    it('returns room state', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'game:1', ws, { score: 5 })
+      await manager.joinRoom('comp-1', 'game:1', ws, { score: 5 })
 
       expect(manager.getRoomState('game:1')).toEqual({ score: 5 })
     })
@@ -277,9 +277,9 @@ describe('LiveRoomManager', () => {
   })
 
   describe('isInRoom()', () => {
-    it('returns true when component is in room', () => {
+    it('returns true when component is in room', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws)
+      await manager.joinRoom('comp-1', 'room-a', ws)
       expect(manager.isInRoom('comp-1', 'room-a')).toBe(true)
     })
 
@@ -289,10 +289,10 @@ describe('LiveRoomManager', () => {
   })
 
   describe('getComponentRooms()', () => {
-    it('returns all rooms for a component', () => {
+    it('returns all rooms for a component', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws)
-      manager.joinRoom('comp-1', 'room-b', ws)
+      await manager.joinRoom('comp-1', 'room-a', ws)
+      await manager.joinRoom('comp-1', 'room-b', ws)
 
       const rooms = manager.getComponentRooms('comp-1')
       expect(rooms).toContain('room-a')
@@ -306,12 +306,12 @@ describe('LiveRoomManager', () => {
   })
 
   describe('getStats()', () => {
-    it('returns correct room statistics', () => {
+    it('returns correct room statistics', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws1)
-      manager.joinRoom('comp-2', 'room-a', ws2)
-      manager.joinRoom('comp-1', 'room-b', ws1)
+      await manager.joinRoom('comp-1', 'room-a', ws1)
+      await manager.joinRoom('comp-2', 'room-a', ws2)
+      await manager.joinRoom('comp-1', 'room-b', ws1)
 
       const stats = manager.getStats()
 

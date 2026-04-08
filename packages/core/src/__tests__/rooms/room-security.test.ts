@@ -35,9 +35,9 @@ describe('Room Security', () => {
   })
 
   describe('isServerOnlyState()', () => {
-    it('returns false for rooms created without serverOnlyState', () => {
+    it('returns false for rooms created without serverOnlyState', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws, { score: 0 })
+      await manager.joinRoom('comp-1', 'room-a', ws, { score: 0 })
 
       expect(manager.isServerOnlyState('room-a')).toBe(false)
     })
@@ -46,38 +46,38 @@ describe('Room Security', () => {
       expect(manager.isServerOnlyState('nonexistent')).toBe(false)
     })
 
-    it('returns true for rooms created with serverOnlyState: true', () => {
+    it('returns true for rooms created with serverOnlyState: true', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'game-room', ws, { hp: 100 }, { serverOnlyState: true })
+      await manager.joinRoom('comp-1', 'game-room', ws, { hp: 100 }, { serverOnlyState: true })
 
       expect(manager.isServerOnlyState('game-room')).toBe(true)
     })
 
-    it('returns false for rooms created with serverOnlyState: false', () => {
+    it('returns false for rooms created with serverOnlyState: false', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'chat-room', ws, {}, { serverOnlyState: false })
+      await manager.joinRoom('comp-1', 'chat-room', ws, {}, { serverOnlyState: false })
 
       expect(manager.isServerOnlyState('chat-room')).toBe(false)
     })
 
-    it('preserves serverOnlyState when second member joins', () => {
+    it('preserves serverOnlyState when second member joins', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
 
       // First member creates room with serverOnlyState
-      manager.joinRoom('comp-1', 'locked-room', ws1, { data: 'x' }, { serverOnlyState: true })
+      await manager.joinRoom('comp-1', 'locked-room', ws1, { data: 'x' }, { serverOnlyState: true })
 
       // Second member joins — room config should not change
-      manager.joinRoom('comp-2', 'locked-room', ws2)
+      await manager.joinRoom('comp-2', 'locked-room', ws2)
 
       expect(manager.isServerOnlyState('locked-room')).toBe(true)
     })
   })
 
   describe('joinRoom() deep diff options', () => {
-    it('defaults deepDiff to true', () => {
+    it('defaults deepDiff to true', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'room-1', ws, { a: 1 })
+      await manager.joinRoom('comp-1', 'room-1', ws, { a: 1 })
 
       // Verify deep diff is working by updating with same value
       vi.clearAllMocks()
@@ -86,9 +86,9 @@ describe('Room Security', () => {
       expect(queuePreSerialized).not.toHaveBeenCalled()
     })
 
-    it('respects deepDiff: false option', () => {
+    it('respects deepDiff: false option', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'room-1', ws, { a: { nested: 1 } }, { deepDiff: false })
+      await manager.joinRoom('comp-1', 'room-1', ws, { a: { nested: 1 } }, { deepDiff: false })
 
       // With shallow diff, a new object reference should trigger broadcast
       vi.clearAllMocks()
@@ -97,10 +97,10 @@ describe('Room Security', () => {
       expect(queuePreSerialized).toHaveBeenCalled()
     })
 
-    it('respects deepDiffDepth option', () => {
+    it('respects deepDiffDepth option', async () => {
       const ws = createMockWS()
       // Set depth to 1 — only top-level deep diff
-      manager.joinRoom('comp-1', 'room-1', ws, {
+      await manager.joinRoom('comp-1', 'room-1', ws, {
         level1: { level2: { value: 'old' } }
       }, { deepDiffDepth: 1 })
 
@@ -118,9 +118,9 @@ describe('Room Security', () => {
   })
 
   describe('isInRoom() - membership verification', () => {
-    it('returns true when component is in room', () => {
+    it('returns true when component is in room', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws)
+      await manager.joinRoom('comp-1', 'room-a', ws)
       expect(manager.isInRoom('comp-1', 'room-a')).toBe(true)
     })
 
@@ -128,18 +128,18 @@ describe('Room Security', () => {
       expect(manager.isInRoom('comp-1', 'room-a')).toBe(false)
     })
 
-    it('returns false after component leaves room', () => {
+    it('returns false after component leaves room', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws)
-      manager.leaveRoom('comp-1', 'room-a')
+      await manager.joinRoom('comp-1', 'room-a', ws)
+      await manager.leaveRoom('comp-1', 'room-a')
       expect(manager.isInRoom('comp-1', 'room-a')).toBe(false)
     })
 
-    it('returns false after component cleanup', () => {
+    it('returns false after component cleanup', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws)
-      manager.joinRoom('comp-1', 'room-b', ws)
-      manager.cleanupComponent('comp-1')
+      await manager.joinRoom('comp-1', 'room-a', ws)
+      await manager.joinRoom('comp-1', 'room-b', ws)
+      await manager.cleanupComponent('comp-1')
 
       expect(manager.isInRoom('comp-1', 'room-a')).toBe(false)
       expect(manager.isInRoom('comp-1', 'room-b')).toBe(false)
@@ -149,11 +149,11 @@ describe('Room Security', () => {
       expect(manager.isInRoom('comp-1', 'no-such-room')).toBe(false)
     })
 
-    it('correctly distinguishes between components in same room', () => {
+    it('correctly distinguishes between components in same room', async () => {
       const ws1 = createMockWS()
       const ws2 = createMockWS()
-      manager.joinRoom('comp-1', 'room-a', ws1)
-      manager.joinRoom('comp-2', 'room-a', ws2)
+      await manager.joinRoom('comp-1', 'room-a', ws1)
+      await manager.joinRoom('comp-2', 'room-a', ws2)
 
       expect(manager.isInRoom('comp-1', 'room-a')).toBe(true)
       expect(manager.isInRoom('comp-2', 'room-a')).toBe(true)
@@ -162,18 +162,18 @@ describe('Room Security', () => {
   })
 
   describe('setRoomState() with serverOnlyState', () => {
-    it('allows server-side state updates on serverOnlyState rooms', () => {
+    it('allows server-side state updates on serverOnlyState rooms', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'game', ws, { hp: 100 }, { serverOnlyState: true })
+      await manager.joinRoom('comp-1', 'game', ws, { hp: 100 }, { serverOnlyState: true })
 
       // Server-side setRoomState should always work
       manager.setRoomState('game', { hp: 50 })
       expect(manager.getRoomState('game')).toEqual({ hp: 50 })
     })
 
-    it('allows state updates on non-serverOnlyState rooms', () => {
+    it('allows state updates on non-serverOnlyState rooms', async () => {
       const ws = createMockWS()
-      manager.joinRoom('comp-1', 'chat', ws, { messages: [] })
+      await manager.joinRoom('comp-1', 'chat', ws, { messages: [] })
 
       manager.setRoomState('chat', { messages: ['hello'] })
       expect(manager.getRoomState('chat')).toEqual({ messages: ['hello'] })

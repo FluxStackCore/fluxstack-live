@@ -17,11 +17,17 @@ export function sanitizePayload<T>(value: T, depth = 0): T {
     return value.map(item => sanitizePayload(item, depth + 1)) as T
   }
 
+  // Strip functions — JSON payloads should never contain them
+  if (typeof value === 'function') return undefined as T
+
   if (value !== null && typeof value === 'object') {
     const clean: Record<string, unknown> = {}
     for (const key of Object.keys(value as object)) {
       if (DANGEROUS_KEYS.has(key)) continue
-      clean[key] = sanitizePayload((value as Record<string, unknown>)[key], depth + 1)
+      const val = (value as Record<string, unknown>)[key]
+      // Skip function values in object properties
+      if (typeof val === 'function') continue
+      clean[key] = sanitizePayload(val, depth + 1)
     }
     return clean as T
   }
