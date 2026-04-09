@@ -58,6 +58,8 @@ export class StateSignatureManager {
   /** Replay detection: nonce → timestamp when it was first seen. Cleaned every 60s. */
   private usedNonces = new Map<string, number>()
   private nonceCleanupTimer?: ReturnType<typeof setInterval>
+  /** Maximum number of nonces to keep in the replay detection map. */
+  private static readonly MAX_NONCES = 100_000
 
   constructor(config: StateSignatureConfig = {}) {
     const defaultSecret = typeof process !== 'undefined'
@@ -227,6 +229,7 @@ export class StateSignatureManager {
       if (this.timingSafeEqual(signedState.signature, expectedSig)) {
         if (signedState.nonce && this.config.nonceEnabled) {
           this.usedNonces.set(signedState.nonce, Date.now())
+          this.evictOldNoncesIfNeeded()
         }
         return { valid: true }
       }
@@ -237,6 +240,7 @@ export class StateSignatureManager {
         if (this.timingSafeEqual(signedState.signature, prevSig)) {
           if (signedState.nonce && this.config.nonceEnabled) {
             this.usedNonces.set(signedState.nonce, Date.now())
+            this.evictOldNoncesIfNeeded()
           }
           return { valid: true }
         }
@@ -341,6 +345,18 @@ export class StateSignatureManager {
     const cutoff = Date.now() - (this.config.nonceTTL + 10 * 1000)
     for (const [nonce, ts] of this.usedNonces) {
       if (ts < cutoff) this.usedNonces.delete(nonce)
+    }
+  }
+
+  /** Evict oldest 10% of nonces when the map exceeds MAX_NONCES to prevent unbounded memory growth. */
+  private evictOldNoncesIfNeeded(): void {
+    if (this.usedNonces.size <= StateSignatureManager.MAX_NONCES) return
+    const toRemove = Math.floor(this.usedNonces.size * 0.1)
+    let removed = 0
+    for (const [key] of this.usedNonces) {
+      if (removed >= toRemove) break
+      this.usedNonces.delete(key)
+      removed++
     }
   }
 
