@@ -302,7 +302,9 @@ describe('LiveAuthManager - authorize()', () => {
       const session = { id: 'sess-1', roles: ['editor'], permissions: ['edit'] }
       const ctx = new AuthenticatedContext(session, 'tok')
 
-      expect(ctx.session).toBe(session)
+      // Session is defensively copied and frozen (issue #4 fix), so it is
+      // not the same reference as the input — but the contents must match.
+      expect(ctx.session).toEqual(session)
       expect(ctx.session.id).toBe('sess-1')
       expect(ctx.session.roles).toEqual(['editor'])
     })
@@ -311,6 +313,8 @@ describe('LiveAuthManager - authorize()', () => {
       const session = { id: 'sess-2', roles: ['admin'] }
       const ctx = new AuthenticatedContext(session)
 
+      // `user` is a deprecated alias getter for `session`; they must resolve
+      // to the same (frozen) object stored inside the context.
       expect(ctx.user).toBe(ctx.session)
     })
 

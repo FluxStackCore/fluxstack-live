@@ -60,6 +60,19 @@ export class StateSignatureManager {
   private nonceCleanupTimer?: ReturnType<typeof setInterval>
   /** Maximum number of nonces to keep in the replay detection map. */
   private static readonly MAX_NONCES = 100_000
+  /**
+   * Replay protection high-water mark (fixes #4).
+   *
+   * When the nonce map is capped and we evict entries to make room, the evicted
+   * nonces may still be within their TTL — a naive eviction would open a replay
+   * window. Instead, we track the newest timestamp we ever evicted and reject any
+   * subsequent nonce whose own `ts` (embedded in the nonce itself) is at or
+   * before that mark. This makes eviction fail-closed: once we drop a nonce, we
+   * treat the entire window up to that point as "already seen".
+   *
+   * Starts at 0; only advances forward. Reset by shutdown/new instance.
+   */
+  private evictionHighWaterMark = 0
 
   constructor(config: StateSignatureConfig = {}) {
     const defaultSecret = typeof process !== 'undefined'
@@ -129,6 +142,13 @@ export class StateSignatureManager {
     if (age < -30000) {
       // Nonce from the future (>30s clock skew) — reject
       return { valid: false, error: 'Nonce timestamp in the future' }
+    }
+
+    // Fail-closed replay protection: if the nonce predates the eviction
+    // high-water mark, we can no longer prove it's unused — reject it.
+    // See `evictionHighWaterMark` for rationale.
+    if (timestamp <= this.evictionHighWaterMark) {
+      return { valid: false, error: 'Nonce predates replay-protection window' }
     }
 
     // Verify HMAC — try current key first, then previous keys (rotation)
@@ -348,15 +368,44 @@ export class StateSignatureManager {
     }
   }
 
-  /** Evict oldest 10% of nonces when the map exceeds MAX_NONCES to prevent unbounded memory growth. */
+  /**
+   * Evict oldest 10% of nonces when the map exceeds MAX_NONCES to prevent
+   * unbounded memory growth.
+   *
+   * Because a raw eviction would open a replay window for evicted nonces that
+   * are still within their TTL, we also advance `evictionHighWaterMark` to the
+   * newest *embedded* timestamp we drop. Any subsequent nonce whose embedded
+   * timestamp is at or before that mark is rejected by `validateNonce` — the
+   * entire evicted window is treated as "already seen". Fixes #4.
+   *
+   * Note: `usedNonces` is keyed by insertion order (oldest-first), but the
+   * value stored in the Map is the wall-clock time the nonce was first seen
+   * — NOT the embedded timestamp. We parse the embedded ts from each evicted
+   * key so the high-water mark is comparable to what `validateNonce` checks.
+   */
   private evictOldNoncesIfNeeded(): void {
     if (this.usedNonces.size <= StateSignatureManager.MAX_NONCES) return
     const toRemove = Math.floor(this.usedNonces.size * 0.1)
     let removed = 0
+    let newestEvictedTs = this.evictionHighWaterMark
     for (const [key] of this.usedNonces) {
       if (removed >= toRemove) break
+      // Extract embedded timestamp from `ts:rand:mac` nonce format.
+      const colonIdx = key.indexOf(':')
+      if (colonIdx > 0) {
+        const embeddedTs = Number(key.slice(0, colonIdx))
+        if (!isNaN(embeddedTs) && embeddedTs > newestEvictedTs) {
+          newestEvictedTs = embeddedTs
+        }
+      }
       this.usedNonces.delete(key)
       removed++
+    }
+    // Fail-closed: advance the high-water mark so any future nonce from the
+    // evicted window is rejected as a potential replay.
+    if (newestEvictedTs > this.evictionHighWaterMark) {
+      this.evictionHighWaterMark = newestEvictedTs
+      liveWarn('state', null, `Nonce map capped at ${StateSignatureManager.MAX_NONCES}; evicted ${removed} entries. Replay-protection window advanced to ts=${newestEvictedTs}. Clients with in-flight state older than this will be rejected.`)
     }
   }
 

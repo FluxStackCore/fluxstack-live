@@ -18,9 +18,22 @@ export class AuthenticatedContext implements LiveAuthContext {
   get user(): LiveAuthSession { return this.session }
 
   constructor(session: LiveAuthSession, token?: string) {
-    this.session = session
+    // Defensive deep-freeze of the session so handlers (or bugs in handlers)
+    // cannot mutate `this.$auth.session.roles` / `.permissions` / `.id` and
+    // alter subsequent authorize() decisions within the same request chain.
+    // Fixes #4 (part 2). We copy the arrays first so we do not accidentally
+    // freeze the caller's own objects — this keeps the freeze local to the
+    // auth context and lets the caller keep its own mutable sources of truth.
+    const frozenSession: LiveAuthSession = {
+      ...session,
+      roles: session.roles ? Object.freeze([...session.roles]) as readonly string[] as string[] : session.roles,
+      permissions: session.permissions ? Object.freeze([...session.permissions]) as readonly string[] as string[] : session.permissions,
+    }
+    this.session = Object.freeze(frozenSession)
     this.token = token
     this.authenticatedAt = Date.now()
+    // Freeze the context instance itself to prevent property replacement.
+    Object.freeze(this)
   }
 
   hasRole(role: string): boolean {
@@ -71,5 +84,5 @@ export class AnonymousContext implements LiveAuthContext {
   hasAnyPermission(): boolean { return false }
 }
 
-/** Singleton for anonymous contexts */
-export const ANONYMOUS_CONTEXT = new AnonymousContext()
+/** Singleton for anonymous contexts — frozen so callers cannot mutate the shared instance. */
+export const ANONYMOUS_CONTEXT = Object.freeze(new AnonymousContext())

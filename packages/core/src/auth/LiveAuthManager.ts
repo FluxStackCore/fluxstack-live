@@ -12,6 +12,27 @@ import type {
 } from './types'
 import { ANONYMOUS_CONTEXT } from './LiveAuthContext'
 
+/**
+ * Coerce the result of a user-provided `authorize()` callback into a strict
+ * LiveAuthResult. We accept only booleans or objects with an explicit
+ * `allowed: true` — anything else (primitive, null, undefined, object without
+ * `allowed === true`) is treated as deny. Fixes #4 (part 3): prevents
+ * accidental allow via a stray non-boolean return type, and prevents
+ * consumers downstream from seeing `result.allowed === undefined`.
+ */
+function coerceAuthResult(result: unknown, denyReason: string): LiveAuthResult {
+  if (result === true) return { allowed: true }
+  if (result === false) return { allowed: false, reason: denyReason }
+  if (typeof result === 'object' && result !== null && (result as LiveAuthResult).allowed === true) {
+    return result as LiveAuthResult
+  }
+  if (typeof result === 'object' && result !== null && (result as LiveAuthResult).allowed === false) {
+    return result as LiveAuthResult
+  }
+  // Unknown shape — fail closed.
+  return { allowed: false, reason: denyReason }
+}
+
 export class LiveAuthManager {
   private providers = new Map<string, LiveAuthProvider>()
   private defaultProviderName?: string
@@ -167,12 +188,9 @@ export class LiveAuthManager {
     // Custom authorize function (runs after declarative checks pass)
     if (authConfig.authorize) {
       try {
-        const result = await authConfig.authorize(authContext)
-        if (typeof result === 'boolean') {
-          if (!result) return { allowed: false, reason: 'Denied by custom authorize' }
-        } else {
-          if (!result.allowed) return result
-        }
+        const raw = await authConfig.authorize(authContext)
+        const coerced = coerceAuthResult(raw, 'Denied by custom authorize')
+        if (!coerced.allowed) return coerced
       } catch (error: any) {
         return { allowed: false, reason: `Authorization error: ${error.message}` }
       }
@@ -218,12 +236,9 @@ export class LiveAuthManager {
     // Custom authorize function (runs after declarative checks pass)
     if (actionAuth.authorize) {
       try {
-        const result = await actionAuth.authorize(authContext, payload)
-        if (typeof result === 'boolean') {
-          if (!result) return { allowed: false, reason: `Action '${action}' denied by custom authorize` }
-        } else {
-          if (!result.allowed) return result
-        }
+        const raw = await actionAuth.authorize(authContext, payload)
+        const coerced = coerceAuthResult(raw, `Action '${action}' denied by custom authorize`)
+        if (!coerced.allowed) return coerced
       } catch (error: any) {
         return { allowed: false, reason: `Action '${action}' authorization error: ${error.message}` }
       }
