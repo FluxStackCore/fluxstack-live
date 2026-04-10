@@ -241,6 +241,13 @@ export function useLiveComponent<
   const roomMessageHandlers = useRef<Set<(msg: RoomServerMessage) => void>>(new Set())
   const roomManagerRef = useRef<RoomManager | null>(null)
   const mountFnRef = useRef<(() => Promise<void>) | null>(null)
+  // Handler refs — keep registration effect stable across state updates
+  const handlersRef = useRef({ onStateChange, onRehydrate, onError })
+  handlersRef.current = { onStateChange, onRehydrate, onError }
+  const persistMetaRef = useRef({ persistEnabled, componentName, room, userId })
+  persistMetaRef.current = { persistEnabled, componentName, room, userId }
+  const binaryDecoderRef = useRef(binaryDecoder)
+  binaryDecoderRef.current = binaryDecoder
 
   // State
   const stateData = store((s) => s.state)
@@ -500,6 +507,9 @@ export function useLiveComponent<
   }, [stateData, debounce, setProperty, localVersion])
 
   // ===== Register with WebSocket =====
+  // Minimal deps — this effect must only re-run when componentId changes.
+  // All other values are read from refs (handlersRef, persistMetaRef, binaryDecoderRef)
+  // to prevent unregister/register churn on every state update.
   useEffect(() => {
     if (!componentId) return
 
@@ -507,20 +517,21 @@ export function useLiveComponent<
       switch (message.type) {
         case 'STATE_UPDATE':
           if (message.payload?.state) {
-            const oldState = stateData
+            const oldState = storeRef.current?.getState().state as TState
             updateState(message.payload.state)
-            onStateChange?.(message.payload.state, oldState)
+            handlersRef.current.onStateChange?.(message.payload.state, oldState)
             if (message.payload?.signedState) {
-              persistState(persistEnabled, componentName, message.payload.signedState, room, userId)
+              const { persistEnabled: pe, componentName: cn, room: r, userId: u } = persistMetaRef.current
+              persistState(pe, cn, message.payload.signedState, r, u)
             }
           }
           break
         case 'STATE_DELTA':
           if (message.payload?.delta) {
-            const oldState = storeRef.current?.getState().state ?? stateData
+            const oldState = storeRef.current?.getState().state as TState
             const mergedState = deepMerge(oldState, message.payload.delta) as TState
             updateState(mergedState)
-            onStateChange?.(mergedState, oldState)
+            handlersRef.current.onStateChange?.(mergedState, oldState)
           }
           break
         case 'STATE_REHYDRATED':
@@ -529,7 +540,7 @@ export function useLiveComponent<
             lastComponentIdRef.current = message.payload.newComponentId
             updateState(message.payload.state)
             setRehydrating(false)
-            onRehydrate?.()
+            handlersRef.current.onRehydrate?.()
           }
           break
         case 'BROADCAST':
@@ -539,7 +550,7 @@ export function useLiveComponent<
           break
         case 'ERROR':
           setError(message.payload?.error || 'Unknown error')
-          onError?.(message.payload?.error)
+          handlersRef.current.onError?.(message.payload?.error)
           break
         case 'ROOM_EVENT':
         case 'ROOM_STATE':
@@ -553,16 +564,19 @@ export function useLiveComponent<
       }
     })
 
-    // Register binary handler if binaryDecoder is provided
+    // Register binary handler if a binaryDecoder is provided (read via ref so
+    // swapping the decoder does not force re-registration).
     let unregisterBinary: (() => void) | undefined
-    if (binaryDecoder && componentId) {
+    if (binaryDecoderRef.current) {
       unregisterBinary = registerBinaryHandler(componentId, (payload: Uint8Array) => {
         try {
-          const delta = binaryDecoder(payload) as Partial<TState>
-          const oldState = storeRef.current?.getState().state ?? stateData
+          const decoder = binaryDecoderRef.current
+          if (!decoder) return
+          const delta = decoder(payload) as Partial<TState>
+          const oldState = storeRef.current?.getState().state as TState
           const mergedState = deepMerge(oldState, delta) as TState
           updateState(mergedState)
-          onStateChange?.(mergedState, oldState)
+          handlersRef.current.onStateChange?.(mergedState, oldState)
         } catch (e) {
           console.error('Binary decode error:', e)
         }
@@ -573,7 +587,7 @@ export function useLiveComponent<
       unregister()
       unregisterBinary?.()
     }
-  }, [componentId, registerComponent, registerBinaryHandler, binaryDecoder, updateState, stateData, componentName, room, userId, onStateChange, onRehydrate, onError])
+  }, [componentId, registerComponent, registerBinaryHandler, updateState])
 
   // ===== Auto Mount =====
   useEffect(() => {

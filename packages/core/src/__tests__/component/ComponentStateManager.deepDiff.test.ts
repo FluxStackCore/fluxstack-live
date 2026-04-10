@@ -60,7 +60,8 @@ class DeepDiffComponent extends LiveComponent<DeepState> {
 class ShallowComponent extends LiveComponent<DeepState> {
   static componentName = 'ShallowComponent'
   static publicActions = [] as const
-  // No $options — shallow diff (default)
+  // Explicit opt-out — deepDiff is now the default (true)
+  static $options = { deepDiff: false }
   static defaultState: DeepState = {
     scores: { red: 0, blue: 0 },
     settings: { volume: 50, difficulty: 'normal' },
@@ -188,6 +189,42 @@ describe('ComponentStateManager deepDiff', () => {
       })
     })
 
+    it('detects key removal in Record<string, T> (issue #3)', async () => {
+      // Reproduces the game room scenario: player B leaves,
+      // setState replaces the whole players map with the remaining entries.
+      type GameState = { players: Record<string, { x: number; y: number }>; hostId: string }
+      class GameComponent extends LiveComponent<GameState> {
+        static componentName = 'GameComponent'
+        static publicActions = [] as const
+        static defaultState: GameState = {
+          players: {
+            A: { x: 0, y: 0 },
+            B: { x: 5, y: 5 },
+          },
+          hostId: 'A',
+        }
+      }
+
+      const ws = createMockWs()
+      const comp = new GameComponent({}, ws)
+
+      // Simulate player B leaving: pass only A in the new players map.
+      comp.setState({
+        players: { A: { x: 0, y: 0 } },
+        hostId: 'A',
+      })
+      await flush()
+
+      const deltas = extractDeltas(ws)
+      expect(deltas.length).toBe(1)
+      // B must be marked as removed so the client's deepMerge deletes it.
+      expect(deltas[0]).toEqual({ players: { B: null } })
+
+      // Internal state should reflect the removal too.
+      expect(comp.getSerializableState().players).toEqual({ A: { x: 0, y: 0 } })
+      expect('B' in (comp.getSerializableState() as any).players).toBe(false)
+    })
+
     it('works with functional setState', async () => {
       const ws = createMockWs()
       const comp = new DeepDiffComponent({}, ws)
@@ -203,9 +240,9 @@ describe('ComponentStateManager deepDiff', () => {
     })
   })
 
-  // ===== Shallow Diff (default, no $options) =====
+  // ===== Shallow Diff (explicit opt-out) =====
 
-  describe('with deepDiff: false (default)', () => {
+  describe('with deepDiff: false (opt-out)', () => {
     it('sends entire object even if nested values are same', async () => {
       const ws = createMockWs()
       const comp = new ShallowComponent({}, ws)

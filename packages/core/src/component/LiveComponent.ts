@@ -26,7 +26,10 @@ import { ComponentRoomProxy } from './managers/ComponentRoomProxy'
 export { EMIT_OVERRIDE_KEY }
 
 export interface ComponentOptions {
-  /** Enable deep diff for plain objects in setState(). Default: false */
+  /** Enable deep diff for plain objects in setState(). Default: true
+   *  When enabled, nested plain objects are compared field-by-field and
+   *  removed keys are emitted as `null` so clients can delete them via deepMerge.
+   *  Set to false to opt into shallow (reference-equality) diffing. */
   deepDiff?: boolean
   /** Enable deep diff for room state updates. Default: true */
   roomDeepDiff?: boolean
@@ -160,7 +163,7 @@ export abstract class LiveComponent<
       ws: this.ws,
       emitFn: (type, payload) => this._messaging.emit(type, payload),
       onStateChangeFn: (changes) => this.onStateChange(changes),
-      deepDiff: (ctor as any).$options?.deepDiff ?? false,
+      deepDiff: (ctor as any).$options?.deepDiff ?? true,
       deepDiffDepth: (ctor as any).$options?.deepDiffDepth,
     })
 

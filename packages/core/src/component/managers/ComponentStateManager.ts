@@ -38,7 +38,7 @@ export class ComponentStateManager<TState = ComponentState> {
     this.ws = opts.ws
     this.emitFn = opts.emitFn
     this.onStateChangeFn = opts.onStateChangeFn
-    this._deepDiff = opts.deepDiff ?? false
+    this._deepDiff = opts.deepDiff ?? true
     this._deepDiffDepth = opts.deepDiffDepth ?? 3
     // When deepDiff is enabled, deep-clone initialState so deepAssign
     // doesn't mutate shared references (e.g. static defaultState).
