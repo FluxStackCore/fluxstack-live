@@ -28,6 +28,32 @@ import {
 
 import { LiveConnection } from '@fluxstack/live-client'
 import type { LiveConnectionOptions, LiveConnectionState, LiveAuthOptions } from '@fluxstack/live-client'
+
+// ===== Deep Merge (handles null-as-deletion for STATE_DELTA) =====
+
+function isPlainObject(v: unknown): v is Record<string, any> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+    && Object.getPrototypeOf(v) === Object.prototype
+}
+
+function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>, seen?: Set<object>): void {
+  if (!seen) seen = new Set()
+  if (seen.has(source as object)) return
+  seen.add(source as object)
+
+  for (const key of Object.keys(source) as Array<keyof T & string>) {
+    const newVal = source[key]
+    if (newVal === null) {
+      delete target[key]
+      continue
+    }
+    if (isPlainObject(target[key]) && isPlainObject(newVal)) {
+      deepMerge(target[key] as any, newVal as any, seen)
+    } else {
+      target[key] = newVal as T[keyof T]
+    }
+  }
+}
 import type { WebSocketMessage, WebSocketResponse } from '@fluxstack/live'
 
 // ===== Connection Provider (equivalent to React Context) =====
@@ -218,7 +244,7 @@ export function useLiveComponent<TState extends Record<string, any>>(
       case 'STATE_UPDATE': {
         const newState = (msg as any).payload?.state
         if (newState) {
-          Object.assign(state, newState)
+          deepMerge(state, newState)
           log('State update', newState)
         }
         break
@@ -226,7 +252,7 @@ export function useLiveComponent<TState extends Record<string, any>>(
       case 'STATE_DELTA': {
         const delta = (msg as any).payload?.delta
         if (delta) {
-          Object.assign(state, delta)
+          deepMerge(state, delta)
           log('State delta', delta)
         }
         break
