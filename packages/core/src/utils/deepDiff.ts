@@ -14,8 +14,21 @@ export function isPlainObject(v: unknown): v is Record<string, unknown> {
 /**
  * Recursively compute the diff between two plain objects.
  * Returns null if nothing changed, or an object with only the changed keys.
- * Keys present in `prev` but absent in `next` are emitted as `null` (deletion signal).
- * Arrays are compared by reference (===).
+ *
+ * Semantics (fixes #6):
+ * - Arrays are compared by reference (===). A new array reference produces
+ *   a full replacement in the delta.
+ * - `undefined` values in `next` are skipped entirely. They would desync
+ *   server↔wire (JSON strips undefined) so we never include them in the
+ *   delta. Callers wanting to "clear" a field should pass `null` if the
+ *   type allows it, or use a typed sentinel.
+ * - `null` is treated as a regular value in top-level (depth === 0): if the
+ *   old value was non-null, the delta carries `{ key: null }` and the
+ *   server/client apply it as a real null via `deepAssign`.
+ * - At nested depths (depth > 0), keys present in `prev` but absent in
+ *   `next` are emitted as `null` — this is the deletion sentinel the
+ *   `Record<string, T>` scenario from issue #1/#3 relies on.
+ *
  * Safe against circular references (tracked via `seen` Set).
  *
  * @param maxDepth - Maximum recursion depth (default: 3). Beyond this, falls back to reference equality.
@@ -38,6 +51,10 @@ export function computeDeepDiff(
   for (const key of Object.keys(next)) {
     const oldVal = prev[key]
     const newVal = next[key]
+
+    // Skip undefined entirely — it would be stripped by JSON.stringify
+    // on the wire, creating server↔client drift.
+    if (newVal === undefined) continue
 
     if (oldVal === newVal) continue
 
@@ -71,22 +88,53 @@ export function computeDeepDiff(
 
 /**
  * Recursively merge source into target (mutates target).
- * Plain objects are merged recursively; everything else is overwritten.
- * A `null` value in source deletes the corresponding key from target.
+ *
+ * Semantics (fixes #6):
+ * - At the TOP LEVEL (depth === 0), `null` is a real value: `target[key]`
+ *   is set to `null`. Top-level state keys come from the component's
+ *   `defaultState` schema — they are not dynamically added/removed by the
+ *   user, so there is no ambiguity with a "delete" signal here. This is
+ *   what lets `Nullable<T>` state fields work in `setState({ x: null })`.
+ * - At NESTED levels (depth > 0), `null` is the deletion sentinel emitted
+ *   by `computeDeepDiff` when a key is removed from a `Record<string, T>`
+ *   map: `delete target[key]`. This is what issue #1/#3 needed.
+ * - Plain objects are merged recursively; everything else is overwritten.
+ * - `undefined` is a no-op (skipped) to avoid server↔wire drift: JSON
+ *   serialization strips `undefined`, so accepting it on the server would
+ *   leave the two sides out of sync.
+ *
  * Safe against circular references (tracked via `seen` Set).
  */
 export function deepAssign(target: any, source: any, seen?: Set<object>): void {
+  deepAssignImpl(target, source, 0, seen)
+}
+
+function deepAssignImpl(target: any, source: any, depth: number, seen?: Set<object>): void {
   if (!seen) seen = new Set()
   if (seen.has(source)) return
   seen.add(source)
 
   for (const key of Object.keys(source)) {
-    if (source[key] === null) {
-      delete target[key]
-    } else if (isPlainObject(target[key]) && isPlainObject(source[key])) {
-      deepAssign(target[key], source[key], seen)
+    const value = source[key]
+    if (value === undefined) {
+      // No-op: JSON.stringify would strip this, so accepting it on the
+      // server would silently desync from the client.
+      continue
+    }
+    if (value === null) {
+      if (depth === 0) {
+        // Top-level: set the key to null (real value).
+        target[key] = null
+      } else {
+        // Nested: deletion sentinel from computeDeepDiff — remove the key.
+        delete target[key]
+      }
+      continue
+    }
+    if (isPlainObject(target[key]) && isPlainObject(value)) {
+      deepAssignImpl(target[key], value, depth + 1, seen)
     } else {
-      target[key] = source[key]
+      target[key] = value
     }
   }
 }

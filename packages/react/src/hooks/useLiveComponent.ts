@@ -29,7 +29,24 @@ function isPlainObject(v: unknown): v is Record<string, any> {
     && Object.getPrototypeOf(v) === Object.prototype
 }
 
+/**
+ * Apply a STATE_DELTA coming from the server.
+ *
+ * Semantics (matches core's `deepAssign`, fixes #6):
+ * - Top-level (depth === 0): `null` is a real value — `result[key] = null`.
+ *   Top-level state keys are part of the component schema and are not
+ *   dynamically added/removed, so there is no ambiguity with a deletion
+ *   signal.
+ * - Nested (depth > 0): `null` is the deletion sentinel from the core's
+ *   `computeDeepDiff` — remove the key. This is what the
+ *   `Record<string, T>` scenario from issue #1/#3 relies on.
+ * - `undefined` is a no-op (skipped) — these values don't cross the wire.
+ */
 function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>, seen?: Set<object>): T {
+  return deepMergeImpl(target, source, 0, seen)
+}
+
+function deepMergeImpl<T extends Record<string, any>>(target: T, source: Partial<T>, depth: number, seen?: Set<object>): T {
   if (!seen) seen = new Set()
   if (seen.has(source as object)) return target
   seen.add(source as object)
@@ -37,13 +54,18 @@ function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>,
   const result = { ...target }
   for (const key of Object.keys(source) as Array<keyof T>) {
     const newVal = source[key]
+    if (newVal === undefined) continue
     if (newVal === null) {
-      delete result[key]
+      if (depth === 0) {
+        result[key] = null as T[keyof T]
+      } else {
+        delete result[key]
+      }
       continue
     }
     const oldVal = result[key]
     if (isPlainObject(oldVal) && isPlainObject(newVal)) {
-      result[key] = deepMerge(oldVal as any, newVal as any, seen)
+      result[key] = deepMergeImpl(oldVal as any, newVal as any, depth + 1, seen) as T[keyof T]
     } else {
       result[key] = newVal as T[keyof T]
     }
