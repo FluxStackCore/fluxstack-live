@@ -146,6 +146,19 @@ export class ComponentStateManager<TState = ComponentState> {
 
     if (!this._idBytes) {
       this._idBytes = new TextEncoder().encode(this.componentId)
+      // Fixes #7 H1: the binary frame length prefix is a u8, so any id
+      // longer than 255 bytes would silently wrap and corrupt the wire
+      // (the client would read `idBytes.length & 0xff` bytes of id and
+      // treat the rest as payload). Framework-generated ids are ~41 bytes,
+      // so this is only reachable via custom ids — we fail loud instead.
+      if (this._idBytes.length > 255) {
+        this._idBytes = null
+        throw new Error(
+          `[ComponentStateManager] componentId is ${new TextEncoder().encode(this.componentId).length} bytes after UTF-8 encoding, ` +
+          `which exceeds the 255-byte limit of the binary frame length prefix. ` +
+          `Use a shorter id (framework-generated ids are ~41 bytes).`
+        )
+      }
     }
     const idBytes = this._idBytes
     const frame = new Uint8Array(1 + 1 + idBytes.length + payload.length)
