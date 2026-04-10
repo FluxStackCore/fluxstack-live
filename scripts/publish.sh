@@ -5,6 +5,8 @@
 #   ./scripts/publish.sh              # dry-run (default)
 #   ./scripts/publish.sh --publish    # actually publish
 #   ./scripts/publish.sh --publish --otp 123456
+#   ./scripts/publish.sh --publish --otp 123456 --skip-checks  # skip tests/typecheck
+#   ./scripts/publish.sh --publish --otp 123456 --force-build  # rebuild even if up-to-date
 #
 # Order matters: core → client → adapters → react/vue/redis
 
@@ -13,12 +15,16 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DRY_RUN=true
 OTP_FLAG=""
+SKIP_CHECKS=false
+FORCE_BUILD=false
 
 # Parse args
 for arg in "$@"; do
   case $arg in
     --publish) DRY_RUN=false ;;
-    --otp) shift ;;
+    --skip-checks) SKIP_CHECKS=true ;;
+    --force-build) FORCE_BUILD=true ;;
+    --otp) ;; # next arg is the code
     [0-9][0-9][0-9][0-9][0-9][0-9]) OTP_FLAG="--otp $arg" ;;
   esac
 done
@@ -79,48 +85,107 @@ for v in "${VERSIONS[@]}"; do
 done
 ok "All packages at v$FIRST_VER"
 
-# ── Step 2: Check if already published ──
+# ── Step 2: Check if ALL packages are already published ──
 log "Checking npm registry..."
-NPM_VER=$(npm view @fluxstack/live version 2>/dev/null || echo "not-found")
-if [ "$NPM_VER" = "$FIRST_VER" ]; then
-  fail "v$FIRST_VER already published on npm. Bump versions first."
+ALL_PUBLISHED=true
+for pkg in "${PACKAGES[@]}"; do
+  PKG_NAME="${PKG_NAMES[$pkg]}"
+  EXISTING=$(npm view "$PKG_NAME@$FIRST_VER" version 2>/dev/null || echo "")
+  if [ "$EXISTING" != "$FIRST_VER" ]; then
+    ALL_PUBLISHED=false
+    break
+  fi
+done
+if [ "$ALL_PUBLISHED" = true ]; then
+  fail "All packages at v$FIRST_VER are already published. Bump versions first."
 fi
-ok "v$FIRST_VER not yet published (npm has $NPM_VER)"
+ok "v$FIRST_VER has unpublished packages"
 
-# ── Step 3: Run tests ──
-log "Running tests..."
-TEST_OUTPUT=$(bunx vitest run 2>&1 || true)
-echo "$TEST_OUTPUT" | tail -5
-# "Tests" line shows individual test results (Test Files may fail for Redis/Docker)
-TESTS_LINE=$(echo "$TEST_OUTPUT" | grep "^.*Tests " | tail -1)
-if echo "$TESTS_LINE" | grep -q "failed"; then
-  fail "Individual tests failed. Fix before publishing."
-fi
-PASSED_COUNT=$(echo "$TESTS_LINE" | sed 's/.*\([0-9][0-9]*\) passed.*/\1/')
-ok "Tests passed ($PASSED_COUNT tests)"
+# ── Step 3: Run tests (skippable) ──
+if [ "$SKIP_CHECKS" = false ]; then
+  log "Running tests..."
+  TEST_OUTPUT=$(bunx vitest run 2>&1 || true)
+  echo "$TEST_OUTPUT" | tail -5
+  # "Tests" line shows individual test results (Test Files may fail for Redis/Docker)
+  TESTS_LINE=$(echo "$TEST_OUTPUT" | grep "^.*Tests " | tail -1)
+  if echo "$TESTS_LINE" | grep -q "failed"; then
+    fail "Individual tests failed. Fix before publishing."
+  fi
+  PASSED_COUNT=$(echo "$TESTS_LINE" | sed 's/.*\([0-9][0-9]*\) passed.*/\1/')
+  ok "Tests passed ($PASSED_COUNT tests)"
 
-# ── Step 4: Type check ──
-log "Type checking core..."
-bunx tsc -p packages/core/tsconfig.json --noEmit
-ok "Type check passed"
+  # ── Step 4: Type check ──
+  log "Type checking core..."
+  bunx tsc -p packages/core/tsconfig.json --noEmit
+  ok "Type check passed"
+else
+  warn "Skipping tests and type checks (--skip-checks)"
+fi
 
-# ── Step 5: Build all ──
-log "Building all packages..."
-bun run build:core
-bun run build:client
-# Build adapters individually (Windows compat)
-cd packages/elysia && bunx tsup && cd "$ROOT"
-cd packages/express && bunx tsup && cd "$ROOT"
-cd packages/fastify && bunx tsup && cd "$ROOT"
-bun run build:react
-# Vue and Redis (if they have tsup config)
-if [ -f packages/vue/tsup.config.ts ]; then
-  cd packages/vue && bunx tsup && cd "$ROOT"
-fi
-if [ -f packages/redis/tsup.config.ts ]; then
-  cd packages/redis && bunx tsup && cd "$ROOT"
-fi
-ok "All packages built"
+# ── Step 5: Smart build — only rebuild packages with source changes ──
+log "Building packages (smart mode)..."
+
+needs_build() {
+  local pkg="$1"
+  local pkg_dir="packages/$pkg"
+
+  # Force build if requested
+  if [ "$FORCE_BUILD" = true ]; then
+    return 0
+  fi
+
+  # No dist → needs build
+  if [ ! -d "$pkg_dir/dist" ]; then
+    return 0
+  fi
+
+  # Find the newest file in dist/
+  local newest_dist
+  newest_dist=$(find "$pkg_dir/dist" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
+  if [ -z "$newest_dist" ]; then
+    return 0
+  fi
+
+  # Find the newest source file in src/
+  local newest_src
+  newest_src=$(find "$pkg_dir/src" -type f -not -path '*/__tests__/*' -not -path '*/*.test.*' -not -path '*/*.bench.*' -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
+  if [ -z "$newest_src" ]; then
+    return 1 # no source files means nothing to build
+  fi
+
+  # Also check tsup.config.ts and package.json (config changes trigger rebuild)
+  local newest_config
+  newest_config=$(find "$pkg_dir" -maxdepth 1 \( -name 'tsup.config.ts' -o -name 'package.json' \) -printf '%T@\n' 2>/dev/null | sort -rn | head -1)
+
+  # Compare: if source or config is newer than dist, rebuild
+  local compare_ts="$newest_src"
+  if [ -n "$newest_config" ] && [ "$(echo "$newest_config > $newest_src" | bc 2>/dev/null || echo 0)" = "1" ]; then
+    compare_ts="$newest_config"
+  fi
+
+  # Use awk for float comparison (bc may not be available on all systems)
+  if awk "BEGIN { exit !($compare_ts > $newest_dist) }"; then
+    return 0
+  fi
+
+  return 1
+}
+
+BUILT=0
+SKIPPED=0
+
+for pkg in "${PACKAGES[@]}"; do
+  if needs_build "$pkg"; then
+    log "  Building $pkg..."
+    cd "packages/$pkg" && bunx tsup && cd "$ROOT"
+    ((BUILT++))
+  else
+    echo -e "  ${GREEN}↳${NC} $pkg — up-to-date, skipping build"
+    ((SKIPPED++))
+  fi
+done
+
+ok "Build complete ($BUILT built, $SKIPPED skipped)"
 
 # ── Step 6: Publish ──
 if [ "$DRY_RUN" = true ]; then
@@ -131,6 +196,9 @@ if [ "$DRY_RUN" = true ]; then
   echo ""
   warn "Run with --publish to actually publish:"
   echo "  ./scripts/publish.sh --publish --otp <code>"
+  echo ""
+  warn "Quick publish (skip tests/build if already done):"
+  echo "  ./scripts/publish.sh --publish --otp <code> --skip-checks"
   exit 0
 fi
 
@@ -154,7 +222,7 @@ for pkg in "${PACKAGES[@]}"; do
     ok "$PKG_NAME@$FIRST_VER published"
     ((PUBLISHED++))
   else
-    fail "Failed to publish $PKG_NAME"
+    echo -e "${RED}[✗]${NC} Failed to publish $PKG_NAME"
     ((FAILED++))
   fi
   cd "$ROOT"
@@ -164,5 +232,7 @@ echo ""
 if [ "$FAILED" -eq 0 ]; then
   ok "All done! Published $PUBLISHED packages at v$FIRST_VER"
 else
-  fail "$FAILED packages failed to publish"
+  warn "$PUBLISHED published, $FAILED failed. Re-run with a fresh OTP to publish remaining."
+  echo "  ./scripts/publish.sh --publish --otp <code> --skip-checks"
+  exit 1
 fi
