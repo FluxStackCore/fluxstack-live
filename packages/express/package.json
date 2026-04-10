@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-express",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Express WebSocket transport adapter for @fluxstack/live (Node.js + ws)",
   "type": "module",
   "main": "./dist/index.cjs",

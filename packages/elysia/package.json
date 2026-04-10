@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-elysia",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Elysia.js WebSocket transport adapter for @fluxstack/live (Bun runtime)",
   "type": "module",
   "main": "./dist/index.js",

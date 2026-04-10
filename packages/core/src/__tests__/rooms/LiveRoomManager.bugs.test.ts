@@ -2,7 +2,7 @@
 // Each test documents the bug it targets and should FAIL until the bug is fixed.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { LiveRoomManager } from '../../rooms/LiveRoomManager'
-import { LiveRoom } from '../../rooms/LiveRoom'
+import { LiveRoom, type LiveRoomClass } from '../../rooms/LiveRoom'
 import { RoomEventBus } from '../../rooms/RoomEventBus'
 import { RoomRegistry } from '../../rooms/RoomRegistry'
 import { createMockWS } from '../helpers'
@@ -79,11 +79,11 @@ class AsyncLeaveRoom extends LiveRoom<{ count: number }, { leaveCompleted: boole
 
 // ===== Helpers =====
 
-function createManagerWithRoom(RoomClass: typeof LiveRoom) {
+function createManagerWithRoom(RoomClass: LiveRoomClass) {
   const roomEvents = new RoomEventBus()
   const manager = new LiveRoomManager(roomEvents)
   const registry = new RoomRegistry()
-  registry.register(RoomClass as any)
+  registry.register(RoomClass)
   manager.roomRegistry = registry
   return { manager, roomEvents }
 }

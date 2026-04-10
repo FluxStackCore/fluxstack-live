@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-client",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Browser WebSocket client for @fluxstack/live — connection, state sync, rooms, and file upload (framework-agnostic)",
   "type": "module",
   "main": "./dist/index.cjs",

@@ -36,21 +36,21 @@ function isPlainObject(v: unknown): v is Record<string, any> {
     && Object.getPrototypeOf(v) === Object.prototype
 }
 
-function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>, seen?: Set<object>): void {
+function deepMerge(target: Record<string, any>, source: Record<string, any>, seen?: Set<object>): void {
   if (!seen) seen = new Set()
-  if (seen.has(source as object)) return
-  seen.add(source as object)
+  if (seen.has(source)) return
+  seen.add(source)
 
-  for (const key of Object.keys(source) as Array<keyof T & string>) {
+  for (const key of Object.keys(source)) {
     const newVal = source[key]
     if (newVal === null) {
       delete target[key]
       continue
     }
     if (isPlainObject(target[key]) && isPlainObject(newVal)) {
-      deepMerge(target[key] as any, newVal as any, seen)
+      deepMerge(target[key], newVal, seen)
     } else {
-      target[key] = newVal as T[keyof T]
+      target[key] = newVal
     }
   }
 }

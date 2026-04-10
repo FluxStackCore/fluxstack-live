@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-vue",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Vue 3 composables for @fluxstack/live — useLive(), provideLiveConnection(), reactive state sync",
   "type": "module",
   "main": "./dist/index.cjs",
