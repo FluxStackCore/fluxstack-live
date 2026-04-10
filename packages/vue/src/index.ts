@@ -36,19 +36,41 @@ function isPlainObject(v: unknown): v is Record<string, any> {
     && Object.getPrototypeOf(v) === Object.prototype
 }
 
+/**
+ * Apply a STATE_DELTA coming from the server (mutates target).
+ *
+ * Semantics (matches core's `deepAssign`, fixes #6):
+ * - Top-level (depth === 0): `null` is a real value — `target[key] = null`.
+ *   Top-level state keys are part of the component schema and are not
+ *   dynamically added/removed, so there is no ambiguity with a deletion
+ *   signal. This is what makes `Nullable<T>` fields in state work.
+ * - Nested (depth > 0): `null` is the deletion sentinel from the core's
+ *   `computeDeepDiff` — remove the key. This is what the
+ *   `Record<string, T>` scenario from issue #1/#3 relies on.
+ * - `undefined` is a no-op (skipped) — these values never cross the wire.
+ */
 function deepMerge(target: Record<string, any>, source: Record<string, any>, seen?: Set<object>): void {
+  deepMergeImpl(target, source, 0, seen)
+}
+
+function deepMergeImpl(target: Record<string, any>, source: Record<string, any>, depth: number, seen?: Set<object>): void {
   if (!seen) seen = new Set()
   if (seen.has(source)) return
   seen.add(source)
 
   for (const key of Object.keys(source)) {
     const newVal = source[key]
+    if (newVal === undefined) continue
     if (newVal === null) {
-      delete target[key]
+      if (depth === 0) {
+        target[key] = null
+      } else {
+        delete target[key]
+      }
       continue
     }
     if (isPlainObject(target[key]) && isPlainObject(newVal)) {
-      deepMerge(target[key], newVal, seen)
+      deepMergeImpl(target[key], newVal, depth + 1, seen)
     } else {
       target[key] = newVal
     }

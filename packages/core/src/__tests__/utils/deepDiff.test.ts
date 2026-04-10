@@ -134,25 +134,54 @@ describe('computeDeepDiff', () => {
 })
 
 describe('deepAssign', () => {
-  describe('null as deletion signal', () => {
-    it('deletes key when value is null', () => {
-      const target = { a: 1, b: 2, c: 3 }
+  describe('null semantics (top-level = value, nested = deletion)', () => {
+    // Fixes #6: null at the top level is a real value, not a delete signal.
+    // The delete semantics still apply inside nested objects where
+    // computeDeepDiff uses null as the "removed key" sentinel for
+    // Record<string, T> maps (issue #1/#3).
+
+    it('top-level null sets the key to null (not deletion)', () => {
+      const target: Record<string, unknown> = { a: 1, b: 2, c: 3 }
       deepAssign(target, { b: null })
-      expect(target).toEqual({ a: 1, c: 3 })
-      expect('b' in target).toBe(false)
+      expect(target).toEqual({ a: 1, b: null, c: 3 })
+      expect('b' in target).toBe(true)
+      expect(target.b).toBeNull()
     })
 
-    it('deletes nested key when value is null', () => {
+    it('nested null deletes the key (from computeDeepDiff sentinel)', () => {
       const target = { players: { A: { score: 1 }, B: { score: 2 } } }
       deepAssign(target, { players: { B: null } })
       expect(target).toEqual({ players: { A: { score: 1 } } })
       expect('B' in target.players).toBe(false)
     })
 
-    it('handles mixed updates and deletions', () => {
-      const target = { x: 1, y: 2, z: 3 }
-      deepAssign(target, { x: 10, y: null, w: 4 } as any)
-      expect(target).toEqual({ x: 10, z: 3, w: 4 })
+    it('mixes top-level null-as-value with nested null-as-deletion', () => {
+      const target: Record<string, unknown> = {
+        selected: { id: 'x' },
+        players: { A: { score: 1 }, B: { score: 2 } },
+      }
+      deepAssign(target, {
+        selected: null,            // top-level → set to null
+        players: { B: null },      // nested → delete B
+      } as any)
+      expect(target).toEqual({
+        selected: null,
+        players: { A: { score: 1 } },
+      })
+      expect('selected' in target).toBe(true)
+      expect('B' in (target.players as any)).toBe(false)
+    })
+
+    it('top-level null overwrites a non-object value', () => {
+      const target = { name: 'alice' as string | null }
+      deepAssign(target, { name: null })
+      expect(target.name).toBeNull()
+    })
+
+    it('top-level null overwrites a plain-object value (replaces, does not merge)', () => {
+      const target = { settings: { volume: 5 } as { volume: number } | null }
+      deepAssign(target, { settings: null })
+      expect(target.settings).toBeNull()
     })
 
     it('applies full round-trip: diff then assign', () => {
@@ -182,6 +211,29 @@ describe('deepAssign', () => {
     })
   })
 
+  describe('undefined is a no-op (fixes #6 server↔wire drift)', () => {
+    // JSON.stringify strips `undefined`, so if the server accepted it we
+    // would silently desync from the client. deepAssign now skips it.
+
+    it('top-level undefined does not change the target', () => {
+      const target: Record<string, unknown> = { a: 1, b: 2 }
+      deepAssign(target, { a: undefined })
+      expect(target).toEqual({ a: 1, b: 2 })
+    })
+
+    it('nested undefined does not change the target', () => {
+      const target = { settings: { volume: 5, mute: false } }
+      deepAssign(target, { settings: { volume: undefined } } as any)
+      expect(target).toEqual({ settings: { volume: 5, mute: false } })
+    })
+
+    it('undefined mixed with real updates applies only the real ones', () => {
+      const target: Record<string, unknown> = { a: 1, b: 2, c: 3 }
+      deepAssign(target, { a: 10, b: undefined, d: 4 } as any)
+      expect(target).toEqual({ a: 10, b: 2, c: 3, d: 4 })
+    })
+  })
+
   describe('existing behavior preserved', () => {
     it('merges plain objects recursively', () => {
       const target = { a: { x: 1, y: 2 }, b: 3 }
@@ -200,5 +252,29 @@ describe('deepAssign', () => {
       deepAssign(target, { b: 2 })
       expect(target).toEqual({ a: 1, b: 2 })
     })
+  })
+})
+
+describe('computeDeepDiff — undefined handling (fixes #6)', () => {
+  it('skips undefined values in the update (never emits them)', () => {
+    const prev = { a: 1, b: 2 }
+    const next = { a: 10, b: undefined } as any
+    const diff = computeDeepDiff(prev, next)
+    expect(diff).toEqual({ a: 10 })
+    expect(diff).not.toHaveProperty('b')
+  })
+
+  it('top-level null is emitted normally (real value, not a removal)', () => {
+    const prev = { selected: { id: 'x' } as { id: string } | null }
+    const next = { selected: null }
+    const diff = computeDeepDiff(prev as any, next as any)
+    expect(diff).toEqual({ selected: null })
+  })
+
+  it('top-level null is unchanged if prev was already null', () => {
+    const prev = { selected: null }
+    const next = { selected: null }
+    const diff = computeDeepDiff(prev as any, next as any)
+    expect(diff).toBeNull()
   })
 })
