@@ -5,7 +5,7 @@
 import type { RoomEventBus } from './RoomEventBus'
 import type { GenericWebSocket } from '../transport/types'
 import { queueWsMessage, queuePreSerialized, sendBinaryImmediate } from '../transport/WsSendBatcher'
-import { liveLog } from '../debug/LiveLogger'
+import { liveLog, liveWarn } from '../debug/LiveLogger'
 import { MAX_ROOM_STATE_SIZE, ROOM_NAME_REGEX } from '../protocol/constants'
 import type { IRoomPubSubAdapter } from './adapters'
 import { computeDeepDiff, deepAssign } from '../utils/deepDiff'
@@ -150,27 +150,50 @@ export class LiveRoomManager {
       }
     }
 
-    // Call onJoin lifecycle hook for LiveRoom-backed rooms
+    // Call onCreate BEFORE the first onJoin so the first member sees
+    // any state the room seeds during creation. Fixes #5 H7: the old order
+    // ran onJoin first and contradicted LiveRoom.ts:148 which documents
+    // onCreate as "called once when the room is first created (first
+    // member joins)". We isolate throws/rejections so a broken onCreate
+    // cannot leak an exception out of joinRoom — the room is torn down
+    // and the join is rejected cleanly.
+    if (isNewRoom && room.instance) {
+      try {
+        await room.instance.onCreate()
+      } catch (err: any) {
+        liveWarn('rooms', componentId, `Room '${roomId}' onCreate threw: ${err?.message || err}`)
+        this.rooms.delete(roomId)
+        return { rejected: true, reason: 'Room initialization failed' }
+      }
+    }
+
+    // Call onJoin lifecycle hook for LiveRoom-backed rooms. Isolated so a
+    // broken onJoin cannot leak an exception out of joinRoom either — we
+    // treat throws as an implicit rejection (same path as result === false).
     if (room.instance) {
-      const result = await room.instance.onJoin({
-        componentId,
-        userId: joinContext?.userId,
-        payload: joinContext?.payload,
-      })
+      let joinResult: void | false
+      try {
+        joinResult = await room.instance.onJoin({
+          componentId,
+          userId: joinContext?.userId,
+          payload: joinContext?.payload,
+        })
+      } catch (err: any) {
+        liveWarn('rooms', componentId, `Room '${roomId}' onJoin threw: ${err?.message || err}`)
+        if (isNewRoom) {
+          this.rooms.delete(roomId)
+        }
+        return { rejected: true, reason: 'Join rejected by room' }
+      }
 
       // Handle rejection (sync or async)
-      if (result === false) {
+      if (joinResult === false) {
         // If this was a new room and join was rejected, clean up
         if (isNewRoom) {
           this.rooms.delete(roomId)
         }
         return { rejected: true, reason: 'Join rejected by room' }
       }
-    }
-
-    // Call onCreate for new LiveRoom instances (after onJoin succeeds)
-    if (isNewRoom && room.instance) {
-      room.instance.onCreate()
     }
 
     // Add member
@@ -219,12 +242,18 @@ export class LiveRoomManager {
     const room = this.rooms.get(roomId)
     if (!room) return
 
-    // Call onLeave lifecycle hook for LiveRoom-backed rooms (await async cleanup)
+    // Call onLeave lifecycle hook for LiveRoom-backed rooms (await async cleanup).
+    // Fixes #5 H6: isolate throws so a broken hook cannot prevent member removal
+    // and the downstream broadcasts below.
     if (room.instance) {
-      await room.instance.onLeave({
-        componentId,
-        reason: leaveReason,
-      })
+      try {
+        await room.instance.onLeave({
+          componentId,
+          reason: leaveReason,
+        })
+      } catch (err: any) {
+        liveWarn('rooms', componentId, `Room '${roomId}' onLeave threw: ${err?.message || err}. Continuing with cleanup.`)
+      }
     }
 
     room.members.delete(componentId)
@@ -255,19 +284,41 @@ export class LiveRoomManager {
 
     // Cleanup empty room after delay
     if (memberCount === 0) {
-      setTimeout(() => {
-        const currentRoom = this.rooms.get(roomId)
-        if (currentRoom && currentRoom.members.size === 0) {
-          // Call onDestroy for LiveRoom-backed rooms
-          if (currentRoom.instance) {
-            const result = currentRoom.instance.onDestroy()
-            if (result === false) return // Room wants to stay alive
-          }
-          this.rooms.delete(roomId)
-          liveLog('rooms', null, `Room '${roomId}' destroyed (empty)`)
-        }
-      }, 5 * 60 * 1000)
+      this.scheduleEmptyRoomDestruction(roomId)
     }
+  }
+
+  /**
+   * Schedule destruction of a now-empty room after a 5-minute grace period.
+   * When the timer fires, the room is only destroyed if it is still empty
+   * AND onDestroy did not cancel (returning `false` or `Promise<false>`).
+   *
+   * Fixes #5 H5: previously the code called `currentRoom.instance.onDestroy()`
+   * without awaiting and compared the returned Promise to `false` — which is
+   * always `false` for a Promise, so `async onDestroy() { return false }`
+   * (documented in LiveRoom.ts:155 as a supported cancel signal) was silently
+   * ignored and the room was always destroyed.
+   */
+  private scheduleEmptyRoomDestruction(roomId: string): void {
+    setTimeout(async () => {
+      const currentRoom = this.rooms.get(roomId)
+      if (!currentRoom || currentRoom.members.size !== 0) return
+
+      // Call onDestroy for LiveRoom-backed rooms. Await the result so
+      // Promise<false> is properly honoured, and isolate throws so a
+      // broken onDestroy cannot leave the room in a half-destroyed state.
+      if (currentRoom.instance) {
+        try {
+          const result = await currentRoom.instance.onDestroy()
+          if (result === false) return // Room wants to stay alive
+        } catch (err: any) {
+          liveWarn('rooms', null, `Room '${roomId}' onDestroy threw: ${err?.message || err}. Destroying anyway.`)
+        }
+      }
+
+      this.rooms.delete(roomId)
+      liveLog('rooms', null, `Room '${roomId}' destroyed (empty)`)
+    }, 5 * 60 * 1000)
   }
 
   /**
@@ -287,12 +338,20 @@ export class LiveRoomManager {
       const room = this.rooms.get(roomId)
       if (!room) continue
 
-      // Call onLeave lifecycle hook for LiveRoom-backed rooms (await async cleanup)
+      // Call onLeave lifecycle hook for LiveRoom-backed rooms (await async cleanup).
+      // Fixes #5 H6: a single broken onLeave must not interrupt the loop —
+      // otherwise the component would remain a member of every subsequent
+      // room and componentRooms.delete() at the end of this method would
+      // never execute, leaking memory and missing leave notifications.
       if (room.instance) {
-        await room.instance.onLeave({
-          componentId,
-          reason: 'disconnect',
-        })
+        try {
+          await room.instance.onLeave({
+            componentId,
+            reason: 'disconnect',
+          })
+        } catch (err: any) {
+          liveWarn('rooms', componentId, `Room '${roomId}' onLeave threw during cleanup: ${err?.message || err}. Continuing with remaining rooms.`)
+        }
       }
 
       room.members.delete(componentId)
@@ -303,19 +362,8 @@ export class LiveRoomManager {
       if (memberCount > 0) {
         notifications.push({ roomId, count: memberCount })
       } else {
-        // Schedule empty room cleanup
-        setTimeout(() => {
-          const currentRoom = this.rooms.get(roomId)
-          if (currentRoom && currentRoom.members.size === 0) {
-            // Call onDestroy for LiveRoom-backed rooms
-            if (currentRoom.instance) {
-              const result = currentRoom.instance.onDestroy()
-              if (result === false) return // Room wants to stay alive
-            }
-            this.rooms.delete(roomId)
-            liveLog('rooms', null, `Room '${roomId}' destroyed (empty)`)
-          }
-        }, 5 * 60 * 1000)
+        // Schedule empty room cleanup (awaits onDestroy properly — see #5 H5)
+        this.scheduleEmptyRoomDestruction(roomId)
       }
     }
 
@@ -348,11 +396,29 @@ export class LiveRoomManager {
     const now = Date.now()
     room.lastActivity = now
 
-    // 0. Call onEvent lifecycle hook for LiveRoom-backed rooms
+    // 0. Call onEvent lifecycle hook for LiveRoom-backed rooms.
+    //
+    // Contract (fixes #5 H3/H4): onEvent is an *observer*, not an interceptor.
+    // `emitToRoom` is synchronous and the broadcast below cannot be cancelled
+    // or modified by the hook's return value. We still accept Promise-returning
+    // hooks to keep the existing signature compatible, but they run
+    // fire-and-forget and their rejection is logged rather than propagated.
+    // Synchronous throws are also isolated so a single broken handler cannot
+    // block the RoomEventBus emit, the cluster pubsub publish, or the
+    // WebSocket broadcast below.
     if (room.instance) {
-      room.instance.onEvent(event, data, {
-        componentId: excludeComponentId ?? 'server',
-      })
+      try {
+        const res = room.instance.onEvent(event, data, {
+          componentId: excludeComponentId ?? 'server',
+        })
+        if (res && typeof (res as Promise<void>).catch === 'function') {
+          ;(res as Promise<void>).catch((err) => {
+            liveWarn('rooms', null, `Room '${roomId}' onEvent('${event}') async rejection: ${err?.message || err}`)
+          })
+        }
+      } catch (err: any) {
+        liveWarn('rooms', null, `Room '${roomId}' onEvent('${event}') threw: ${err?.message || err}`)
+      }
     }
 
     // 1. Emit on RoomEventBus for server-side handlers
