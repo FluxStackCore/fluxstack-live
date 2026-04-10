@@ -9,10 +9,10 @@
     "dev:client": "vite"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.2.0",
-    "@fluxstack/live-express": "^0.2.0",
-    "@fluxstack/live-client": "^0.2.0",
-    "@fluxstack/live-vue": "^0.2.0",
+    "@fluxstack/live": "workspace:*",
+    "@fluxstack/live-express": "workspace:*",
+    "@fluxstack/live-client": "workspace:*",
+    "@fluxstack/live-vue": "workspace:*",
     "express": "^4.21.0",
     "vue": "^3.5.0"
   },

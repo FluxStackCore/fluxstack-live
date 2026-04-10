@@ -178,10 +178,10 @@ for pkg in "${PACKAGES[@]}"; do
   if needs_build "$pkg"; then
     log "  Building $pkg..."
     cd "packages/$pkg" && bunx tsup && cd "$ROOT"
-    ((BUILT++))
+    BUILT=$((BUILT + 1))
   else
     echo -e "  ${GREEN}↳${NC} $pkg — up-to-date, skipping build"
-    ((SKIPPED++))
+    SKIPPED=$((SKIPPED + 1))
   fi
 done
 
@@ -220,10 +220,10 @@ for pkg in "${PACKAGES[@]}"; do
   log "Publishing $PKG_NAME@$FIRST_VER..."
   if cd "$ROOT/$PKG_DIR" && npm publish --access public $OTP_FLAG 2>&1; then
     ok "$PKG_NAME@$FIRST_VER published"
-    ((PUBLISHED++))
+    PUBLISHED=$((PUBLISHED + 1))
   else
     echo -e "${RED}[✗]${NC} Failed to publish $PKG_NAME"
-    ((FAILED++))
+    FAILED=$((FAILED + 1))
   fi
   cd "$ROOT"
 done
