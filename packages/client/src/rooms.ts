@@ -18,6 +18,10 @@ function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>,
   const result = { ...target }
   for (const key of Object.keys(source) as Array<keyof T>) {
     const newVal = source[key]
+    if (newVal === null) {
+      delete result[key]
+      continue
+    }
     const oldVal = result[key]
     if (isPlainObject(oldVal) && isPlainObject(newVal)) {
       result[key] = deepMerge(oldVal as any, newVal as any, seen)

@@ -14,6 +14,7 @@ export function isPlainObject(v: unknown): v is Record<string, unknown> {
 /**
  * Recursively compute the diff between two plain objects.
  * Returns null if nothing changed, or an object with only the changed keys.
+ * Keys present in `prev` but absent in `next` are emitted as `null` (deletion signal).
  * Arrays are compared by reference (===).
  * Safe against circular references (tracked via `seen` Set).
  *
@@ -51,12 +52,27 @@ export function computeDeepDiff(
       result[key] = newVal
     }
   }
+
+  // Detect removed keys in nested objects (depth > 0).
+  // At depth 0 the caller passes a partial update (only changed fields),
+  // so missing keys are not removals. Inside nested objects, the caller
+  // provides the complete replacement value, so missing keys ARE removals.
+  if (depth > 0) {
+    for (const key of Object.keys(prev)) {
+      if (!(key in next)) {
+        result ??= {}
+        result[key] = null
+      }
+    }
+  }
+
   return result
 }
 
 /**
  * Recursively merge source into target (mutates target).
  * Plain objects are merged recursively; everything else is overwritten.
+ * A `null` value in source deletes the corresponding key from target.
  * Safe against circular references (tracked via `seen` Set).
  */
 export function deepAssign(target: any, source: any, seen?: Set<object>): void {
@@ -65,7 +81,9 @@ export function deepAssign(target: any, source: any, seen?: Set<object>): void {
   seen.add(source)
 
   for (const key of Object.keys(source)) {
-    if (isPlainObject(target[key]) && isPlainObject(source[key])) {
+    if (source[key] === null) {
+      delete target[key]
+    } else if (isPlainObject(target[key]) && isPlainObject(source[key])) {
       deepAssign(target[key], source[key], seen)
     } else {
       target[key] = source[key]
