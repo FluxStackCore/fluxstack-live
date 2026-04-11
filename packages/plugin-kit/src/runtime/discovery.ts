@@ -19,7 +19,10 @@ import { readdir, readFile } from 'fs/promises'
 import { join, resolve } from 'path'
 import { existsSync } from 'fs'
 
-type Plugin = FluxStack.Plugin
+// See registry.ts for the rationale. Discovery operates on plugins
+// without inspecting their config, so erasing TConfig to `any` is safe.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Plugin = FluxStack.Plugin<any>
 
 export interface PluginDiscoveryConfig {
   logger?: Logger

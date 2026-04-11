@@ -39,7 +39,14 @@ import { createPluginUtils } from './utils'
 import { PluginError } from './errors'
 import { EventEmitter } from 'events'
 
-type Plugin = FluxStack.Plugin
+// See registry.ts for why this uses `any` instead of `unknown`. The
+// manager is generic over TConfig (PluginManager<TConfig>) and flows
+// the host-app config through to PluginContext<TConfig>, but the
+// internal Plugin type alias here is intentionally erased so a
+// consumer can pass Plugin<HostConfig> to registerPlugin() without
+// variance errors.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Plugin = FluxStack.Plugin<any>
 
 /**
  * Helper: safely parse `request.url` which might be relative or absolute.

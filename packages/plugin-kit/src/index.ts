@@ -20,7 +20,7 @@
  * ```
  */
 
-export const VERSION = '0.3.1'
+export const VERSION = '0.3.2'
 
 // Re-export every public type from the types barrel.
 export * from './types'

@@ -31,7 +31,10 @@ export interface PluginExecutionStep {
   canExecuteInParallel: boolean
 }
 
-type Plugin = FluxStack.Plugin
+// See registry.ts for the rationale. The executor sorts/invokes plugins
+// but doesn't inspect their config, so erasing TConfig to `any` is safe.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Plugin = FluxStack.Plugin<any>
 
 export class PluginExecutor {
   private logger: Logger

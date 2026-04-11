@@ -28,7 +28,22 @@ import { readdir, readFile } from 'fs/promises'
 import { join, resolve, sep } from 'path'
 import { existsSync, readFileSync } from 'fs'
 
-type FluxStackPlugin = FluxStack.Plugin
+// Internal alias: a plugin with its config shape erased to the top type.
+// The registry stores plugins generically — it doesn't read host-app config
+// directly, so variance doesn't matter here. Host apps with specialized
+// Plugin<HostConfig> types pass them in via `registerSync`/`register` using
+// `as unknown as FluxStack.Plugin` at the call site (see FluxStack's
+// `FluxStackFramework.use()` for an example), or use the registry as-is.
+//
+// Using `any` here instead of `unknown` is intentional: TypeScript's
+// generic-function variance treats `unknown` contravariantly in hook
+// callback positions (e.g. `setup: (ctx: PluginContext<TConfig>) => void`),
+// which would block a consumer from passing `Plugin<HostConfig>` to
+// `registerSync` even though it's safe at runtime. `any` is bivariant
+// and matches the runtime guarantee (the registry never inspects
+// `context.config`).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type FluxStackPlugin = FluxStack.Plugin<any>
 
 /**
  * Minimal plugin-related settings the registry consumes from the host app.
