@@ -49,7 +49,7 @@ export interface DependencyManagerConfig {
 }
 
 export class PluginDependencyManager {
-  private logger?: Logger
+  private logger: Logger | undefined
   private config: DependencyManagerConfig
   private installedDependencies: Map<string, string> = new Map()
   private pluginDependencies: Map<string, PluginDependency[]> = new Map()

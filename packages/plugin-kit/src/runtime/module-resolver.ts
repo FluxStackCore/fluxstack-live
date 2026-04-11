@@ -23,7 +23,7 @@ export interface ModuleResolverConfig {
 
 export class PluginModuleResolver {
   private config: ModuleResolverConfig
-  private logger?: Logger
+  private logger: Logger | undefined
   private static readonly MAX_CACHE_SIZE = 1000
   private resolveCache: Map<string, string> = new Map()
 

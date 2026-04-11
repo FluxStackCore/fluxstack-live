@@ -30,7 +30,7 @@ export interface PluginDiscoveryConfig {
 }
 
 export class PluginDiscovery {
-  private logger?: Logger
+  private logger: Logger | undefined
   private baseDir: string
   private builtInDir: string
   private externalDir: string

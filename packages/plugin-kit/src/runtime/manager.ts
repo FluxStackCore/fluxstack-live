@@ -389,9 +389,11 @@ export class PluginManager<TConfig = unknown> extends EventEmitter {
 
     this.emit('plugin:error', { plugin: plugin.name, hook, error: lastError })
 
+    // Build result without undefined `error` key to respect
+    // exactOptionalPropertyTypes: true on PluginHookResult.error
     return {
       success: false,
-      error: lastError,
+      ...(lastError ? { error: lastError } : {}),
       duration,
       plugin: plugin.name,
       hook,

@@ -79,15 +79,17 @@ export class PluginRegistry {
   private loadOrder: string[] = []
   private dependencies: Map<string, string[]> = new Map()
   private conflicts: string[] = []
-  private logger?: Logger
-  private settings?: PluginRegistrySettings
+  private logger: Logger | undefined
+  private settings: PluginRegistrySettings | undefined
   private dependencyManager: PluginDependencyManager
 
   constructor(options: PluginRegistryConfig = {}) {
     this.logger = options.logger
     this.settings = options.settings
     this.dependencyManager = new PluginDependencyManager({
-      logger: this.logger,
+      // Spread guards against exactOptionalPropertyTypes: only include
+      // `logger` in the options if we actually have one.
+      ...(this.logger ? { logger: this.logger } : {}),
       autoInstall: true,
       packageManager: 'bun',
     })
@@ -132,9 +134,10 @@ export class PluginRegistry {
     for (const plugin of this.plugins.values()) {
       if (plugin.onPluginRegister && typeof plugin.onPluginRegister === 'function') {
         try {
+          // Build payload without undefined keys (exactOptionalPropertyTypes)
           await plugin.onPluginRegister({
             pluginName: registeredPlugin.name,
-            pluginVersion: registeredPlugin.version,
+            ...(registeredPlugin.version ? { pluginVersion: registeredPlugin.version } : {}),
             timestamp: Date.now(),
             data: { plugin: registeredPlugin },
           })
@@ -154,9 +157,10 @@ export class PluginRegistry {
     for (const plugin of this.plugins.values()) {
       if (plugin.onPluginUnregister && typeof plugin.onPluginUnregister === 'function') {
         try {
+          // Build payload without undefined keys (exactOptionalPropertyTypes)
           await plugin.onPluginUnregister({
             pluginName: unregisteredPluginName,
-            pluginVersion: version,
+            ...(version ? { pluginVersion: version } : {}),
             timestamp: Date.now(),
           })
         } catch (error) {
