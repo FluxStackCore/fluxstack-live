@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/plugin-kit",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Shared plugin system for FluxStack — types and runtime for authoring plugins, consumed by both the FluxStack app and external plugin packages",
   "type": "module",
   "main": "./dist/index.cjs",

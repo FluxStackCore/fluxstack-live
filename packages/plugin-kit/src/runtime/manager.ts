@@ -22,7 +22,6 @@ import type {
   FluxStack,
   PluginHook,
   PluginHookResult,
-  PluginLoadResult,
   PluginMetrics,
   PluginExecutionContext,
   HookExecutionOptions,
@@ -102,7 +101,19 @@ export class PluginManager<TConfig = unknown> extends EventEmitter {
   /**
    * Initialize the plugin manager.
    *
-   * Discovers plugins, sets up their contexts, and runs the `setup` hook.
+   * Sets up plugin contexts and runs the `setup` hook for every plugin
+   * that is already in the registry. **Does not touch the filesystem.**
+   *
+   * Since 0.4.0: filesystem discovery has been removed from this
+   * method. Host apps must register plugins explicitly via `.use()`
+   * (in FluxStack, that means `framework.use(plugin)` or calling
+   * `pluginManager.registerPlugin(plugin)` before `initialize()`).
+   *
+   * Rationale: auto-discovery via `readdir(node_modules)` / `readdir(plugins)`
+   * silently broke in production bundles where those directories don't
+   * exist, and prevented bundlers from statically including plugin code.
+   * Static registration makes dev and prod behave identically and lets
+   * the bundler tree-shake correctly.
    */
   async initialize(): Promise<void> {
     if (this.initialized) {
@@ -112,10 +123,6 @@ export class PluginManager<TConfig = unknown> extends EventEmitter {
     this.logger.debug('Initializing plugin manager')
 
     try {
-      this.logger.debug('Starting plugin discovery...')
-      await this.discoverPlugins()
-      this.logger.debug('Plugin discovery completed')
-
       this.logger.debug('Setting up plugin contexts...')
       this.setupPluginContexts()
       this.logger.debug('Plugin contexts setup completed')
@@ -438,52 +445,6 @@ export class PluginManager<TConfig = unknown> extends EventEmitter {
 
       return enabledNames.includes(plugin.name)
     })
-  }
-
-  private async discoverPlugins(): Promise<void> {
-    try {
-      const results: PluginLoadResult[] = []
-
-      // Project plugins (plugins/ directory)
-      this.logger.debug('Discovering project plugins in directory: plugins')
-      const projectResults = await this.registry.discoverPlugins({
-        directories: ['plugins'],
-        includeBuiltIn: false,
-        includeExternal: true,
-      })
-      results.push(...projectResults)
-
-      // NPM plugins
-      if (this.settings.discoverNpmPlugins) {
-        this.logger.debug('Discovering npm plugins in node_modules...')
-        const npmResults = await this.registry.discoverNpmPlugins()
-        results.push(...npmResults)
-      } else {
-        this.logger.debug('🔒 NPM plugin discovery disabled for security')
-      }
-
-      let loaded = 0
-      let failed = 0
-
-      for (const result of results) {
-        if (result.success) {
-          loaded++
-          if (result.warnings && result.warnings.length > 0) {
-            this.logger.warn(`Plugin '${result.plugin?.name}' loaded with warnings`, {
-              warnings: result.warnings,
-            })
-          }
-        } else {
-          failed++
-          this.logger.error(`Failed to load plugin: ${result.error}`)
-        }
-      }
-
-      this.logger.debug('Plugin discovery completed', { loaded, failed })
-    } catch (error) {
-      this.logger.error('Plugin discovery failed', { error })
-      throw error
-    }
   }
 
   private setupPluginContexts(): void {
