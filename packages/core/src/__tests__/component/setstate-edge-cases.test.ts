@@ -365,3 +365,130 @@ describe('documented limitation: Date values are reference-compared', () => {
     expect(extractDeltas(ws).length).toBe(1)
   })
 })
+
+// ==========================================================================
+// fixes #13 — setState must not silently drop updates when the "next" values
+// share references with a "previous" state that has been mutated through an
+// external alias (e.g. a LiveRoom whose state is mirrored into a component).
+//
+// Root cause: computeDeepDiff(prev, next) uses `prev === next` as a fast-path.
+// That is only correct when the framework OWNS the previous state. The moment
+// a caller does `component.setState({ players: { ...room.state.players } })`,
+// the component's internal `_state.players[id]` and the room's
+// `room.state.players[id]` become the SAME reference. If the room then
+// mutates that player in-place (which LiveRoomManager does via deepAssign),
+// the component's "previous" state is silently updated too — so the next
+// `setState` with the "new" snapshot compares `oldVal === newVal` and emits
+// no delta. The client never sees the change.
+//
+// The fix must make setState honest: the previous-state snapshot used by
+// the diff must reflect what the CLIENT last saw, not whatever the aliased
+// object currently holds.
+// ==========================================================================
+describe('fixes #13: setState survives external mutation of aliased refs', () => {
+  it('emits a delta for a player that was mutated through a shared reference', async () => {
+    type Player = { name: string; ready: boolean; score: number }
+    type S = { players: Record<string, Player>; hostId: string }
+    class Game extends LiveComponent<S> {
+      static componentName = 'Issue13GameComponent'
+      static publicActions = [] as const
+      static defaultState: S = { players: {}, hostId: '' }
+    }
+
+    const ws = createMockWs()
+    const comp = new Game({}, ws)
+
+    // Simulates a LiveRoom that owns the source of truth. The component
+    // mirrors this map into its own state. Exactly the pattern the issue
+    // describes: same JS references, no defensive clone.
+    const roomPlayers: Record<string, Player> = {
+      A: { name: 'Alice', ready: false, score: 0 },
+      B: { name: 'Bob', ready: false, score: 0 },
+    }
+
+    // First mirror: component takes a spread of the room container. The
+    // inner Player objects are still shared with `roomPlayers`.
+    comp.setState({ players: { ...roomPlayers }, hostId: 'A' })
+    await flush()
+
+    // Baseline: the client saw the initial mirror.
+    let deltas = extractDeltas(ws)
+    expect(deltas.length).toBe(1)
+    expect(deltas[0]).toEqual({
+      players: {
+        A: { name: 'Alice', ready: false, score: 0 },
+        B: { name: 'Bob', ready: false, score: 0 },
+      },
+      hostId: 'A',
+    })
+    ;(ws.send as any).mockClear()
+
+    // ---- the bug trigger ----
+    // The "room" mutates player A in-place. This is what LiveRoomManager
+    // does via deepAssign: it does NOT replace `roomPlayers.A` with a new
+    // object, it mutates the existing one. Because the component's
+    // `_state.players.A` is the SAME reference, `_state` now silently
+    // reflects `ready: true` — without any delta having been emitted.
+    roomPlayers.A.ready = true
+
+    // The component re-mirrors. This is the documented sync pattern:
+    //   this.setState({ players: { ...room.state.players } })
+    comp.setState({ players: { ...roomPlayers } })
+    await flush()
+
+    deltas = extractDeltas(ws)
+
+    // Before the fix: 0 deltas (diff short-circuits on oldVal === newVal).
+    // After the fix: exactly one delta carrying the ready=true change.
+    expect(deltas.length).toBe(1)
+    expect(deltas[0]).toEqual({ players: { A: { ready: true } } })
+  })
+
+  it('emits a delta when a nested primitive is mutated through an alias', async () => {
+    // Minimal isolation of the bug: a single nested object mutated in-place
+    // between two setState calls. No Record, no room, just aliasing.
+    type S = { config: { volume: number; muted: boolean } }
+    class C extends LiveComponent<S> {
+      static componentName = 'Issue13AliasComponent'
+      static publicActions = [] as const
+      static defaultState: S = { config: { volume: 50, muted: false } }
+    }
+
+    const ws = createMockWs()
+    const comp = new C({}, ws)
+
+    const externalConfig = { volume: 50, muted: false }
+    comp.setState({ config: externalConfig })
+    await flush()
+    ;(ws.send as any).mockClear()
+
+    // Mutate through the alias — component's _state.config is the same ref.
+    externalConfig.muted = true
+
+    // Re-sync with the same reference.
+    comp.setState({ config: externalConfig })
+    await flush()
+
+    const deltas = extractDeltas(ws)
+    expect(deltas.length).toBe(1)
+    expect(deltas[0]).toEqual({ config: { muted: true } })
+  })
+
+  it('does not emit spurious deltas when nothing changed (regression guard)', async () => {
+    // The fix must still be a no-op when the state is genuinely unchanged.
+    type S = { config: { volume: number } }
+    class C extends LiveComponent<S> {
+      static componentName = 'Issue13NoopComponent'
+      static publicActions = [] as const
+      static defaultState: S = { config: { volume: 50 } }
+    }
+
+    const ws = createMockWs()
+    const comp = new C({}, ws)
+
+    comp.setState({ config: { volume: 50 } })
+    await flush()
+
+    expect(extractDeltas(ws).length).toBe(0)
+  })
+})
