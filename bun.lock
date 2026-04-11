@@ -103,7 +103,7 @@
     },
     "packages/client": {
       "name": "@fluxstack/live-client",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
       },
@@ -114,7 +114,7 @@
     },
     "packages/core": {
       "name": "@fluxstack/live",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "devDependencies": {
         "@types/node": "^25.3.3",
         "ioredis": "^5.10.0",
@@ -128,7 +128,7 @@
     },
     "packages/elysia": {
       "name": "@fluxstack/live-elysia",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
       },
@@ -143,7 +143,7 @@
     },
     "packages/express": {
       "name": "@fluxstack/live-express",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
         "@fluxstack/live-client": "^0.7.0",
@@ -163,7 +163,7 @@
     },
     "packages/fastify": {
       "name": "@fluxstack/live-fastify",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
         "@fluxstack/live-client": "^0.7.0",
@@ -183,9 +183,13 @@
         "fastify": ">=4.0.0",
       },
     },
+    "packages/plugin-kit": {
+      "name": "@fluxstack/plugin-kit",
+      "version": "0.1.0",
+    },
     "packages/react": {
       "name": "@fluxstack/live-react",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
         "@fluxstack/live-client": "^0.7.0",
@@ -204,7 +208,7 @@
     },
     "packages/redis": {
       "name": "@fluxstack/live-redis",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
       },
@@ -219,7 +223,7 @@
     },
     "packages/vue": {
       "name": "@fluxstack/live-vue",
-      "version": "0.7.0",
+      "version": "0.7.1",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
         "@fluxstack/live-client": "^0.7.0",
@@ -338,6 +342,8 @@
     "@fluxstack/live-redis": ["@fluxstack/live-redis@workspace:packages/redis"],
 
     "@fluxstack/live-vue": ["@fluxstack/live-vue@workspace:packages/vue"],
+
+    "@fluxstack/plugin-kit": ["@fluxstack/plugin-kit@workspace:packages/plugin-kit"],
 
     "@ioredis/commands": ["@ioredis/commands@1.5.1", "", {}, "sha512-JH8ZL/ywcJyR9MmJ5BNqZllXNZQqQbnVZOqpPQqE1vHiFgAw4NHbvE0FOduNU8IX9babitBT46571OnPTT0Zcw=="],
 

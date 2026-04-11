@@ -1,0 +1,46 @@
+{
+  "name": "@fluxstack/plugin-kit",
+  "version": "0.1.0",
+  "description": "Shared plugin system for FluxStack — types and runtime for authoring plugins, consumed by both the FluxStack app and external plugin packages",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "fluxstack",
+    "plugin",
+    "plugin-system",
+    "sdk",
+    "typescript"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/FluxStackCore/fluxstack-live",
+    "directory": "packages/plugin-kit"
+  },
+  "license": "MIT",
+  "author": "FluxStack Team",
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
