@@ -410,20 +410,46 @@ export class PluginRegistry {
   }
 
   /**
+   * Check if a package has a `fluxstack` block in its `package.json`.
+   *
+   * This is the **authoritative marker** that a package intends to be
+   * loadable as a FluxStack plugin. Without this block we can't validate
+   * hooks/category/tags, so we treat the package as a regular library
+   * that happens to share a name prefix with the plugin convention
+   * (e.g. `@fluxstack/plugin-crypto-auth` exports crypto helpers but
+   * has no `fluxstack` manifest, so it is NOT a plugin).
+   */
+  private hasFluxStackManifest(pluginDirPath: string): boolean {
+    const packageJsonPath = join(pluginDirPath, 'package.json')
+    if (!existsSync(packageJsonPath)) return false
+    try {
+      const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'))
+      return packageJson && typeof packageJson.fluxstack === 'object' && packageJson.fluxstack !== null
+    } catch {
+      return false
+    }
+  }
+
+  /**
    * Discover FluxStack plugins from `node_modules`.
    *
-   * Matches packages named:
-   * - `fluxstack-plugin-*`
-   * - `fplugin-*`
-   * - `@fluxstack/plugin-*`
-   * - `@fplugin/*`
-   * - `@org/fluxstack-plugin-*`
-   * - `@org/fplugin-*`
+   * A package is considered a plugin only if BOTH conditions hold:
+   *   1. Name matches a recognized pattern:
+   *      - `fluxstack-plugin-*` / `fplugin-*`
+   *      - `@fluxstack/plugin-*` / `@fplugin/*`
+   *      - `@org/fluxstack-plugin-*` / `@org/fplugin-*`
+   *   2. `package.json` has a `fluxstack` block (manifest).
    *
    * Excludes: `@fluxstack/plugin-kit` itself. plugin-kit is the
    * infrastructure library that powers this registry — not a plugin.
-   * It matches the `@fluxstack/plugin-*` pattern by accident, so it
-   * needs an explicit denylist entry.
+   * It matches the `@fluxstack/plugin-*` pattern by accident.
+   *
+   * Libraries that happen to share the plugin name prefix (e.g.
+   * `@fluxstack/plugin-crypto-auth` which is a collection of crypto
+   * helpers, not a pluggable hook-bearing Plugin) are SILENTLY
+   * ignored because they lack the manifest. This is intentional:
+   * silencing prevents scary "Failed to load plugin" errors for
+   * libraries that were never meant to be loaded as plugins.
    *
    * Respects `settings.discoverNpmPlugins` and `settings.allowedPlugins`.
    */
@@ -453,7 +479,7 @@ export class PluginRegistry {
             for (const scopedEntry of scopedEntries) {
               if (scopedEntry.isDirectory()) {
                 const packageName = `${entry.name}/${scopedEntry.name}`
-                let isFluxStackPlugin = false
+                let nameMatches = false
 
                 if (
                   entry.name === '@fluxstack' &&
@@ -461,16 +487,30 @@ export class PluginRegistry {
                   // plugin-kit is the lib itself, not a plugin — always exclude.
                   scopedEntry.name !== 'plugin-kit'
                 ) {
-                  isFluxStackPlugin = true
+                  nameMatches = true
                 } else if (entry.name === '@fplugin') {
-                  isFluxStackPlugin = true
+                  nameMatches = true
                 } else if (scopedEntry.name.startsWith('fluxstack-plugin-')) {
-                  isFluxStackPlugin = true
+                  nameMatches = true
                 } else if (scopedEntry.name.startsWith('fplugin-')) {
-                  isFluxStackPlugin = true
+                  nameMatches = true
                 }
 
-                if (isFluxStackPlugin) {
+                if (nameMatches) {
+                  const pluginPath = join(scopeDir, scopedEntry.name)
+
+                  // Name match alone is not enough — require a `fluxstack`
+                  // block in package.json. Libraries that share the name
+                  // prefix (e.g. crypto helpers published as
+                  // `@fluxstack/plugin-crypto-auth` but exporting pure
+                  // functions) are silently skipped here.
+                  if (!this.hasFluxStackManifest(pluginPath)) {
+                    this.logger?.debug(
+                      `Skipping '${packageName}': name matches plugin pattern but no fluxstack manifest — treating as library, not plugin`,
+                    )
+                    continue
+                  }
+
                   if (!this.isPluginAllowed(packageName, 'npm')) {
                     this.logger?.debug(`Skipping npm plugin (not in whitelist): ${packageName}`)
                     results.push({
@@ -480,9 +520,7 @@ export class PluginRegistry {
                     continue
                   }
 
-                  const pluginPath = join(scopeDir, scopedEntry.name)
                   this.logger?.debug(`Loading whitelisted npm plugin: ${packageName}`)
-
                   const result = await this.loadPlugin(pluginPath)
                   results.push(result)
                 }
@@ -492,6 +530,15 @@ export class PluginRegistry {
             entry.name.startsWith('fluxstack-plugin-') ||
             entry.name.startsWith('fplugin-')
           ) {
+            const pluginPath = join(nodeModulesDir, entry.name)
+
+            if (!this.hasFluxStackManifest(pluginPath)) {
+              this.logger?.debug(
+                `Skipping '${entry.name}': name matches plugin pattern but no fluxstack manifest — treating as library, not plugin`,
+              )
+              continue
+            }
+
             if (!this.isPluginAllowed(entry.name, 'npm')) {
               this.logger?.debug(`Skipping npm plugin (not in whitelist): ${entry.name}`)
               results.push({
@@ -501,9 +548,7 @@ export class PluginRegistry {
               continue
             }
 
-            const pluginPath = join(nodeModulesDir, entry.name)
             this.logger?.debug(`Loading whitelisted npm plugin: ${entry.name}`)
-
             const result = await this.loadPlugin(pluginPath)
             results.push(result)
           }
