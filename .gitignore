@@ -7,3 +7,6 @@ coverage/
 .env.local
 *.rar
 packages/*/bun.lock
+# npm auth tokens — never commit
+.npmrc
+packages/*/.npmrc
