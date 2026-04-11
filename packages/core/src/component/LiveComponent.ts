@@ -13,7 +13,7 @@ import { getLiveComponentContext } from './context'
 import type { GenericWebSocket } from '../transport/types'
 import type { LiveAuthContext, LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
-import type { BroadcastMessage, ComponentState, ServerRoomProxy } from '../protocol/messages'
+import type { BroadcastMessage, ComponentState, ServerRoomProxy, RoomEmitOptions } from '../protocol/messages'
 import type { LiveRoom, LiveRoomClass } from '../rooms/LiveRoom'
 
 // Managers
@@ -214,7 +214,13 @@ export abstract class LiveComponent<
       readonly id: string
       join: (payload?: any) => { rejected?: false } | { rejected: true; reason: string }
       leave: () => void
-      emit: R['emit']
+      // Issue #15: extract the room's TEvents map so the proxy emit keeps
+      // the typed event/data pair, then add the optional RoomEmitOptions
+      // third argument. Falling back to LiveRoom<any, any, any> keeps the
+      // generic path permissive for untyped room classes.
+      emit: R extends LiveRoom<any, any, infer E>
+        ? <K extends keyof E & string>(event: K, data: E[K], options?: RoomEmitOptions) => number
+        : (event: string, data: any, options?: RoomEmitOptions) => number
       on: <K extends string>(event: K, handler: (data: any) => void) => () => void
       setState: (updates: Partial<R['state']>) => void
       readonly memberCount: number

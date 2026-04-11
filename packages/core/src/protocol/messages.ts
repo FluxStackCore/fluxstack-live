@@ -157,12 +157,31 @@ export interface HybridComponentOptions {
 
 // ===== Server Room Handle =====
 
+/**
+ * Options for the proxy-side `emit()` call.
+ *
+ * By default, when a `LiveComponent` emits through `$room(...).emit()`, the
+ * calling component is excluded from receiving its own event. This matches
+ * "broadcast to everyone else" semantics and is the historical behaviour.
+ *
+ * Set `includeSelf: true` to also deliver the event to the caller's own
+ * `room.on()` handlers — useful when using an emit as a state-sync trigger
+ * that should rebuild the caller's local view as well.
+ *
+ * Note: this option only affects the proxy path. `LiveRoom.emit()` called
+ * from inside a room subclass method already delivers to every subscriber.
+ */
+export interface RoomEmitOptions {
+  /** When true, the calling component also receives the event. Default: false. */
+  includeSelf?: boolean
+}
+
 export interface ServerRoomHandle<TState = any, TEvents extends Record<string, any> = Record<string, any>> {
   readonly id: string
   readonly state: TState
   join: (initialState?: TState) => void
   leave: () => void
-  emit: <K extends keyof TEvents>(event: K, data: TEvents[K]) => number
+  emit: <K extends keyof TEvents>(event: K, data: TEvents[K], options?: RoomEmitOptions) => number
   on: <K extends keyof TEvents>(event: K, handler: (data: TEvents[K]) => void) => () => void
   setState: (updates: Partial<TState>) => void
 }
@@ -173,7 +192,7 @@ export interface ServerRoomProxy<TState = any, TEvents extends Record<string, an
   readonly state: TState
   join: (initialState?: TState) => void
   leave: () => void
-  emit: <K extends keyof TEvents>(event: K, data: TEvents[K]) => number
+  emit: <K extends keyof TEvents>(event: K, data: TEvents[K], options?: RoomEmitOptions) => number
   on: <K extends keyof TEvents>(event: K, handler: (data: TEvents[K]) => void) => () => void
   setState: (updates: Partial<TState>) => void
 }

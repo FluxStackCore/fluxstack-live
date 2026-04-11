@@ -151,8 +151,13 @@ export class ComponentRoomProxy {
           // onRoomLeave hook is called from LiveComponent
         },
 
-        emit: (event: string, data: any): number => {
-          return self.ctx.roomManager.emitToRoom(roomId, event, data, self.componentId)
+        emit: (event: string, data: any, options?: { includeSelf?: boolean }): number => {
+          // Issue #15: by default exclude the caller so `room.emit` means
+          // "broadcast to everyone else", matching the historical behaviour.
+          // Callers that want their own `room.on` handler to fire too
+          // (e.g. a state-rebuild trigger) can opt in via { includeSelf: true }.
+          const excludeId = options?.includeSelf ? undefined : self.componentId
+          return self.ctx.roomManager.emitToRoom(roomId, event, data, excludeId)
         },
 
         on: (event: string, handler: (data: any) => void): (() => void) => {
@@ -207,9 +212,9 @@ export class ComponentRoomProxy {
         }
       },
       emit: {
-        value: (event: string, data: any) => {
+        value: (event: string, data: any, options?: { includeSelf?: boolean }) => {
           if (!defaultHandle) throw new Error('No default room set')
-          return defaultHandle.emit(event, data)
+          return (defaultHandle as any).emit(event, data, options)
         }
       },
       on: {
@@ -319,9 +324,12 @@ export class ComponentRoomProxy {
         await self.ctx.roomManager.leaveRoom(self.componentId, roomId, 'leave')
       },
 
-      emit: ((event: string, data: any): number => {
-        return self.ctx.roomManager.emitToRoom(roomId, event, data, self.componentId)
-      }) as R['emit'],
+      emit: ((event: string, data: any, options?: { includeSelf?: boolean }): number => {
+        // Issue #15: see the untyped handle above for rationale. The default
+        // still excludes the caller; pass `{ includeSelf: true }` to opt in.
+        const excludeId = options?.includeSelf ? undefined : self.componentId
+        return self.ctx.roomManager.emitToRoom(roomId, event, data, excludeId)
+      }) as any,
 
       on: (event: string, handler: (data: any) => void): (() => void) => {
         const unsubscribe = self.ctx.roomEvents.on(
