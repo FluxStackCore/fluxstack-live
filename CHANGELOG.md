@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the `0.x` convention where minor bumps may include breaking changes.
 
+## [0.7.1] - 2026-04-11
+
+Three follow-up bug fixes that surfaced after 0.7.0. No API breaks — a
+pure patch release.
+
+### Fixed
+
+- **`$room(X, id).emit(event, data)` silently dropped events on the
+  caller's own `room.on` handlers** (#15). The proxy emit hardcoded
+  `excludeComponentId = self.componentId`, while `this.emit(...)` from
+  inside a `LiveRoom` subclass passed no exclusion — an undocumented
+  asymmetry that surprised users expecting `emit` to mean "deliver to
+  every subscriber". Fix adds a third `options` argument:
+  `emit(event, data, { includeSelf: true })`. Default stays exclude-self
+  for backward compatibility; explicit opt-in restores
+  deliver-to-everyone semantics. `ComponentRoomProxy.ts`.
+- **`setState({ x: room.state.x })` could silently skip the next delta**
+  (#13). `computeDeepDiff` uses `oldVal === newVal` as a fast-path,
+  which is only sound if the framework owns the previous state
+  exclusively. When a component mirrored a room ref via `setState`, the
+  component's `_state` ended up aliased with a ref the room also held;
+  when the room later mutated that ref in-place via `deepAssign`, the
+  component's "previous" state was updated too, and the next diff
+  short-circuited — no `STATE_DELTA` emitted, client never saw the
+  change. Fix moves ownership to the assignment boundary:
+  `deepAssignImpl` now `structuredClone`s a plain object when there is
+  no plain-object counterpart in the target, so refs cannot leak into
+  `_state`. `utils/deepDiff.ts`.
+- **Binary protocol fail-loud pass** (#7). Ten latent bugs in the
+  binary/JSON transport surface, all flagged by a preventive bug-hunt
+  suite. Common pattern: silent data loss from `u8` length prefixes
+  wrapping without validation, empty `catch` blocks, silent fallbacks
+  in the msgpack encoder/decoder, and missing telemetry for drop paths.
+  Framework now rejects `componentId > 255 bytes` loudly instead of
+  corrupting wire frames, fails the codec strictly on decode errors
+  instead of returning a partial result, and emits telemetry on every
+  drop path. `ComponentStateManager.ts`, `protocol/*`.
+
 ## [0.7.0] - 2026-04-10
 
 Six issues closed (#2–#7) across security, lifecycle, state semantics,

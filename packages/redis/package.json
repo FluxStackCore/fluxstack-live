@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-redis",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "Redis adapters for @fluxstack/live — cluster singleton coordination, action forwarding, failover recovery, and cross-instance room pub/sub",
   "type": "module",
   "main": "./dist/index.cjs",
