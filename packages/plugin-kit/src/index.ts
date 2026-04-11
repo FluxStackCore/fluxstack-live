@@ -20,7 +20,10 @@
  * ```
  */
 
-export const VERSION = '0.2.0'
+export const VERSION = '0.3.0'
 
 // Re-export every public type from the types barrel.
 export * from './types'
+
+// Re-export runtime (classes + helper functions) from the runtime barrel.
+export * from './runtime'
