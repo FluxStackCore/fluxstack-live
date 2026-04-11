@@ -365,3 +365,252 @@ describe('documented limitation: Date values are reference-compared', () => {
     expect(extractDeltas(ws).length).toBe(1)
   })
 })
+
+// ==========================================================================
+// fixes #13 — setState must not silently drop updates when the "next" values
+// share references with a "previous" state that has been mutated through an
+// external alias (e.g. a LiveRoom whose state is mirrored into a component).
+//
+// Root cause: computeDeepDiff(prev, next) uses `prev === next` as a fast-path.
+// That is only correct when the framework OWNS the previous state. The moment
+// a caller does `component.setState({ players: { ...room.state.players } })`,
+// the component's internal `_state.players[id]` and the room's
+// `room.state.players[id]` become the SAME reference. If the room then
+// mutates that player in-place (which LiveRoomManager does via deepAssign),
+// the component's "previous" state is silently updated too — so the next
+// `setState` with the "new" snapshot compares `oldVal === newVal` and emits
+// no delta. The client never sees the change.
+//
+// The fix must make setState honest: the previous-state snapshot used by
+// the diff must reflect what the CLIENT last saw, not whatever the aliased
+// object currently holds.
+// ==========================================================================
+describe('fixes #13: setState survives external mutation of aliased refs', () => {
+  it('emits a delta for a player that was mutated through a shared reference', async () => {
+    type Player = { name: string; ready: boolean; score: number }
+    type S = { players: Record<string, Player>; hostId: string }
+    class Game extends LiveComponent<S> {
+      static componentName = 'Issue13GameComponent'
+      static publicActions = [] as const
+      static defaultState: S = { players: {}, hostId: '' }
+    }
+
+    const ws = createMockWs()
+    const comp = new Game({}, ws)
+
+    // Simulates a LiveRoom that owns the source of truth. The component
+    // mirrors this map into its own state. Exactly the pattern the issue
+    // describes: same JS references, no defensive clone.
+    const roomPlayers: Record<string, Player> = {
+      A: { name: 'Alice', ready: false, score: 0 },
+      B: { name: 'Bob', ready: false, score: 0 },
+    }
+
+    // First mirror: component takes a spread of the room container. The
+    // inner Player objects are still shared with `roomPlayers`.
+    comp.setState({ players: { ...roomPlayers }, hostId: 'A' })
+    await flush()
+
+    // Baseline: the client saw the initial mirror.
+    let deltas = extractDeltas(ws)
+    expect(deltas.length).toBe(1)
+    expect(deltas[0]).toEqual({
+      players: {
+        A: { name: 'Alice', ready: false, score: 0 },
+        B: { name: 'Bob', ready: false, score: 0 },
+      },
+      hostId: 'A',
+    })
+    ;(ws.send as any).mockClear()
+
+    // ---- the bug trigger ----
+    // The "room" mutates player A in-place. This is what LiveRoomManager
+    // does via deepAssign: it does NOT replace `roomPlayers.A` with a new
+    // object, it mutates the existing one. Because the component's
+    // `_state.players.A` is the SAME reference, `_state` now silently
+    // reflects `ready: true` — without any delta having been emitted.
+    roomPlayers.A.ready = true
+
+    // The component re-mirrors. This is the documented sync pattern:
+    //   this.setState({ players: { ...room.state.players } })
+    comp.setState({ players: { ...roomPlayers } })
+    await flush()
+
+    deltas = extractDeltas(ws)
+
+    // Before the fix: 0 deltas (diff short-circuits on oldVal === newVal).
+    // After the fix: exactly one delta carrying the ready=true change.
+    expect(deltas.length).toBe(1)
+    expect(deltas[0]).toEqual({ players: { A: { ready: true } } })
+  })
+
+  it('emits a delta when a nested primitive is mutated through an alias', async () => {
+    // Minimal isolation of the bug: a single nested object mutated in-place
+    // between two setState calls. No Record, no room, just aliasing.
+    type S = { config: { volume: number; muted: boolean } }
+    class C extends LiveComponent<S> {
+      static componentName = 'Issue13AliasComponent'
+      static publicActions = [] as const
+      static defaultState: S = { config: { volume: 50, muted: false } }
+    }
+
+    const ws = createMockWs()
+    const comp = new C({}, ws)
+
+    const externalConfig = { volume: 50, muted: false }
+    comp.setState({ config: externalConfig })
+    await flush()
+    ;(ws.send as any).mockClear()
+
+    // Mutate through the alias — component's _state.config is the same ref.
+    externalConfig.muted = true
+
+    // Re-sync with the same reference.
+    comp.setState({ config: externalConfig })
+    await flush()
+
+    const deltas = extractDeltas(ws)
+    expect(deltas.length).toBe(1)
+    expect(deltas[0]).toEqual({ config: { muted: true } })
+  })
+
+  it('does not emit spurious deltas when nothing changed (regression guard)', async () => {
+    // The fix must still be a no-op when the state is genuinely unchanged.
+    type S = { config: { volume: number } }
+    class C extends LiveComponent<S> {
+      static componentName = 'Issue13NoopComponent'
+      static publicActions = [] as const
+      static defaultState: S = { config: { volume: 50 } }
+    }
+
+    const ws = createMockWs()
+    const comp = new C({}, ws)
+
+    comp.setState({ config: { volume: 50 } })
+    await flush()
+
+    expect(extractDeltas(ws).length).toBe(0)
+  })
+})
+
+// ==========================================================================
+// fixes #13 — end-to-end against a real LiveRoomManager.
+//
+// The isolated tests above use a plain object to stand in for LiveRoom state.
+// This suite wires up a genuine LiveRoomManager + LiveRoom subclass and walks
+// through the exact sequence the issue author described:
+//   1) Component mirrors room.state into its own state via setState.
+//   2) Room mutates a player via setRoomState — deepAssign mutates in place.
+//   3) Component re-mirrors room.state.
+// Before the fix, step 3 emitted no delta because the component's _state was
+// aliased with room.state's internals. After the fix, _state is structurally
+// independent and the re-mirror produces a correct delta.
+// ==========================================================================
+
+// Don't mock the WS batcher here — we want the full setState → emit path.
+// Also avoid colliding with global LiveLogger noise; it's silent by default
+// for these componentNames anyway.
+
+describe('fixes #13: end-to-end LiveRoomManager ↔ LiveComponent', () => {
+  // Dynamically import the manager/room/registry so the mocked modules above
+  // (WsSendBatcher, LiveLogger) don't interfere with this suite's path.
+  it('component re-sync emits a delta after the room mutates a shared player', async () => {
+    const { LiveRoomManager } = await import('../../rooms/LiveRoomManager')
+    const { LiveRoom } = await import('../../rooms/LiveRoom')
+    const { RoomRegistry } = await import('../../rooms/RoomRegistry')
+    const { RoomEventBus } = await import('../../rooms/RoomEventBus')
+
+    type Player = { name: string; ready: boolean; score: number }
+    type RoomState = { players: Record<string, Player>; hostId: string }
+
+    class KartRaceRoom extends LiveRoom<RoomState> {
+      static roomName = 'kart'
+      static defaultState: RoomState = {
+        players: {
+          A: { name: 'Alice', ready: false, score: 0 },
+          B: { name: 'Bob', ready: false, score: 0 },
+        },
+        hostId: 'A',
+      }
+    }
+
+    const roomEvents = new RoomEventBus()
+    const manager = new LiveRoomManager(roomEvents)
+    const registry = new RoomRegistry()
+    registry.register(KartRaceRoom as any)
+    manager.roomRegistry = registry
+
+    // Joining the room materializes the room instance with defaultState.
+    const ws1 = createMockWs()
+    const joinResult = await manager.joinRoom('comp-1', 'kart:race-1', ws1 as any)
+    expect('rejected' in joinResult && joinResult.rejected).toBeFalsy()
+
+    // Component mirrors room state into its own state. This is the documented
+    // sync pattern from the issue.
+    type CompState = { players: Record<string, Player>; hostId: string }
+    class KartGame extends LiveComponent<CompState> {
+      static componentName = 'Issue13E2EKartGame'
+      static publicActions = [] as const
+      static defaultState: CompState = { players: {}, hostId: '' }
+    }
+    const ws2 = createMockWs()
+    const comp = new KartGame({}, ws2)
+
+    const roomState = manager.getRoomState<RoomState>('kart:race-1')
+    comp.setState({
+      players: { ...roomState.players },
+      hostId: roomState.hostId,
+    })
+    await flush()
+
+    // Baseline: initial mirror landed on the wire.
+    let deltas = extractDeltas(ws2)
+    expect(deltas.length).toBe(1)
+    expect(deltas[0]).toEqual({
+      players: {
+        A: { name: 'Alice', ready: false, score: 0 },
+        B: { name: 'Bob', ready: false, score: 0 },
+      },
+      hostId: 'A',
+    })
+    ;(ws2.send as any).mockClear()
+
+    // Room mutates player A: sets ready = true. LiveRoomManager.setRoomState
+    // computes a delta and calls deepAssign(room.state, delta), which
+    // recursively mutates the existing players.A object in place — keeping
+    // the same reference. That is the ownership overlap the issue describes.
+    manager.setRoomState('kart:race-1', {
+      players: {
+        A: { name: 'Alice', ready: true, score: 0 },
+        B: { name: 'Bob', ready: false, score: 0 },
+      },
+    })
+
+    // Sanity: the room's own state reflects the change.
+    const roomStateAfter = manager.getRoomState<RoomState>('kart:race-1')
+    expect(roomStateAfter.players.A.ready).toBe(true)
+
+    // Component re-mirrors. Before the fix, comp._state.players.A was the
+    // same reference as room.state.players.A, and deepAssign on the previous
+    // setState mutated it in place via the room's own update — so the diff
+    // sees oldVal === newVal and emits nothing.
+    comp.setState({
+      players: { ...roomStateAfter.players },
+      hostId: roomStateAfter.hostId,
+    })
+    await flush()
+
+    deltas = extractDeltas(ws2)
+    expect(deltas.length).toBe(1)
+    // Only A.ready should be in the delta. B is unchanged, hostId is unchanged.
+    expect(deltas[0]).toEqual({ players: { A: { ready: true } } })
+
+    // And the component's own serialized state must reflect the change.
+    const compState = comp.getSerializableState() as CompState
+    expect(compState.players.A.ready).toBe(true)
+    expect(compState.players.B.ready).toBe(false)
+
+    // Clean up the room to avoid test pollution.
+    await manager.cleanupComponent('comp-1')
+  })
+})

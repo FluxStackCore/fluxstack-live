@@ -103,6 +103,16 @@ export function computeDeepDiff(
  *   serialization strips `undefined`, so accepting it on the server would
  *   leave the two sides out of sync.
  *
+ * Ownership (fixes #13):
+ * - Plain objects assigned into `target` are deep-cloned via `structuredClone`
+ *   instead of being aliased in by reference. This preserves the invariant
+ *   that `computeDeepDiff` relies on: the "previous" state held by the
+ *   framework is owned exclusively by the framework and cannot be mutated
+ *   from outside. Without this, mirroring shared data (e.g. `LiveRoom.state`)
+ *   into a component via `setState({ x: room.state.x })` would cause the
+ *   next diff to short-circuit on `oldVal === newVal` and silently drop
+ *   legitimate updates.
+ *
  * Safe against circular references (tracked via `seen` Set).
  */
 export function deepAssign(target: any, source: any, seen?: Set<object>): void {
@@ -133,7 +143,17 @@ function deepAssignImpl(target: any, source: any, depth: number, seen?: Set<obje
     }
     if (isPlainObject(target[key]) && isPlainObject(value)) {
       deepAssignImpl(target[key], value, depth + 1, seen)
+    } else if (isPlainObject(value)) {
+      // The source holds a plain object that the caller may still mutate
+      // (e.g. a slice of LiveRoom state mirrored into a component). Store
+      // a structural clone so the framework owns its copy. This is what
+      // fixes issue #13: subsequent diffs will not be fooled by external
+      // in-place mutations of the original object.
+      target[key] = structuredClone(value)
     } else {
+      // Primitives, arrays, and other non-plain values: keep the existing
+      // reference-assign behaviour. Arrays are intentionally compared by
+      // reference everywhere in this module (see computeDeepDiff docs).
       target[key] = value
     }
   }
