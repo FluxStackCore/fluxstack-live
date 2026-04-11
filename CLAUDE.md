@@ -1,4 +1,10 @@
-# @fluxstack/live - Development Rules
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Workspace Context
+
+This repo is part of the `FLUX-STACK/` workspace. The parent `../CLAUDE.md` imposes a mandatory `.ai-notes/` shared knowledge base — consult it before starting work and record findings/decisions/bugs there. Additional context files at the repo root: `llms.txt`, `llms-full.txt`, `PERFORMANCE-ISSUES.md`, `CHANGELOG.md`.
 
 ## Build Rules
 
@@ -13,10 +19,25 @@ The FluxStack app (`../FluxStack`) resolves `@fluxstack/live-*` packages via `no
 bun run build:core       # packages/core
 bun run build:client     # packages/client
 bun run build:react      # packages/react
-bun run build:adapters   # packages/elysia, express, fastify (parallel)
+bun run build:adapters   # packages/elysia, express, fastify (parallel via &)
 
 # Rebuild everything
 bun run build            # core -> adapters -> client -> react (sequential)
+```
+
+**`vue` and `redis` have NO dedicated build script** in the root `package.json` and are NOT included in `bun run build`. If you modify them, build manually:
+
+```bash
+cd packages/vue && bunx tsup
+cd packages/redis && bunx tsup
+```
+
+**Windows gotcha:** `bun run build:adapters` uses POSIX `&` (background) and fails on Windows cmd/PowerShell. Run the three adapter builds sequentially instead:
+
+```bash
+cd packages/elysia && bunx tsup
+cd packages/express && bunx tsup
+cd packages/fastify && bunx tsup
 ```
 
 ### When to Rebuild
@@ -38,6 +59,8 @@ bun run build            # core -> adapters -> client -> react (sequential)
 
 ## Architecture
 
+Monorepo workspaces: `packages/*` and `examples/*`.
+
 - `packages/core` — Framework-agnostic core (LiveServer, ComponentRegistry, StateSignature, rooms, auth, cluster)
 - `packages/elysia` — Elysia.js transport adapter (thin wrapper, no security logic)
 - `packages/express` — Express transport adapter
@@ -46,6 +69,19 @@ bun run build            # core -> adapters -> client -> react (sequential)
 - `packages/react` — React hooks and providers (LiveComponentsProvider, Live.use())
 - `packages/vue` — Vue 3 composables (provideLiveConnection, useLive)
 - `packages/redis` — Redis adapters (RedisRoomAdapter for room pub/sub, RedisClusterAdapter for singleton coordination)
+
+### Core Concepts
+
+- **LiveComponent** — Server class with reactive state synced to clients. Three levels of state:
+  - `this.state` — client reads AND writes (bidirectional via actions)
+  - `this.$private` — server-only, never sent to client
+  - `this.$auth` — set by framework, read-only, frozen
+- **LiveRoom** — Typed room (`LiveRoom<TState, TEvents, TMeta>`) with shared state and events; binary msgpack codec by default.
+- **Singletons** — `static singleton = true` — one instance shared by all clients. Cluster adapter coordinates singletons across server instances.
+- **Auto-discovery** — `componentsPath` option on `LiveServer` scans a directory via dynamic `import()` and generates `auto-generated-components.ts`. On first run, start the server without the import; then add `import { liveComponentClasses } from './components/auto-generated-components'` and pass `components: liveComponentClasses` alongside `componentsPath`. Reason: dev uses dynamic discovery; prod bundlers (e.g. `bun build`) need a static import chain or components end up stripped.
+- **Binary frame types** (wire protocol, useful for debugging):
+  - `0x02` — Room event broadcast
+  - `0x03` — Room state delta (deep diff, msgpack encoded)
 
 ### Security Architecture
 
@@ -81,12 +117,28 @@ Flow:
 ## Testing
 
 ```bash
-# Run all tests
-bunx vitest run
+# Run all tests (uses vitest.workspace.ts: every package + __tests__)
+bun run test:run         # one-shot
+bun run test             # watch mode
+bunx vitest run          # equivalent to test:run
 
-# Type check
+# Run a single test file
+bunx vitest run packages/core/src/__tests__/StateSignature.test.ts
+
+# Run tests by name pattern
+bunx vitest run -t "deepDiff removes keys"
+
+# Run only one workspace project
+bunx vitest run --project core
+bunx vitest run --project integration
+
+# Type check (root script = tsc --noEmit across the repo)
+bun run lint
+# Or per-package
 bunx tsc -p packages/core/tsconfig.json --noEmit
 ```
+
+The root `vitest.workspace.ts` aggregates: `core`, `redis`, `elysia`, `express`, `fastify`, `client`, `react`, and the top-level `__tests__/` (integration). `packages/vue` is NOT in the workspace.
 
 ### Cluster Integration Tests
 
@@ -97,6 +149,15 @@ docker run -d --name fluxstack-test-redis -p 16379:6379 redis:7-alpine
 ```
 
 Tests are in `__tests__/integration/cluster-sync.test.ts` (monorepo root) and run automatically with the rest of the suite (they skip gracefully if Redis is unavailable).
+
+## Other Scripts
+
+```bash
+bun run load-test        # node scripts/load-test.mjs
+bun run publish:dry      # bash scripts/publish.sh
+bun run publish:npm      # bash scripts/publish.sh --publish
+bun run clean            # rm -rf packages/*/dist node_modules
+```
 
 ## Conventions
 
