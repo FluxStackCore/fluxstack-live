@@ -13,11 +13,14 @@
  *
  * export const myPlugin: Plugin = {
  *   name: 'my-plugin',
- *   setup: async (ctx: PluginContext) => {
+ *   setup: async (ctx) => {
  *     ctx.logger.info('Plugin ready')
  *   }
  * }
  * ```
  */
 
-export const VERSION = '0.1.0'
+export const VERSION = '0.2.0'
+
+// Re-export every public type from the types barrel.
+export * from './types'
