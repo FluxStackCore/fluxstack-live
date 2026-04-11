@@ -420,6 +420,11 @@ export class PluginRegistry {
    * - `@org/fluxstack-plugin-*`
    * - `@org/fplugin-*`
    *
+   * Excludes: `@fluxstack/plugin-kit` itself. plugin-kit is the
+   * infrastructure library that powers this registry — not a plugin.
+   * It matches the `@fluxstack/plugin-*` pattern by accident, so it
+   * needs an explicit denylist entry.
+   *
    * Respects `settings.discoverNpmPlugins` and `settings.allowedPlugins`.
    */
   async discoverNpmPlugins(): Promise<PluginLoadResult[]> {
@@ -450,7 +455,12 @@ export class PluginRegistry {
                 const packageName = `${entry.name}/${scopedEntry.name}`
                 let isFluxStackPlugin = false
 
-                if (entry.name === '@fluxstack' && scopedEntry.name.startsWith('plugin-')) {
+                if (
+                  entry.name === '@fluxstack' &&
+                  scopedEntry.name.startsWith('plugin-') &&
+                  // plugin-kit is the lib itself, not a plugin — always exclude.
+                  scopedEntry.name !== 'plugin-kit'
+                ) {
                   isFluxStackPlugin = true
                 } else if (entry.name === '@fplugin') {
                   isFluxStackPlugin = true
