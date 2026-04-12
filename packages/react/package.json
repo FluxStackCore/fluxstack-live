@@ -13,6 +13,12 @@
       "bun": "./src/index.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
+    },
+    "./ssr": {
+      "types": "./dist/SSRLiveProvider.d.ts",
+      "bun": "./src/SSRLiveProvider.tsx",
+      "import": "./dist/SSRLiveProvider.js",
+      "require": "./dist/SSRLiveProvider.cjs"
     }
   },
   "files": [

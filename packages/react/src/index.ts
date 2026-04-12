@@ -10,6 +10,9 @@ export type {
   LiveComponentsProviderProps,
 } from './LiveComponentsProvider'
 
+// SSR-safe Provider (drop-in replacement for SSR apps)
+export { SSRLiveProvider, useSSRLiveComponents } from './SSRLiveProvider'
+
 // Live.use() API
 export { Live } from './components/Live'
 
