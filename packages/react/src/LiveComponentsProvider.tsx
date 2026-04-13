@@ -1,9 +1,9 @@
 // @fluxstack/live-react - LiveComponentsProvider
 //
 // React context provider wrapping LiveConnection for use by hooks.
+// SSR-safe: connection is created in useEffect (client-only), not during render.
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
-import { LiveConnection } from '@fluxstack/live-client'
 import type { LiveAuthOptions, LiveConnectionOptions, LiveClientAuth } from '@fluxstack/live-client'
 import type { WebSocketMessage, WebSocketResponse } from '@fluxstack/live'
 
@@ -44,7 +44,7 @@ export function LiveComponentsProvider({
   heartbeatInterval = 30000,
   debug = false,
 }: LiveComponentsProviderProps) {
-  const connectionRef = useRef<LiveConnection | null>(null)
+  const connectionRef = useRef<import('@fluxstack/live-client').LiveConnection | null>(null)
 
   const [connected, setConnected] = useState(false)
   const [connecting, setConnecting] = useState(false)
@@ -53,83 +53,107 @@ export function LiveComponentsProvider({
   const [authenticated, setAuthenticated] = useState(false)
   const [$auth, set$auth] = useState<LiveClientAuth>({ authenticated: false, session: null })
 
-  // Create connection once
-  if (!connectionRef.current) {
-    connectionRef.current = new LiveConnection({
-      url,
-      auth,
-      autoConnect: false, // We manage auto-connect via useEffect
-      reconnectInterval,
-      maxReconnectAttempts,
-      heartbeatInterval,
-      debug,
-    })
-  }
-
-  const conn = connectionRef.current
-
-  // Subscribe to state changes
+  // Create connection in useEffect — SSR-safe (useEffect is skipped on the server)
   useEffect(() => {
-    const unsub = conn.onStateChange((state) => {
-      setConnected(state.connected)
-      setConnecting(state.connecting)
-      setError(state.error)
-      setConnectionId(state.connectionId)
-      setAuthenticated(state.authenticated)
-      set$auth(state.auth)
-    })
+    // Dynamic import to avoid loading LiveConnection module at SSR import time
+    import('@fluxstack/live-client').then(({ LiveConnection }) => {
+      const conn = new LiveConnection({
+        url,
+        auth,
+        autoConnect: false,
+        reconnectInterval,
+        maxReconnectAttempts,
+        heartbeatInterval,
+        debug,
+      })
 
-    if (autoConnect) {
-      conn.connect()
-    }
+      connectionRef.current = conn
+
+      const unsub = conn.onStateChange((state) => {
+        setConnected(state.connected)
+        setConnecting(state.connecting)
+        setError(state.error)
+        setConnectionId(state.connectionId)
+        setAuthenticated(state.authenticated)
+        set$auth(state.auth)
+      })
+
+      if (autoConnect) {
+        conn.connect()
+      }
+
+      // Cleanup stored for unmount
+      ;(connectionRef as any).__unsub = unsub
+    })
 
     return () => {
-      unsub()
-      // In StrictMode, React mounts/unmounts twice. Use disconnect() instead
-      // of destroy() so the connection can be reused on the second mount.
-      conn.disconnect()
+      const unsub = (connectionRef as any).__unsub
+      if (unsub) unsub()
+      if (connectionRef.current) {
+        connectionRef.current.disconnect()
+      }
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Helper to get current connection (may be null during SSR or before useEffect runs)
+  const getConn = () => connectionRef.current
+
   const sendMessage = useCallback(async (message: WebSocketMessage) => {
+    const conn = getConn()
+    if (!conn) throw new Error('Not connected')
     return conn.sendMessage(message)
-  }, [conn])
+  }, [])
 
   const sendMessageAndWait = useCallback(async (message: WebSocketMessage, timeout?: number) => {
+    const conn = getConn()
+    if (!conn) throw new Error('Not connected')
     return conn.sendMessageAndWait(message, timeout)
-  }, [conn])
+  }, [])
 
   const sendBinaryAndWait = useCallback(async (data: ArrayBuffer, requestId: string, timeout?: number) => {
+    const conn = getConn()
+    if (!conn) throw new Error('Not connected')
     return conn.sendBinaryAndWait(data, requestId, timeout)
-  }, [conn])
+  }, [])
 
   const registerComponent = useCallback((componentId: string, callback: (message: WebSocketResponse) => void) => {
+    const conn = getConn()
+    if (!conn) return () => {}
     return conn.registerComponent(componentId, callback)
-  }, [conn])
+  }, [])
 
   const registerBinaryHandler = useCallback((componentId: string, callback: (payload: Uint8Array) => void) => {
+    const conn = getConn()
+    if (!conn) return () => {}
     return conn.registerBinaryHandler(componentId, callback)
-  }, [conn])
+  }, [])
 
   const registerRoomBinaryHandler = useCallback((callback: (frame: Uint8Array) => void) => {
+    const conn = getConn()
+    if (!conn) return () => {}
     return conn.registerRoomBinaryHandler(callback)
-  }, [conn])
+  }, [])
 
   const unregisterComponent = useCallback((componentId: string) => {
-    conn.unregisterComponent(componentId)
-  }, [conn])
+    const conn = getConn()
+    if (conn) conn.unregisterComponent(componentId)
+  }, [])
 
   const reconnect = useCallback(() => {
-    conn.reconnect()
-  }, [conn])
+    const conn = getConn()
+    if (conn) conn.reconnect()
+  }, [])
 
   const authenticate = useCallback(async (credentials: LiveAuthOptions) => {
+    const conn = getConn()
+    if (!conn) return false
     return conn.authenticate(credentials)
-  }, [conn])
+  }, [])
 
   const getWebSocket = useCallback(() => {
-    return conn.getWebSocket()
-  }, [conn])
+    const conn = getConn()
+    return conn?.getWebSocket() ?? null
+  }, [])
 
   const value: LiveComponentsContextValue = {
     connected,

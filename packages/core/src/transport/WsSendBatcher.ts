@@ -245,6 +245,29 @@ function flushOne(ws: GenericWebSocket): void {
   }
 }
 
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v)
+    && Object.getPrototypeOf(v) === Object.prototype
+}
+
+/**
+ * Deep-merge two delta objects. Plain objects are merged recursively;
+ * all other values (primitives, arrays, class instances) use last-write-wins.
+ *
+ * Fixes #22: the previous shallow spread `{ ...a, ...b }` would overwrite an
+ * entire nested object (e.g. `players`) when both deltas touched the same key,
+ * silently dropping updates from the first delta.
+ */
+function mergeDeltas(a: Record<string, unknown>, b: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...a }
+  for (const key of Object.keys(b)) {
+    result[key] = isPlainObject(a[key]) && isPlainObject(b[key])
+      ? mergeDeltas(a[key], b[key])
+      : b[key]
+  }
+  return result
+}
+
 /**
  * Merge STATE_DELTA messages for the same componentId.
  * Other message types are preserved as-is.
@@ -258,10 +281,10 @@ function deduplicateDeltas(messages: PendingMessage[]): PendingMessage[] {
     if (msg.type === 'STATE_DELTA' && msg.componentId && msg.payload?.delta) {
       const existing = deltaIndices.get(msg.componentId)
       if (existing !== undefined) {
-        // Merge delta into existing message
+        // Deep-merge delta into existing message (fixes #22: shallow spread dropped nested keys)
         const target = result[existing]
         target.payload = {
-          delta: { ...target.payload.delta, ...msg.payload.delta }
+          delta: mergeDeltas(target.payload.delta, msg.payload.delta)
         }
         target.timestamp = msg.timestamp // use latest timestamp
       } else {
