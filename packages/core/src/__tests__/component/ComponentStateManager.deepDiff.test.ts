@@ -270,4 +270,76 @@ describe('ComponentStateManager deepDiff', () => {
       expect(deltas.length).toBe(0)
     })
   })
+
+  // ===== Shared Reference Warning (issue #19) =====
+  //
+  // When setState receives a patch where a plain-object value is the SAME
+  // reference as the current state value, deepDiff will short-circuit and
+  // the update will be silently dropped — a common footgun when doing
+  // shallow clones of room state.
+  //
+  // In dev mode (NODE_ENV !== 'production') a warning should be emitted
+  // via liveWarn so the developer notices immediately.
+
+  describe('shared-reference warning (issue #19)', () => {
+    it('warns when patch contains a plain object that is the same reference as current state', async () => {
+      const logger = await import('../../debug/LiveLogger')
+      const warnSpy = vi.spyOn(logger, 'liveWarn').mockImplementation(() => {})
+
+      const ws = createMockWs()
+      const comp = new DeepDiffComponent({}, ws)
+
+      // Grab the SAME reference that's inside state
+      const sharedScores = (comp as any)._stateManager._state.scores
+      comp.setState({ scores: sharedScores })
+      await flush()
+
+      const sharedRefCalls = warnSpy.mock.calls.filter(
+        ([,, msg]) => /shared.*reference|same.*reference|shallow.*clone/i.test(msg ?? '')
+      )
+      expect(sharedRefCalls.length).toBeGreaterThan(0)
+      warnSpy.mockRestore()
+    })
+
+    it('does NOT warn when patch contains a new object (correct usage)', async () => {
+      const logger = await import('../../debug/LiveLogger')
+      const warnSpy = vi.spyOn(logger, 'liveWarn').mockImplementation(() => {})
+
+      const ws = createMockWs()
+      const comp = new DeepDiffComponent({}, ws)
+
+      // New object — correct immutable pattern
+      comp.setState({ scores: { red: 1, blue: 2 } })
+      await flush()
+
+      const sharedRefCalls = warnSpy.mock.calls.filter(
+        ([,, msg]) => /shared.*reference|same.*reference|shallow.*clone/i.test(msg ?? '')
+      )
+      expect(sharedRefCalls).toHaveLength(0)
+      warnSpy.mockRestore()
+    })
+
+    it('does NOT warn in production mode', async () => {
+      const originalEnv = process.env.NODE_ENV
+      process.env.NODE_ENV = 'production'
+
+      const logger = await import('../../debug/LiveLogger')
+      const warnSpy = vi.spyOn(logger, 'liveWarn').mockImplementation(() => {})
+
+      const ws = createMockWs()
+      const comp = new DeepDiffComponent({}, ws)
+
+      const sharedScores = (comp as any)._stateManager._state.scores
+      comp.setState({ scores: sharedScores })
+      await flush()
+
+      const sharedRefCalls = warnSpy.mock.calls.filter(
+        ([,, msg]) => /shared.*reference|same.*reference|shallow.*clone/i.test(msg ?? '')
+      )
+      expect(sharedRefCalls).toHaveLength(0)
+
+      warnSpy.mockRestore()
+      process.env.NODE_ENV = originalEnv
+    })
+  })
 })
