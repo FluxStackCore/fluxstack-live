@@ -19,6 +19,7 @@ vi.mock('../../debug/LiveLogger', () => ({
 }))
 
 import { queuePreSerialized } from '../../transport/WsSendBatcher'
+import { LiveRoom } from '../../rooms/LiveRoom'
 
 describe('LiveRoomManager', () => {
   let roomEvents: RoomEventBus
@@ -260,6 +261,53 @@ describe('LiveRoomManager', () => {
       const bigData = 'x'.repeat(11 * 1024 * 1024)
       expect(() => manager.setRoomState('big-room', { data: bigData }))
         .toThrow('Room state exceeds maximum size limit')
+    })
+  })
+
+  describe('LiveRoom.emitWithState()', () => {
+    it('calls setRoomState and emitToRoom on the manager in order', () => {
+
+      const calls: string[] = []
+      const mockManager = {
+        setRoomState: vi.fn(() => calls.push('setState')),
+        emitToRoom: vi.fn(() => { calls.push('emit'); return 2 }),
+        getMemberCount: vi.fn().mockReturnValue(2),
+      } as any
+
+      class RaceRoom extends LiveRoom<{ lap: number }, {}, { 'lap:completed': { player: string } }> {
+        static roomName = 'race'
+        static defaultState = { lap: 0 }
+      }
+
+      const room = new RaceRoom('race:1', mockManager)
+      const notified = room.emitWithState('lap:completed', { player: 'p1' }, { lap: 2 })
+
+      expect(mockManager.setRoomState).toHaveBeenCalledWith('race:1', { lap: 2 })
+      expect(mockManager.emitToRoom).toHaveBeenCalledWith('race:1', 'lap:completed', { player: 'p1' })
+      expect(notified).toBe(2)
+      // setState must come before emit
+      expect(calls).toEqual(['setState', 'emit'])
+    })
+
+    it('returns 0 and does not throw when room has no members', () => {
+
+      const mockManager = {
+        setRoomState: vi.fn(),
+        emitToRoom: vi.fn().mockReturnValue(0),
+        getMemberCount: vi.fn().mockReturnValue(0),
+      } as any
+
+      class TestRoom extends LiveRoom<{ x: number }, {}, { moved: { x: number } }> {
+        static roomName = 'test'
+        static defaultState = { x: 0 }
+      }
+
+      const room = new TestRoom('test:1', mockManager)
+      const result = room.emitWithState('moved', { x: 10 }, { x: 10 })
+
+      expect(mockManager.setRoomState).toHaveBeenCalledWith('test:1', { x: 10 })
+      expect(mockManager.emitToRoom).toHaveBeenCalledWith('test:1', 'moved', { x: 10 })
+      expect(result).toBe(0)
     })
   })
 

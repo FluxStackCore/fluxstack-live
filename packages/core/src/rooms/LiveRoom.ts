@@ -119,6 +119,24 @@ export abstract class LiveRoom<
     return this._manager.emitToRoom(this.id, event, data)
   }
 
+  /**
+   * Update public state and emit an event atomically.
+   *
+   * Equivalent to calling `setState(updates)` followed by `emit(event, data)`,
+   * but as a single explicit operation that makes the intent clear: "update
+   * state AND notify clients". Eliminates the common two-call pattern and
+   * prevents bugs where one of the two calls is accidentally omitted.
+   *
+   * Receivers can use the event payload directly without re-reading room state,
+   * which avoids the shared-reference footgun described in issue #19.
+   *
+   * @returns Number of members notified
+   */
+  emitWithState<K extends keyof TEvents & string>(event: K, data: TEvents[K], updates: Partial<TState>): number {
+    this._manager.setRoomState(this.id, updates)
+    return this._manager.emitToRoom(this.id, event, data)
+  }
+
   /** Get current member count */
   get memberCount(): number {
     return this._manager.getMemberCount?.(this.id) ?? 0
