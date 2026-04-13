@@ -6,6 +6,7 @@
 import type { GenericWebSocket } from '../../transport/types'
 import type { ComponentState } from '../../protocol/messages'
 import { computeDeepDiff, deepAssign } from '../../utils/deepDiff'
+import { liveWarn } from '../../debug/LiveLogger'
 
 /** Per-class cache for forbidden property names in createDirectStateAccessors */
 const _forbiddenSetCache = new WeakMap<Function, Set<string>>()
@@ -85,6 +86,29 @@ export class ComponentStateManager<TState = ComponentState> {
     let hasChanges: boolean
 
     if (this._deepDiff) {
+      // Dev warning: detect shared references between patch and current state.
+      // A plain object in the patch that is === to the current state value will
+      // cause deepDiff to short-circuit and silently drop the update — a common
+      // footgun when doing shallow clones of room state (issue #19).
+      if (process.env.NODE_ENV !== 'production') {
+        for (const key of Object.keys(newUpdates as object)) {
+          const patchVal = (newUpdates as any)[key]
+          const stateVal = (this._state as any)[key]
+          if (
+            patchVal !== null &&
+            typeof patchVal === 'object' &&
+            !Array.isArray(patchVal) &&
+            Object.getPrototypeOf(patchVal) === Object.prototype &&
+            patchVal === stateVal
+          ) {
+            liveWarn('state', this.componentId,
+              `[${this.componentId}] setState: patch key "${key}" is the same reference as current state. ` +
+              `Nested updates will be silently dropped by deepDiff. ` +
+              `Use a shallow clone ({ ...this.state.${key}, ... }) or deep clone to avoid this. (issue #19)`)
+          }
+        }
+      }
+
       // Deep diff: recursively compare plain objects, reference-compare everything else
       const diff = computeDeepDiff(
         this._state as Record<string, unknown>,
