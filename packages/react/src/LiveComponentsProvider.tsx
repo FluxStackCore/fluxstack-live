@@ -22,7 +22,12 @@ export interface LiveComponentsContextValue {
   registerBinaryHandler: (componentId: string, callback: (payload: Uint8Array) => void) => () => void
   registerRoomBinaryHandler: (callback: (frame: Uint8Array) => void) => () => void
   unregisterComponent: (componentId: string) => void
+  /** Manually initiate the WebSocket connection (useful with autoConnect: false) */
+  connect: () => void
+  /** Disconnect and reconnect the WebSocket */
   reconnect: () => void
+  /** Disconnect the WebSocket */
+  disconnect: () => void
   authenticate: (credentials: LiveAuthOptions) => Promise<boolean>
   getWebSocket: () => WebSocket | null
 }
@@ -79,7 +84,18 @@ export function LiveComponentsProvider({
       })
 
       if (autoConnect) {
-        conn.connect()
+        // Wait for DOM to be fully loaded before connecting.
+        // This prevents the WS handshake from competing with
+        // initial resource loading (scripts, styles, images).
+        if (typeof document !== 'undefined' && document.readyState === 'complete') {
+          conn.connect()
+        } else if (typeof window !== 'undefined') {
+          const onReady = () => conn.connect()
+          window.addEventListener('load', onReady, { once: true })
+          ;(connectionRef as any).__loadCleanup = () => window.removeEventListener('load', onReady)
+        } else {
+          conn.connect()
+        }
       }
 
       // Cleanup stored for unmount
@@ -89,6 +105,8 @@ export function LiveComponentsProvider({
     return () => {
       const unsub = (connectionRef as any).__unsub
       if (unsub) unsub()
+      const loadCleanup = (connectionRef as any).__loadCleanup
+      if (loadCleanup) loadCleanup()
       if (connectionRef.current) {
         connectionRef.current.disconnect()
       }
@@ -139,6 +157,16 @@ export function LiveComponentsProvider({
     if (conn) conn.unregisterComponent(componentId)
   }, [])
 
+  const connect = useCallback(() => {
+    const conn = getConn()
+    if (conn) conn.connect()
+  }, [])
+
+  const disconnect = useCallback(() => {
+    const conn = getConn()
+    if (conn) conn.disconnect()
+  }, [])
+
   const reconnect = useCallback(() => {
     const conn = getConn()
     if (conn) conn.reconnect()
@@ -169,6 +197,8 @@ export function LiveComponentsProvider({
     registerBinaryHandler,
     registerRoomBinaryHandler,
     unregisterComponent,
+    connect,
+    disconnect,
     reconnect,
     authenticate,
     getWebSocket,

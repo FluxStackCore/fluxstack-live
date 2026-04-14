@@ -37,7 +37,7 @@ export function computeDeepDiff(
   prev: Record<string, unknown>,
   next: Record<string, unknown>,
   depth: number = 0,
-  maxDepth: number = 3,
+  maxDepth: number = 100,
   seen?: Set<object>,
 ): Record<string, unknown> | null {
   if (depth > maxDepth) return prev === next ? null : next
@@ -74,6 +74,11 @@ export function computeDeepDiff(
   // At depth 0 the caller passes a partial update (only changed fields),
   // so missing keys are not removals. Inside nested objects, the caller
   // provides the complete replacement value, so missing keys ARE removals.
+  //
+  // IMPORTANT: Callers using setState with nested objects MUST pass
+  // complete objects (all fields), not partial updates. If only some
+  // fields are included, the missing fields will be treated as removals.
+  // Use the spread operator: setState({ players: { p1: { ...player, position: newPos } } })
   if (depth > 0) {
     for (const key of Object.keys(prev)) {
       if (!(key in next)) {
@@ -116,13 +121,22 @@ export function computeDeepDiff(
  * Safe against circular references (tracked via `seen` Set).
  */
 export function deepAssign(target: any, source: any, seen?: Set<object>): void {
-  deepAssignImpl(target, source, 0, seen)
+  // The public API accepts Set<object> for backward compatibility,
+  // but internally we use Map<object, Set<object>> for proper pair tracking.
+  deepAssignImpl(target, source, 0)
 }
 
-function deepAssignImpl(target: any, source: any, depth: number, seen?: Set<object>): void {
-  if (!seen) seen = new Set()
-  if (seen.has(source)) return
-  seen.add(source)
+function deepAssignImpl(target: any, source: any, depth: number, seen?: Map<object, Set<object>>): void {
+  if (source == null || typeof source !== 'object') return
+  // Circular reference guard: track which (source → target) pairs we've
+  // already processed. This prevents infinite recursion from circular refs
+  // while still allowing the same source object to be applied to different
+  // targets (e.g., multiple players sharing the same item reference in a diff).
+  if (!seen) seen = new Map()
+  let targets = seen.get(source)
+  if (targets?.has(target)) return // already applied this source to this target
+  if (!targets) { targets = new Set(); seen.set(source, targets) }
+  targets.add(target)
 
   for (const key of Object.keys(source)) {
     const value = source[key]
