@@ -6,6 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the `0.x` convention where minor bumps may include breaking changes.
 
+## [0.8.0] - 2026-04-14
+
+Performance and ID generation overhaul. Core, client, react, vue, and redis packages bumped.
+
+### Added
+
+- **Custom ID generator** — `LiveServerOptions.generateId` allows devs to provide their own `() => string` function
+- **Compact default IDs** — 8-char IDs (64-char alphabet, ~48 bits entropy) replace UUIDs and timestamp-based IDs across all packages
+  - ~5x faster than `crypto.randomUUID()`, 78% smaller on the wire
+  - Buffered `crypto.getRandomValues` with pre-computed char code lookup table
+- **`generateId()` exported** from both `@fluxstack/live` (server) and `@fluxstack/live-client` (browser)
+- **Performance test suites** for ID generation, handleMessage flow, sanitizePayload, and WebSocket optimizations
+
+### Changed — Performance
+
+- **`sanitizePayload` zero-copy** — clean payloads (99% of cases) pass through without object cloning. Only allocates when dangerous keys (`__proto__`, `constructor`, `prototype`) are found. ~1.7x faster.
+- **JSON depth check removed** — `JSON.parse` already validates nesting; the character-by-character pre-scan was redundant overhead
+- **Dead fields removed from ACTION_RESPONSE** — `originalType`, `responseId`, `timestamp` were never read by clients. Response is 34% smaller (164 → 109 bytes).
+- **`timestamp` removed from client requests** — server never read it
+- **Duplicate `updateComponentActivity` eliminated** — was called twice per CALL_ACTION
+- **`findRemoteSingleton` skipped when no cluster** — avoids unnecessary Map lookup
+- **`Date.now()` dead code removed** from `ActionSecurityManager`
+- **`lastActivity` changed from `Date` to `number`** — avoids object allocation per message
+- **`getSerializableState()` call deduplication** — 7 redundant calls eliminated across mount, rehydrate, and cluster paths
+- **Heartbeat: 1 ping per connection** instead of N pings (1 per component). 98% less overhead for apps with many components.
+- **TextDecoder singleton** in client — reused instead of `new TextDecoder()` per binary message. ~2.5x faster.
+- **Broadcast pre-serialization** — `broadcastToRoom` serializes once with `JSON.stringify`, sends pre-serialized string to all connections via `queuePreSerialized`
+- **Reconnect with exponential backoff** — 1s, 2s, 4s, 8s, 16s cap instead of fixed 1s interval
+
+### Fixed
+
+- **Browser `crypto.createHmac` error** — client/react/vue now import `generateId` from `@fluxstack/live-client` instead of `@fluxstack/live` core (which pulls in Node-only `StateSignature`)
+
 ## [0.7.1] - 2026-04-11
 
 Three follow-up bug fixes that surfaced after 0.7.0. No API breaks — a

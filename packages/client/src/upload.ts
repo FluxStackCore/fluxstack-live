@@ -10,6 +10,7 @@ import type {
   FileUploadCompleteResponse,
   BinaryChunkHeader,
 } from '@fluxstack/live'
+import { generateId } from './generateId'
 
 // ===== Adaptive Chunk Sizer =====
 
@@ -244,7 +245,7 @@ export class ChunkedUploader {
     }
 
     try {
-      const uploadId = `upload-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`
+      const uploadId = generateId()
       this.abortController = new AbortController()
       this.adaptiveSizer?.reset()
 

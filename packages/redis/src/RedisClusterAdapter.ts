@@ -25,6 +25,7 @@ import type {
   ClusterActionResponse,
   ClusterDeltaHandler,
 } from '@fluxstack/live'
+import { generateId } from '@fluxstack/live'
 import type Redis from 'ioredis'
 
 export interface RedisClusterAdapterOptions {
@@ -94,7 +95,7 @@ export class RedisClusterAdapter implements IClusterAdapter {
     this.singletonTtl = options.singletonTtl ?? 30
     this.heartbeatMs = options.heartbeatInterval ?? 10_000
     this.actionTimeoutMs = options.actionTimeout ?? 5_000
-    this.instanceId = `inst-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    this.instanceId = generateId()
   }
 
   // ── Redis Key Helpers ────────────────────────────────

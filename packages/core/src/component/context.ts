@@ -35,6 +35,8 @@ export interface LiveLoggerInterface {
 export interface LiveComponentContext {
   roomEvents: RoomEventBus
   roomManager: LiveRoomManagerInterface
+  /** Custom ID generator. When set, used instead of default crypto.randomUUID(). */
+  generateId?: () => string
 }
 
 let _ctx: LiveComponentContext | null = null

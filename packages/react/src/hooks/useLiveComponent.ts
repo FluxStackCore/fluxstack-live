@@ -21,6 +21,7 @@ import {
 } from '@fluxstack/live-client'
 import type { RoomProxy, RoomServerMessage } from '@fluxstack/live-client'
 import type { WebSocketResponse } from '@fluxstack/live'
+import { generateId } from '@fluxstack/live-client'
 
 // ===== Deep Merge (always-on, retrocompatible) =====
 
@@ -245,7 +246,7 @@ export function useLiveComponent<
   } = useLiveComponents()
 
   // Refs
-  const instanceId = useRef(`${componentName}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`)
+  const instanceId = useRef(generateId())
   const storeRef = useRef<ReturnType<typeof createStore<TState>> | null>(null)
   if (!storeRef.current) storeRef.current = createStore(initialState)
   const store = storeRef.current

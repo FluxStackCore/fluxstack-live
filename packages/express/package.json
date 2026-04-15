@@ -22,8 +22,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.7.0",
-    "@fluxstack/live-client": "^0.7.0"
+    "@fluxstack/live": "^0.8.0",
+    "@fluxstack/live-client": "^0.8.0"
   },
   "peerDependencies": {
     "express": ">=4.0.0",

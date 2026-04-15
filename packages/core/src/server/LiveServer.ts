@@ -20,7 +20,7 @@ import type { LiveComponent } from '../component/LiveComponent'
 import { RateLimiterRegistry } from '../connection/RateLimiter'
 import { liveLog } from '../debug/LiveLogger'
 import { decodeBinaryChunk } from '../protocol/binary'
-import { DEFAULT_WS_PATH, MAX_MESSAGE_SIZE, MAX_ROOMS_PER_CONNECTION, MAX_JSON_DEPTH } from '../protocol/constants'
+import { DEFAULT_WS_PATH, MAX_MESSAGE_SIZE, MAX_ROOMS_PER_CONNECTION } from '../protocol/constants'
 import { sendImmediate } from '../transport/WsSendBatcher'
 import { sanitizePayload } from '../security/sanitize'
 import type { LiveAuthProvider } from '../auth/types'
@@ -30,6 +30,7 @@ import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
 import { RoomRegistry } from '../rooms/RoomRegistry'
 import type { LiveRoomClass } from '../rooms/LiveRoom'
 import { generateLiveComponentsFile } from '../build/index'
+import { generateId as defaultGenerateId } from '../utils/generateId'
 
 export interface LiveServerOptions {
   /** Transport adapter (Elysia, Express, etc.) */
@@ -72,6 +73,10 @@ export interface LiveServerOptions {
   /** LiveComponent classes to register statically (e.g. from production bundles).
    *  Uses `static componentName` for the registry key, falling back to `class.name`. */
   components?: Array<new (...args: any[]) => LiveComponent<any>>
+  /** Custom ID generator function. When provided, all auto-generated IDs
+   *  (component IDs, connection IDs, cluster singleton IDs) will use this function
+   *  instead of the default generators. Must return a unique string each call. */
+  generateId?: () => string
 }
 
 export class LiveServer {
@@ -118,6 +123,7 @@ export class LiveServer {
       stateSignature: this.stateSignature,
       performanceMonitor: this.performanceMonitor,
       cluster: options.cluster,
+      generateId: options.generateId,
     })
 
     // Register statically-provided component classes (used in production bundles)
@@ -132,6 +138,7 @@ export class LiveServer {
     setLiveComponentContext({
       roomEvents: this.roomEvents,
       roomManager: this.roomManager,
+      generateId: options.generateId,
     })
   }
 
@@ -226,7 +233,9 @@ export class LiveServer {
       }
     }
 
-    const connectionId = `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    const connectionId = this.options.generateId
+      ? this.options.generateId()
+      : defaultGenerateId()
 
     ws.data = {
       connectionId,
@@ -241,7 +250,6 @@ export class LiveServer {
     sendImmediate(ws, JSON.stringify({
       type: 'CONNECTION_ESTABLISHED',
       connectionId,
-      timestamp: Date.now()
     }))
 
     liveLog('websocket', null, `Connection opened: ${connectionId}`)
@@ -253,7 +261,7 @@ export class LiveServer {
     if (connectionId) {
       const limiter = this.rateLimiter.get(connectionId)
       if (!limiter.tryConsume()) {
-        sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Rate limit exceeded', timestamp: Date.now() }))
+        sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Rate limit exceeded' }))
         return
       }
     }
@@ -268,7 +276,7 @@ export class LiveServer {
           if (progress) sendImmediate(ws, JSON.stringify(progress))
         }
       } catch (error: any) {
-        sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: error.message, timestamp: Date.now() }))
+        sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: error.message }))
       }
       return
     }
@@ -276,33 +284,15 @@ export class LiveServer {
     // JSON protocol — check size before parsing
     const str = typeof rawMessage === 'string' ? rawMessage : new TextDecoder().decode(rawMessage as ArrayBuffer)
     if (str.length > MAX_MESSAGE_SIZE) {
-      sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Message too large', timestamp: Date.now() }))
+      sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Message too large' }))
       return
-    }
-
-    // Quick depth check: count max consecutive opening braces/brackets to reject
-    // pathologically nested payloads before JSON.parse can cause a stack overflow.
-    let maxDepth = 0
-    let currentDepth = 0
-    for (let i = 0; i < str.length; i++) {
-      const ch = str.charCodeAt(i)
-      if (ch === 123 /* { */ || ch === 91 /* [ */) {
-        currentDepth++
-        if (currentDepth > maxDepth) maxDepth = currentDepth
-        if (maxDepth > MAX_JSON_DEPTH) {
-          sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'JSON nesting too deep', timestamp: Date.now() }))
-          return
-        }
-      } else if (ch === 125 /* } */ || ch === 93 /* ] */) {
-        currentDepth--
-      }
     }
 
     let message: LiveMessage
     try {
       message = JSON.parse(str)
     } catch {
-      sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Invalid JSON', timestamp: Date.now() }))
+      sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Invalid JSON' }))
       return
     }
 
@@ -323,7 +313,6 @@ export class LiveServer {
             ? { authenticated: true, session: authContext.session }
             : { authenticated: false, error: 'Authentication failed' },
           requestId: message.requestId,
-          timestamp: Date.now()
         }))
         return
       }
@@ -344,7 +333,6 @@ export class LiveServer {
           success: result.success,
           error: result.error,
           requestId: message.requestId,
-          timestamp: Date.now()
         }))
         return
       }
@@ -377,7 +365,6 @@ export class LiveServer {
           result: result.success ? { newComponentId: result.newComponentId } : undefined,
           error: result.error,
           requestId: message.requestId,
-          timestamp: Date.now()
         }))
         return
       }
@@ -388,14 +375,11 @@ export class LiveServer {
       if (result !== null) {
         const response: WebSocketResponse = {
           type: message.type === 'CALL_ACTION' ? 'ACTION_RESPONSE' : 'MESSAGE_RESPONSE',
-          originalType: message.type,
           componentId: message.componentId,
           success: result.success,
           result: result.result,
           error: result.error,
           requestId: message.requestId,
-          responseId: message.responseId,
-          timestamp: Date.now()
         }
         sendImmediate(ws, JSON.stringify(response))
       }
@@ -405,7 +389,6 @@ export class LiveServer {
         componentId: message.componentId,
         error: error.message,
         requestId: message.requestId,
-        timestamp: Date.now()
       }))
     }
   }
@@ -448,7 +431,6 @@ export class LiveServer {
             componentId,
             error: 'Room requires server-side join via component action',
             requestId: message.requestId,
-            timestamp: Date.now()
           }))
           break
         }
@@ -461,7 +443,6 @@ export class LiveServer {
             componentId,
             error: 'Room limit exceeded',
             requestId: message.requestId,
-            timestamp: Date.now()
           }))
           break
         }
@@ -479,7 +460,6 @@ export class LiveServer {
               componentId,
               error: authResult.reason || 'Room access denied',
               requestId: message.requestId,
-              timestamp: Date.now()
             }))
             break
           }
@@ -493,7 +473,6 @@ export class LiveServer {
             componentId,
             error: result.reason,
             requestId: message.requestId,
-            timestamp: Date.now()
           }))
           break
         }
@@ -507,7 +486,6 @@ export class LiveServer {
           componentId,
           payload: { roomId, state: result.state },
           requestId: message.requestId,
-          timestamp: Date.now()
         }))
         break
       }
@@ -519,7 +497,6 @@ export class LiveServer {
           componentId,
           payload: { roomId },
           requestId: message.requestId,
-          timestamp: Date.now()
         }))
         break
       case 'ROOM_EMIT': {
@@ -530,7 +507,6 @@ export class LiveServer {
             componentId,
             error: 'Not a member of this room',
             requestId: message.requestId,
-            timestamp: Date.now()
           }))
           break
         }
@@ -545,7 +521,6 @@ export class LiveServer {
             componentId,
             error: 'Not a member of this room',
             requestId: message.requestId,
-            timestamp: Date.now()
           }))
           break
         }
@@ -556,7 +531,6 @@ export class LiveServer {
             componentId,
             error: 'Room state is server-only',
             requestId: message.requestId,
-            timestamp: Date.now()
           }))
           break
         }
@@ -571,7 +545,6 @@ export class LiveServer {
             componentId,
             error: 'Not a member of this room',
             requestId: message.requestId,
-            timestamp: Date.now()
           }))
           break
         }
@@ -581,7 +554,6 @@ export class LiveServer {
           componentId,
           payload: { roomId, state },
           requestId: message.requestId,
-          timestamp: Date.now()
         }))
         break
       }

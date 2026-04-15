@@ -44,7 +44,6 @@ export class ActionSecurityManager {
     payload: any,
     ctx: ActionSecurityContext
   ): Promise<any> {
-    const actionStart = Date.now()
     const { component, componentClass, componentId } = ctx
 
     try {

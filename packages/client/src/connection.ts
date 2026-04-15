@@ -4,6 +4,7 @@
 // request-response pattern, and component message routing.
 
 import type { WebSocketMessage, WebSocketResponse } from '@fluxstack/live'
+import { generateId } from './generateId'
 
 /** Auth credentials to send during WebSocket connection */
 export interface LiveAuthOptions {
@@ -65,6 +66,7 @@ export class LiveConnection {
   private componentCallbacks = new Map<string, ComponentCallback>()
   private binaryCallbacks = new Map<string, (payload: Uint8Array) => void>()
   private roomBinaryHandlers = new Set<(frame: Uint8Array) => void>()
+  private _textDecoder = new TextDecoder()
   private pendingRequests = new Map<string, {
     resolve: (value: any) => void
     reject: (error: any) => void
@@ -132,7 +134,7 @@ export class LiveConnection {
 
   /** Generate unique request ID */
   generateRequestId(): string {
-    return `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+    return generateId()
   }
 
   /** Connect to WebSocket server */
@@ -238,8 +240,12 @@ export class LiveConnection {
   private attemptReconnect(): void {
     if (this.reconnectAttempts < this.options.maxReconnectAttempts) {
       this.reconnectAttempts++
-      this.log(`Reconnecting... (${this.reconnectAttempts}/${this.options.maxReconnectAttempts})`)
-      this.reconnectTimeout = setTimeout(() => this.connect(), this.options.reconnectInterval)
+      const delay = Math.min(
+        this.options.reconnectInterval * Math.pow(2, this.reconnectAttempts - 1),
+        16000
+      )
+      this.log(`Reconnecting in ${delay}ms... (${this.reconnectAttempts}/${this.options.maxReconnectAttempts})`)
+      this.reconnectTimeout = setTimeout(() => this.connect(), delay)
     } else {
       this.setState({ error: 'Max reconnection attempts reached' })
     }
@@ -253,15 +259,7 @@ export class LiveConnection {
     this.consecutiveHeartbeatFailures = 0
     this.heartbeatInterval = setInterval(() => {
       if (this.ws?.readyState === WebSocket.OPEN) {
-        let failed = false
-        for (const componentId of this.componentCallbacks.keys()) {
-          this.sendMessage({
-            type: 'COMPONENT_PING',
-            componentId,
-            timestamp: Date.now(),
-          }).catch(() => { failed = true })
-        }
-        if (failed) {
+        this.sendMessage({ type: 'PING' } as any).catch(() => {
           this.consecutiveHeartbeatFailures++
           this.log(`Heartbeat failed (${this.consecutiveHeartbeatFailures}/${LiveConnection.MAX_HEARTBEAT_FAILURES})`)
           if (this.consecutiveHeartbeatFailures >= LiveConnection.MAX_HEARTBEAT_FAILURES) {
@@ -269,9 +267,8 @@ export class LiveConnection {
             this.setState({ error: 'Heartbeat failed' })
             this.reconnect()
           }
-        } else {
-          this.consecutiveHeartbeatFailures = 0
-        }
+        })
+        this.consecutiveHeartbeatFailures = 0
       }
     }, this.options.heartbeatInterval)
   }
@@ -365,8 +362,7 @@ export class LiveConnection {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       throw new Error('WebSocket is not connected')
     }
-    const messageWithTimestamp = { ...message, timestamp: Date.now() }
-    this.ws.send(JSON.stringify(messageWithTimestamp))
+    this.ws.send(JSON.stringify(message))
     this.log('Sent', { type: message.type, componentId: message.componentId })
   }
 
@@ -392,7 +388,6 @@ export class LiveConnection {
           ...message,
           requestId,
           expectResponse: true,
-          timestamp: Date.now(),
         }
         this.ws.send(JSON.stringify(messageWithRequestId))
         this.log('Sent with requestId', { requestId, type: message.type })
@@ -440,7 +435,7 @@ export class LiveConnection {
       // BINARY_STATE_DELTA: [0x01][idLen:u8][compId:utf8][payload]
       const idLen = buffer[1]
       if (buffer.length < 2 + idLen) return
-      const componentId = new TextDecoder().decode(buffer.subarray(2, 2 + idLen))
+      const componentId = this._textDecoder.decode(buffer.subarray(2, 2 + idLen))
       const payload = buffer.subarray(2 + idLen)
 
       const callback = this.binaryCallbacks.get(componentId)

@@ -17,7 +17,8 @@ FluxStack Live lets you write **server-side components** that automatically sync
 | `@fluxstack/live-fastify` | Adapter | Fastify + @fastify/websocket transport adapter |
 | `@fluxstack/live-client` | Client | Framework-agnostic browser WebSocket client |
 | `@fluxstack/live-react` | React | React hooks and provider (`Live.use()`, `useLiveComponent()`) |
-| `@fluxstack/live-redis` | Adapter | Redis pub/sub adapter for horizontal scaling |
+| `@fluxstack/live-vue` | Vue | Vue 3 composables (`useLive()`, `provideLiveConnection()`) |
+| `@fluxstack/live-redis` | Adapter | Redis adapters for horizontal scaling (rooms + cluster) |
 
 ## Quick Start (Elysia + React)
 
@@ -52,6 +53,8 @@ const app = new Elysia()
 const server = new LiveServer({
   transport: new ElysiaTransport(app),
   componentsPath: './server/live',
+  // Optional: custom ID generator (default: 8-char compact IDs)
+  // generateId: () => nanoid(),
 })
 await server.start()
 app.listen(3000)
@@ -127,9 +130,38 @@ Pluggable auth providers. Supports JWT, API keys, or custom auth:
 ### Security
 
 - HMAC-SHA256 state signing with nonce-based replay protection
-- Payload sanitization against prototype pollution
+- Zero-copy payload sanitization against prototype pollution
 - Token-bucket rate limiting per connection
 - Message size limits, room count limits
 - Origin validation (CSRF protection)
+
+### ID Generation
+
+All IDs (component, connection, request, upload) use a compact 8-character generator with 48 bits of entropy. Customizable via `LiveServerOptions.generateId`:
+
+```typescript
+const server = new LiveServer({
+  transport,
+  generateId: () => nanoid(), // or any () => string
+})
+```
+
+Default generator uses buffered `crypto.getRandomValues` — ~5x faster than `crypto.randomUUID()`, 78% smaller output.
+
+### Cluster (Horizontal Scaling)
+
+Singleton coordination across multiple server instances via Redis:
+
+```typescript
+import { RedisClusterAdapter } from '@fluxstack/live-redis'
+
+const server = new LiveServer({
+  transport: new ElysiaTransport(app),
+  cluster: new RedisClusterAdapter({ redis }),
+  roomPubSub: new RedisRoomAdapter({ redis }),
+})
+```
+
+Handles singleton ownership (atomic claim), action forwarding, state delta broadcasting, and failover recovery. No changes to components or client code.
 
 ## For complete API reference, see llms-full.txt

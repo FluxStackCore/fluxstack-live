@@ -12,6 +12,7 @@
 //   const server = new LiveServer({ transport, roomPubSub: adapter })
 
 import type { IRoomPubSubAdapter } from '@fluxstack/live'
+import { generateId } from '@fluxstack/live'
 import type Redis from 'ioredis'
 
 export interface RedisRoomAdapterOptions {
@@ -55,7 +56,7 @@ export class RedisRoomAdapter implements IRoomPubSubAdapter {
     this.subscriber = options.subscriber ?? options.redis.duplicate()
     this.prefix = options.prefix ?? 'fluxstack:room:'
     this.stateTtl = options.stateTtl ?? 86400
-    this.instanceId = `inst-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+    this.instanceId = generateId()
 
     this.setupSubscriber()
   }

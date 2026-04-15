@@ -22,7 +22,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.7.0"
+    "@fluxstack/live": "^0.8.0"
   },
   "peerDependencies": {
     "elysia": ">=1.0.0"

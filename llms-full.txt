@@ -42,7 +42,9 @@
 7. [@fluxstack/live-express (Express Adapter)](#express-adapter)
 8. [@fluxstack/live-fastify (Fastify Adapter)](#fastify-adapter)
 9. [@fluxstack/live-redis (Redis Adapter)](#redis-adapter)
-10. [Usage Examples](#usage-examples)
+10. [@fluxstack/live-vue (Vue Bindings)](#vue-package)
+11. [ID Generation](#id-generation)
+12. [Usage Examples](#usage-examples)
 
 ---
 
@@ -114,6 +116,7 @@ fluxstack-live/
 │   ├── elysia/        # @fluxstack/live-elysia
 │   ├── express/       # @fluxstack/live-express
 │   ├── fastify/       # @fluxstack/live-fastify
+│   ├── vue/           # @fluxstack/live-vue — Vue 3 composables
 │   └── redis/         # @fluxstack/live-redis
 ```
 
@@ -158,6 +161,18 @@ interface LiveServerOptions {
   /** Cross-instance pub/sub adapter for horizontal scaling (e.g. Redis).
    *  Without this, rooms are local to the current instance. */
   roomPubSub?: IRoomPubSubAdapter
+  /** Cluster adapter for cross-instance singleton coordination (e.g. Redis).
+   *  When provided, singleton components are coordinated across instances. */
+  cluster?: IClusterAdapter
+  /** LiveRoom classes to register. These define typed rooms with lifecycle hooks. */
+  rooms?: LiveRoomClass[]
+  /** LiveComponent classes to register statically (e.g. from production bundles).
+   *  Uses `static componentName` for the registry key, falling back to `class.name`. */
+  components?: Array<new (...args: any[]) => LiveComponent<any>>
+  /** Custom ID generator function. When provided, all auto-generated IDs
+   *  (component, connection, cluster, request) use this function.
+   *  Default: compact 8-char IDs with ~48 bits entropy. Must return unique string. */
+  generateId?: () => string
 }
 
 class LiveServer {
@@ -177,6 +192,9 @@ class LiveServer {
 
   /** Register an auth provider */
   useAuth(provider: LiveAuthProvider): this
+
+  /** Register a LiveRoom class */
+  useRoom(roomClass: LiveRoomClass): this
 
   /** Start: register WS + HTTP handlers on the transport */
   async start(): Promise<void>
@@ -2019,6 +2037,48 @@ app.listen(3000)
 
 ---
 
+## Vue Package
+
+Vue 3 composables for Live Components.
+
+```typescript
+import { provideLiveConnection, useLive } from '@fluxstack/live-vue'
+
+// In root component (setup)
+provideLiveConnection({ url: 'ws://localhost:3000/api/live/ws' })
+
+// In any child component
+const { state, call, connected, error } = useLive('Counter', { count: 0 })
+// state.count is reactive (Vue ref)
+// call('increment') triggers a server action
+```
+
+### provideLiveConnection(options)
+
+Creates and provides the WebSocket connection to all child components. Must be called once in the root component's `setup()`.
+
+### useLive<T>(componentName, initialState)
+
+Returns reactive state, `call()`, `connected`, and `error` refs. State updates from the server automatically trigger Vue reactivity.
+
+---
+
+## ID Generation
+
+All auto-generated IDs use a compact 8-character format with ~48 bits of entropy (281 trillion combinations).
+
+```typescript
+import { generateId } from '@fluxstack/live'
+
+generateId() // → "xK9_m2Lp" (8 chars, URL-safe)
+```
+
+**Customization:** Pass `generateId` in `LiveServerOptions` to override for all IDs (component, connection, cluster singleton, request).
+
+**Implementation:** Buffered `crypto.getRandomValues` with pre-computed char code lookup table. ~5x faster than `crypto.randomUUID()`, 78% smaller output. Browser-safe (also exported from `@fluxstack/live-client`).
+
+---
+
 ## DI Context
 
 The internal context system connects LiveComponent instances to the LiveServer's subsystems:
@@ -2027,7 +2087,8 @@ The internal context system connects LiveComponent instances to the LiveServer's
 interface LiveComponentContext {
   roomEvents: RoomEventBus
   roomManager: LiveRoomManagerInterface
-  debugger?: LiveDebuggerInterface
+  /** Custom ID generator. When set, used instead of default compact IDs. */
+  generateId?: () => string
 }
 
 /** Set by LiveServer during construction */

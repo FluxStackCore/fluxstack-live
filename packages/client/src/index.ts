@@ -18,6 +18,9 @@ export type {
   LiveConnectionState,
 } from './connection'
 
+// ID Generation
+export { generateId } from './generateId'
+
 // Component Handle (vanilla JS equivalent of Live.use)
 export { LiveComponentHandle } from './component'
 export type { LiveComponentOptions } from './component'

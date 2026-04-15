@@ -6,7 +6,7 @@
 import type { LiveComponent } from './LiveComponent'
 import { EMIT_OVERRIDE_KEY } from './LiveComponent'
 import type { GenericWebSocket, LiveWSData } from '../transport/types'
-import { queueWsMessage, sendImmediate } from '../transport/WsSendBatcher'
+import { queueWsMessage, queuePreSerialized, sendImmediate } from '../transport/WsSendBatcher'
 import type { LiveMessage, BroadcastMessage, ComponentDefinition } from '../protocol/messages'
 import type { LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
@@ -15,13 +15,14 @@ import type { StateSignatureManager, SignedState } from '../security/StateSignat
 import type { PerformanceMonitor } from '../monitoring/PerformanceMonitor'
 import { liveLog, registerComponentLogging, unregisterComponentLogging } from '../debug/LiveLogger'
 import type { IClusterAdapter, ClusterActionRequest, ClusterActionResponse } from '../cluster/types'
+import { generateId as defaultGenerateId } from '../utils/generateId'
 
 export interface ComponentMetadata {
   id: string
   name: string
   version: string
   mountedAt: Date
-  lastActivity: Date
+  lastActivity: number
   state: 'mounting' | 'active' | 'inactive' | 'error' | 'destroying'
   healthStatus: 'healthy' | 'degraded' | 'unhealthy'
   dependencies: string[]
@@ -52,6 +53,7 @@ export interface ComponentRegistryDeps {
   stateSignature: StateSignatureManager
   performanceMonitor: PerformanceMonitor
   cluster?: IClusterAdapter
+  generateId?: () => string
 }
 
 /** Remote singleton proxy — represents a singleton owned by another server instance. */
@@ -78,12 +80,14 @@ export class ComponentRegistry {
   private authManager: LiveAuthManager
   private stateSignature: StateSignatureManager
   private performanceMonitor: PerformanceMonitor
+  private _generateId?: () => string
 
   constructor(deps: ComponentRegistryDeps) {
     this.authManager = deps.authManager
     this.stateSignature = deps.stateSignature
     this.performanceMonitor = deps.performanceMonitor
     this.cluster = deps.cluster
+    this._generateId = deps.generateId
 
     this.setupHealthMonitoring()
     this.setupClusterHandlers()
@@ -279,32 +283,32 @@ export class ComponentRegistry {
         // Check local singleton first
         const existing = this.singletons.get(componentName)
         if (existing) {
-          const connId = ws.data?.connectionId || `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+          const connId = ws.data?.connectionId || (this._generateId ? this._generateId() : defaultGenerateId())
           existing.connections.set(connId, ws)
           this.ensureWsData(ws, options?.userId)
           ws.data.components.set(existing.instance.id, existing.instance)
 
+          const currentState = existing.instance.getSerializableState()
           const signedState = this.stateSignature.signState(existing.instance.id, {
-            ...existing.instance.getSerializableState(),
+            ...currentState,
             __componentName: componentName
           }, 1, { compress: true, backup: true })
 
           sendImmediate(ws, JSON.stringify({
             type: 'STATE_UPDATE',
             componentId: existing.instance.id,
-            payload: { state: existing.instance.getSerializableState(), signedState },
-            timestamp: Date.now()
+            payload: { state: currentState, signedState },
           }))
 
           try { (existing.instance as any).onClientJoin(connId, existing.connections.size) } catch { /* ignore */ }
 
-          return { componentId: existing.instance.id, initialState: existing.instance.getSerializableState(), signedState }
+          return { componentId: existing.instance.id, initialState: currentState, signedState }
         }
 
         // Check remote singleton (already proxied from another instance)
         const existingRemote = this.remoteSingletons.get(componentName)
         if (existingRemote) {
-          const connId = ws.data?.connectionId || `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+          const connId = ws.data?.connectionId || (this._generateId ? this._generateId() : defaultGenerateId())
           this.ensureWsData(ws, options?.userId)
           existingRemote.connections.set(connId, ws)
 
@@ -320,7 +324,7 @@ export class ComponentRegistry {
 
         // Cluster: try to claim singleton ownership with pre-generated ID (no race window)
         if (this.cluster) {
-          clusterSingletonId = `live-${crypto.randomUUID()}`
+          clusterSingletonId = this._generateId ? this._generateId() : defaultGenerateId()
           const claim = await this.cluster.claimSingleton(componentName, clusterSingletonId)
           if (!claim.claimed) {
             clusterSingletonId = null
@@ -328,7 +332,7 @@ export class ComponentRegistry {
             const owner = await this.cluster.getSingletonOwner(componentName)
             if (owner) {
               const stored = await this.cluster.loadState(owner.componentId)
-              const connId = ws.data?.connectionId || `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+              const connId = ws.data?.connectionId || (this._generateId ? this._generateId() : defaultGenerateId())
               this.ensureWsData(ws, options?.userId)
 
               const remote: RemoteSingletonEntry = {
@@ -385,15 +389,16 @@ export class ComponentRegistry {
 
       // Singleton broadcast setup
       if (isSingleton) {
-        const connId = ws.data.connectionId || `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+        const connId = ws.data.connectionId || (this._generateId ? this._generateId() : defaultGenerateId())
         const connections = new Map<string, GenericWebSocket>()
         connections.set(connId, ws)
         this.singletons.set(componentName, { instance: component, connections })
 
         // Cluster: save initial state (claim already established with correct ID)
         if (this.cluster) {
-          this.cluster.saveState(component.id, componentName, component.getSerializableState()).catch(() => {})
-          this.cluster.saveSingletonState(componentName, component.getSerializableState()).catch(() => {})
+          const singletonState = component.getSerializableState()
+          this.cluster.saveState(component.id, componentName, singletonState).catch(() => {})
+          this.cluster.saveSingletonState(componentName, singletonState).catch(() => {})
         }
 
         ;(component as any)[EMIT_OVERRIDE_KEY] = (type: string, payload: any) => {
@@ -417,9 +422,10 @@ export class ComponentRegistry {
 
           // Cluster: publish delta and save state for remote instances
           if (this.cluster && type === 'STATE_DELTA' && payload?.delta) {
+            const clusterState = component.getSerializableState()
             this.cluster.publishDelta(component.id, componentName, payload.delta).catch(() => {})
-            this.cluster.saveState(component.id, componentName, component.getSerializableState()).catch(() => {})
-            this.cluster.saveSingletonState(componentName, component.getSerializableState()).catch(() => {})
+            this.cluster.saveState(component.id, componentName, clusterState).catch(() => {})
+            this.cluster.saveSingletonState(componentName, clusterState).catch(() => {})
           }
         }
 
@@ -435,13 +441,14 @@ export class ComponentRegistry {
       this.performanceMonitor.recordRenderTime(component.id, renderTime)
 
       // Sign initial state
+      const mountState = component.getSerializableState()
       const signedState = this.stateSignature.signState(component.id, {
-        ...component.getSerializableState(),
+        ...mountState,
         __componentName: componentName
       }, 1, { compress: true, backup: true })
 
       ;(component as any).emit('STATE_UPDATE', {
-        state: component.getSerializableState(),
+        state: mountState,
         signedState
       })
 
@@ -451,6 +458,7 @@ export class ComponentRegistry {
         ;(component as any).emit('ERROR', { action: 'onMount', error: `Mount initialization failed: ${err?.message || err}` })
       }
 
+      // Re-read state after onMount (hook may have changed it)
       return { componentId: component.id, initialState: component.getSerializableState(), signedState }
     } catch (error: any) {
       console.error(`Failed to mount component ${componentName}:`, error)
@@ -512,14 +520,15 @@ export class ComponentRegistry {
       ws.data.components.set(component.id, component)
       registerComponentLogging(component.id, (ComponentClass as any).logging)
 
+      const rehydratedState = component.getSerializableState()
       const newSignedState = this.stateSignature.signState(
         component.id,
-        { ...component.getSerializableState(), __componentName: componentName },
+        { ...rehydratedState, __componentName: componentName },
         signedState.version + 1
       )
 
       ;(component as any).emit('STATE_REHYDRATED', {
-        state: component.getSerializableState(),
+        state: rehydratedState,
         signedState: newSignedState,
         oldComponentId: componentId,
         newComponentId: component.id
@@ -538,7 +547,7 @@ export class ComponentRegistry {
   private ensureWsData(ws: GenericWebSocket, userId?: string): void {
     if (!ws.data) {
       (ws as { data: LiveWSData }).data = {
-        connectionId: `ws-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        connectionId: (this._generateId ? this._generateId() : defaultGenerateId()),
         components: new Map(),
         subscriptions: new Set(),
         connectedAt: new Date(),
@@ -692,18 +701,19 @@ export class ComponentRegistry {
       room: message.room
     }
 
+    // Serialize once, send pre-serialized to all connections
+    const serialized = JSON.stringify(broadcastMessage)
+
     for (const componentId of Array.from(roomComponents)) {
       const component = this.components.get(componentId)
       if (message.excludeUser && component?.userId === message.excludeUser) continue
       const ws = this.wsConnections.get(componentId)
-      if (ws) queueWsMessage(ws, broadcastMessage as any)
+      if (ws) queuePreSerialized(ws, serialized)
     }
   }
 
   async handleMessage(ws: GenericWebSocket, message: LiveMessage): Promise<{ success: boolean; result?: unknown; error?: string } | null> {
     try {
-      if (message.componentId) this.updateComponentActivity(message.componentId)
-
       switch (message.type) {
         case 'COMPONENT_MOUNT':
           const mountResult = await this.mountComponent(ws, message.payload.component, message.payload.props, {
@@ -719,9 +729,9 @@ export class ComponentRegistry {
 
         case 'CALL_ACTION': {
           // Check if this action targets a remote singleton (owned by another server)
-          const remoteSingleton = this.findRemoteSingleton(message.componentId)
+          const remoteSingleton = this.cluster ? this.findRemoteSingleton(message.componentId) : null
           if (remoteSingleton && this.cluster) {
-            const requestId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+            const requestId = this._generateId ? this._generateId() : defaultGenerateId()
             const request: ClusterActionRequest = {
               sourceInstanceId: this.cluster.instanceId,
               targetInstanceId: remoteSingleton.ownerInstanceId,
@@ -829,7 +839,7 @@ export class ComponentRegistry {
       name: componentName,
       version,
       mountedAt: new Date(),
-      lastActivity: new Date(),
+      lastActivity: Date.now(),
       state: 'mounting',
       healthStatus: 'healthy',
       dependencies: [],
@@ -841,7 +851,7 @@ export class ComponentRegistry {
 
   updateComponentActivity(componentId: string): boolean {
     const metadata = this.metadata.get(componentId)
-    if (metadata) { metadata.lastActivity = new Date(); metadata.state = 'active'; return true }
+    if (metadata) { metadata.lastActivity = Date.now(); metadata.state = 'active'; return true }
     return false
   }
 
@@ -869,7 +879,7 @@ export class ComponentRegistry {
     for (const [componentId, metadata] of this.metadata) {
       if (!this.components.get(componentId)) continue
       if (metadata.metrics.errorCount > 10) metadata.healthStatus = 'unhealthy'
-      else if (Date.now() - metadata.lastActivity.getTime() > 300000) metadata.healthStatus = 'degraded'
+      else if (Date.now() - metadata.lastActivity > 300000) metadata.healthStatus = 'degraded'
     }
   }
 

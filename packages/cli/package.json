@@ -1,20 +1,18 @@
 {
-  "name": "@fluxstack/live-client",
+  "name": "@fluxstack/live-cli",
   "version": "0.8.0",
-  "description": "Browser WebSocket client for @fluxstack/live — connection, state sync, rooms, and file upload (framework-agnostic)",
+  "description": "CLI inspector & dev tools for @fluxstack/live — inspect WebSocket traffic, mount components, call actions, join rooms",
   "type": "module",
-  "main": "./dist/index.cjs",
-  "module": "./dist/index.js",
+  "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "sideEffects": false,
+  "bin": {
+    "fluxstack-inspect": "./dist/inspector.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "bun": "./src/index.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
-    },
-    "./browser": "./dist/live-client.browser.global.js"
+      "import": "./dist/index.js"
+    }
   },
   "files": [
     "dist",
@@ -39,10 +37,10 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/FluxStackCore/fluxstack-live",
-    "directory": "packages/client"
+    "directory": "packages/cli"
   },
   "license": "MIT",
-  "keywords": ["websocket", "client", "realtime", "state-sync", "live-components", "fluxstack"],
+  "keywords": ["websocket", "inspector", "cli", "devtools", "realtime", "live-components", "fluxstack"],
   "engines": {
     "node": ">=18.0.0"
   }

@@ -77,6 +77,7 @@ function deepMergeImpl(target: Record<string, any>, source: Record<string, any>,
   }
 }
 import type { WebSocketMessage, WebSocketResponse } from '@fluxstack/live'
+import { generateId } from '@fluxstack/live-client'
 
 // ===== Connection Provider (equivalent to React Context) =====
 
@@ -251,7 +252,7 @@ export function useLiveComponent<TState extends Record<string, any>>(
   const componentError = ref<string | null>(null)
   const componentId = ref<string | null>(null)
 
-  const instanceId = `${componentName}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
+  const instanceId = generateId()
 
   let unregisterComponent: (() => void) | null = null
   let unsubConnection: (() => void) | null = null

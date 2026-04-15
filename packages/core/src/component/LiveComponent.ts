@@ -9,7 +9,8 @@
 //   - ActionSecurityManager: action validation, rate limiting, Zod
 //   - ComponentRoomProxy: $room, $rooms, room events
 
-import { getLiveComponentContext } from './context'
+import { getLiveComponentContext, hasLiveComponentContext } from './context'
+import { generateId as defaultGenerateId } from '../utils/generateId'
 import type { GenericWebSocket } from '../transport/types'
 import type { LiveAuthContext, LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
@@ -376,7 +377,11 @@ export abstract class LiveComponent<
   // ========================================
 
   private generateId(): string {
-    return `live-${crypto.randomUUID()}`
+    if (hasLiveComponentContext()) {
+      const ctx = getLiveComponentContext()
+      if (ctx.generateId) return ctx.generateId()
+    }
+    return defaultGenerateId()
   }
 
   public destroy() {

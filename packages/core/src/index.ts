@@ -147,6 +147,9 @@ export type {
   ClusterDeltaHandler,
 } from './cluster'
 
+// ===== ID Generation =====
+export { generateId } from './utils/generateId'
+
 // ===== Type Utilities =====
 export type {
   ExtractActions,
