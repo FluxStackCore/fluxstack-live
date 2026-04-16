@@ -374,16 +374,24 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
   createHandle(roomId: string): RoomHandle<TState, TEvents> {
     if (this.handles.has(roomId)) return this.handles.get(roomId)!
 
-    const room = this.getOrCreateRoom(roomId)
+    // Always resolve the room lazily at call time — never capture the object.
+    // destroy() clears this.rooms, so a captured reference would become orphaned
+    // while handleBinaryFrame/handleServerMessage look up a fresh object in the
+    // Map (see issue #27).
+    const getRoom = () => this.getOrCreateRoom(roomId)
+    // Eagerly create the room entry so incoming JSON/binary messages find it
+    // in this.rooms even before the first handle method is called.
+    getRoom()
 
     // RoomStateFields are fulfilled at runtime by the Proxy wrapper
     const handle = {
       get id() { return roomId },
-      get joined() { return room.joined },
-      get state() { return room.state },
+      get joined() { return getRoom().joined },
+      get state() { return getRoom().state },
 
       join: async (initialState?: TState) => {
         if (!this.componentId) throw new Error('Component not mounted')
+        const room = getRoom()
         if (room.joined) return
 
         if (initialState) room.state = initialState
@@ -397,12 +405,15 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
         }, 5000)
 
         if (response?.success) {
-          room.joined = true
-          if (response.state) room.state = response.state
+          // Re-resolve: the room could have been recreated while we awaited.
+          const current = getRoom()
+          current.joined = true
+          if (response.state) current.state = response.state
         }
       },
 
       leave: async () => {
+        const room = getRoom()
         if (!this.componentId || !room.joined) return
 
         await this.sendMessageAndWait({
@@ -412,8 +423,9 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
           timestamp: Date.now(),
         }, 5000)
 
-        room.joined = false
-        room.handlers.clear()
+        const current = getRoom()
+        current.joined = false
+        current.handlers.clear()
       },
 
       emit: <K extends keyof TEvents>(event: K, data: TEvents[K]) => {
@@ -430,20 +442,23 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
 
       on: <K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>): Unsubscribe => {
         const eventKey = event as string
+        const room = getRoom()
         if (!room.handlers.has(eventKey)) room.handlers.set(eventKey, new Set())
         room.handlers.get(eventKey)!.add(handler)
-        return () => { room.handlers.get(eventKey)?.delete(handler) }
+        return () => { getRoom().handlers.get(eventKey)?.delete(handler) }
       },
 
       onSystem: (event: string, handler: EventHandler): Unsubscribe => {
         const eventKey = `$${event}`
+        const room = getRoom()
         if (!room.handlers.has(eventKey)) room.handlers.set(eventKey, new Set())
         room.handlers.get(eventKey)!.add(handler)
-        return () => { room.handlers.get(eventKey)?.delete(handler) }
+        return () => { getRoom().handlers.get(eventKey)?.delete(handler) }
       },
 
       setState: (updates: Partial<TState>) => {
         if (!this.componentId) return
+        const room = getRoom()
         room.state = deepMerge(room.state as Record<string, any>, updates as Record<string, any>) as TState
         this.sendMessage({
           type: 'ROOM_STATE_SET',
@@ -457,7 +472,7 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
 
     const proxied = wrapWithStateProxy(
       handle,
-      () => room.state,
+      () => getRoom().state,
       (updates: Partial<TState>) => handle.setState(updates),
     )
     this.handles.set(roomId, proxied as RoomHandle<TState, TEvents>)
@@ -516,12 +531,14 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       },
     })
 
-    // Wrap top-level proxy so $room.players reads from default room state
+    // Wrap top-level proxy so $room.players reads from default room state.
+    // Resolve the room lazily — capturing it here would go stale after destroy()
+    // (see issue #27).
     if (this.defaultRoom && defaultHandle) {
-      const room = this.getOrCreateRoom(this.defaultRoom)
+      const defaultRoomId = this.defaultRoom
       return wrapWithStateProxy(
         proxyFn,
-        () => room.state,
+        () => this.getOrCreateRoom(defaultRoomId).state,
         (updates: Partial<TState>) => defaultHandle.setState(updates),
       ) as RoomProxy<TState, TEvents>
     }
