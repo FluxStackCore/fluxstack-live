@@ -50,6 +50,13 @@ export function LiveComponentsProvider({
   debug = false,
 }: LiveComponentsProviderProps) {
   const connectionRef = useRef<import('@fluxstack/live-client').LiveConnection | null>(null)
+  // Pending registrations captured before the async LiveConnection import resolves.
+  // Drained once connectionRef.current is set. Without this, any handler
+  // registered synchronously in a child useEffect during the first render gets
+  // silently dropped (the early-return `() => {}` stub), and frames arriving
+  // later go nowhere — which manifests as "chat handler never fires".
+  const pendingRoomBinaryHandlersRef = useRef<Set<(frame: Uint8Array) => void>>(new Set())
+  const pendingRoomBinaryUnsubsRef = useRef<Map<(frame: Uint8Array) => void, () => void>>(new Map())
 
   const [connected, setConnected] = useState(false)
   const [connecting, setConnecting] = useState(false)
@@ -73,6 +80,14 @@ export function LiveComponentsProvider({
       })
 
       connectionRef.current = conn
+
+      // Drain any handlers registered before the connection existed.
+      // Each pending handler is subscribed now and its real unsub stored so
+      // a future call to the stub unsub performs the actual cleanup.
+      for (const handler of pendingRoomBinaryHandlersRef.current) {
+        const realUnsub = conn.registerRoomBinaryHandler(handler)
+        pendingRoomBinaryUnsubsRef.current.set(handler, realUnsub)
+      }
 
       const unsub = conn.onStateChange((state) => {
         setConnected(state.connected)
@@ -148,8 +163,19 @@ export function LiveComponentsProvider({
 
   const registerRoomBinaryHandler = useCallback((callback: (frame: Uint8Array) => void) => {
     const conn = getConn()
-    if (!conn) return () => {}
-    return conn.registerRoomBinaryHandler(callback)
+    if (conn) return conn.registerRoomBinaryHandler(callback)
+    // Connection not yet created (async dynamic import pending). Queue the
+    // handler so it gets subscribed once the connection is available, and
+    // return an unsub that handles both the queued and post-drain states.
+    pendingRoomBinaryHandlersRef.current.add(callback)
+    return () => {
+      pendingRoomBinaryHandlersRef.current.delete(callback)
+      const realUnsub = pendingRoomBinaryUnsubsRef.current.get(callback)
+      if (realUnsub) {
+        realUnsub()
+        pendingRoomBinaryUnsubsRef.current.delete(callback)
+      }
+    }
   }, [])
 
   const unregisterComponent = useCallback((componentId: string) => {

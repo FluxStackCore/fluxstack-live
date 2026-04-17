@@ -111,8 +111,7 @@ export class ComponentRegistry {
       const message = JSON.stringify({
         type: 'STATE_DELTA',
         componentId,
-        payload: { delta },
-        timestamp: Date.now()
+        payload: { delta }
       })
       const dead: string[] = []
       for (const [connId, ws] of remote.connections) {
@@ -137,8 +136,7 @@ export class ComponentRegistry {
       const errorMsg = JSON.stringify({
         type: 'ERROR',
         componentId: singleton.instance.id,
-        payload: { error: 'OWNERSHIP_LOST: singleton moved to another server' },
-        timestamp: Date.now()
+        payload: { error: 'OWNERSHIP_LOST: singleton moved to another server' }
       })
       for (const [, ws] of singleton.connections) {
         try { ws.send(errorMsg) } catch { /* ignore */ }
@@ -315,8 +313,7 @@ export class ComponentRegistry {
           sendImmediate(ws, JSON.stringify({
             type: 'STATE_UPDATE',
             componentId: existingRemote.componentId,
-            payload: { state: existingRemote.lastState },
-            timestamp: Date.now()
+            payload: { state: existingRemote.lastState }
           }))
 
           return { componentId: existingRemote.componentId, initialState: existingRemote.lastState, signedState: null }
@@ -347,8 +344,7 @@ export class ComponentRegistry {
               sendImmediate(ws, JSON.stringify({
                 type: 'STATE_UPDATE',
                 componentId: owner.componentId,
-                payload: { state: remote.lastState },
-                timestamp: Date.now()
+                payload: { state: remote.lastState }
               }))
 
               return { componentId: owner.componentId, initialState: remote.lastState, signedState: null }
@@ -406,7 +402,6 @@ export class ComponentRegistry {
             type: type as any,
             componentId: component.id,
             payload,
-            timestamp: Date.now(),
             userId: component.userId,
             room: component.room
           }
@@ -697,7 +692,6 @@ export class ComponentRegistry {
       type: 'BROADCAST',
       componentId: senderComponentId || 'system',
       payload: { type: message.type, data: message.payload },
-      timestamp: Date.now(),
       room: message.room
     }
 

@@ -34,7 +34,6 @@ export class ComponentMessaging {
       type: type as any,
       componentId: this.ctx.componentId,
       payload,
-      timestamp: Date.now(),
       userId: this.ctx.getUserId(),
       room: this.ctx.getRoom()
     }
