@@ -142,7 +142,7 @@ function parseRoomFrame(buf: Uint8Array): {
 
 /** Reserved property names on RoomHandle/RoomProxy (never fall through to state) */
 const ROOM_RESERVED_KEYS = new Set<string | symbol>([
-  'id', 'joined', 'state', 'join', 'leave', 'emit', 'on', 'onSystem', 'setState',
+  'id', 'joined', 'state', 'join', 'leave', 'emit', 'on', 'onSystem', 'setState', 'removeAllListeners',
   'call', 'apply', 'bind', 'prototype', 'length', 'name', 'arguments', 'caller',
   Symbol.toPrimitive, Symbol.toStringTag, Symbol.hasInstance,
 ])
@@ -173,7 +173,7 @@ function wrapWithStateProxy<T extends object>(
 }
 
 /** Reserved keys on RoomHandle/RoomProxy — cannot be state fields */
-type RoomReservedKeys = 'id' | 'joined' | 'state' | 'join' | 'leave' | 'emit' | 'on' | 'onSystem' | 'setState'
+type RoomReservedKeys = 'id' | 'joined' | 'state' | 'join' | 'leave' | 'emit' | 'on' | 'onSystem' | 'setState' | 'removeAllListeners'
 
 /** State fields accessible directly on handle/proxy (excludes reserved method names) */
 type RoomStateFields<TState> = TState extends Record<string, any>
@@ -211,6 +211,8 @@ export type RoomHandle<TState = any, TEvents extends Record<string, any> = Recor
   on: <K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>) => Unsubscribe
   onSystem: (event: string, handler: EventHandler) => Unsubscribe
   setState: (updates: Partial<TState>) => void
+  /** Remove all handlers for an event, or all handlers across all events if no event is given. */
+  removeAllListeners: (event?: keyof TEvents | string) => void
 } & RoomStateFields<TState>
 
 /** Infer TEvents from a LiveRoom class (via $events brand) or use T directly as events map */
@@ -233,6 +235,11 @@ export type RoomProxy<TState = any, TEvents extends Record<string, any> = Record
   on: <K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>) => Unsubscribe
   onSystem: (event: string, handler: EventHandler) => Unsubscribe
   setState: (updates: Partial<TState>) => void
+  /**
+   * Remove all handlers for an event, or all handlers across all events if no event is given.
+   * For system events, you may pass either the plain name ('state:change') or the prefixed name ('$state:change').
+   */
+  removeAllListeners: (event?: keyof TEvents | string) => void
 } & RoomStateFields<TState>
 
 export interface RoomManagerOptions {
@@ -249,11 +256,16 @@ export interface RoomManagerOptions {
 export class RoomManager<TState = any, TEvents extends Record<string, any> = Record<string, any>> {
   private componentId: string | null
   private defaultRoom: string | null
+  // Room lifecycle state (driven by the server). Can be cleared/recreated
+  // without affecting consumer-registered handlers.
   private rooms = new Map<string, {
     joined: boolean
     state: TState
-    handlers: Map<string, Set<EventHandler>>
   }>()
+  // Event handlers — decoupled from `this.rooms` so they survive unmount/remount
+  // cycles, leave/rejoin, and transport reconnection. Only cleared explicitly
+  // via the returned Unsubscribe, removeAllListeners(), or disposeRoom().
+  private roomHandlers = new Map<string, Map<string, Set<EventHandler>>>()
   private handles = new Map<string, RoomHandle<TState, TEvents>>()
   private sendMessage: (msg: any) => void
   private sendMessageAndWait: (msg: any, timeout?: number) => Promise<any>
@@ -288,73 +300,72 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
   private handleServerMessage(msg: RoomServerMessage): void {
     if (msg.componentId !== this.componentId) return
 
-    const room = this.rooms.get(msg.roomId)
-    if (!room) return
-
     switch (msg.type) {
       case 'ROOM_EVENT':
-      case 'ROOM_SYSTEM': {
-        const handlers = room.handlers.get(msg.event)
-        if (handlers) {
-          for (const handler of handlers) {
-            try { handler(msg.data) } catch (error) {
-              console.error(`[Room:${msg.roomId}] Handler error for '${msg.event}':`, error)
-            }
-          }
-        }
+      case 'ROOM_SYSTEM':
+        // Dispatch directly — handlers live in this.roomHandlers (persistent)
+        // and do not require an entry in this.rooms. This survives the window
+        // between destroy() and the consumer calling $room(id) again.
+        this.dispatchToHandlers(msg.roomId, msg.event, msg.data)
         break
-      }
 
       case 'ROOM_STATE': {
         // Server sends data: { state: actualChanges } — extract the actual changes
         const stateChanges = msg.data?.state ?? msg.data
+        const room = this.getOrCreateRoom(msg.roomId)
         room.state = deepMerge(room.state as Record<string, any>, stateChanges) as TState
-        const stateHandlers = room.handlers.get('$state:change')
-        if (stateHandlers) {
-          for (const handler of stateHandlers) handler(stateChanges)
-        }
+        this.dispatchToHandlers(msg.roomId, '$state:change', stateChanges)
         break
       }
 
-      case 'ROOM_JOINED':
+      case 'ROOM_JOINED': {
+        const room = this.getOrCreateRoom(msg.roomId)
         room.joined = true
         if (msg.data?.state) room.state = msg.data.state
         break
+      }
 
-      case 'ROOM_LEFT':
-        room.joined = false
+      case 'ROOM_LEFT': {
+        const room = this.rooms.get(msg.roomId)
+        if (room) room.joined = false
         break
+      }
     }
   }
 
   /** Handle binary room frames (0x02 ROOM_EVENT, 0x03 ROOM_STATE) */
   private handleBinaryFrame(frame: Uint8Array): void {
     const parsed = parseRoomFrame(frame)
-    if (!parsed) return
-    if (parsed.componentId !== this.componentId) return
-
-    const room = this.rooms.get(parsed.roomId)
-    if (!room) return
+    if (!parsed) {
+      return
+    }
+    if (parsed.componentId !== this.componentId) {
+      return
+    }
 
     const data = msgpackDecode(parsed.payload)
 
     if (parsed.frameType === BINARY_ROOM_EVENT) {
-      // Dispatch to event handlers
-      const handlers = room.handlers.get(parsed.event)
-      if (handlers) {
-        for (const handler of handlers) {
-          try { handler(data) } catch (error) {
-            console.error(`[Room:${parsed.roomId}] Handler error for '${parsed.event}':`, error)
-          }
-        }
-      }
+      // Dispatch directly — handlers live in this.roomHandlers (persistent)
+      // and do not require an entry in this.rooms. This survives the window
+      // between destroy() and the consumer calling $room(id) again.
+      this.dispatchToHandlers(parsed.roomId, parsed.event, data)
     } else if (parsed.frameType === BINARY_ROOM_STATE) {
       // State update: data is { state: changes } or just changes
       const stateChanges = (data as any)?.state ?? data
+      const room = this.getOrCreateRoom(parsed.roomId)
       room.state = deepMerge(room.state as Record<string, any>, stateChanges as Record<string, any>) as TState
-      const stateHandlers = room.handlers.get('$state:change')
-      if (stateHandlers) {
-        for (const handler of stateHandlers) handler(stateChanges)
+      this.dispatchToHandlers(parsed.roomId, '$state:change', stateChanges)
+    }
+  }
+
+  /** Dispatch to handlers registered in this.roomHandlers (decoupled from this.rooms). */
+  private dispatchToHandlers(roomId: string, event: string, data: unknown): void {
+    const handlers = this.roomHandlers.get(roomId)?.get(event)
+    if (!handlers) return
+    for (const handler of handlers) {
+      try { handler(data) } catch (error) {
+        console.error(`[Room:${roomId}] Handler error for '${event}':`, error)
       }
     }
   }
@@ -364,10 +375,18 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       this.rooms.set(roomId, {
         joined: false,
         state: {} as TState,
-        handlers: new Map(),
       })
     }
     return this.rooms.get(roomId)!
+  }
+
+  private getOrCreateHandlers(roomId: string): Map<string, Set<EventHandler>> {
+    let map = this.roomHandlers.get(roomId)
+    if (!map) {
+      map = new Map()
+      this.roomHandlers.set(roomId, map)
+    }
+    return map
   }
 
   /** Create handle for a specific room (cached) */
@@ -423,9 +442,10 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
           timestamp: Date.now(),
         }, 5000)
 
-        const current = getRoom()
-        current.joined = false
-        current.handlers.clear()
+        // Only flip joined state. Handlers live in this.roomHandlers and must
+        // survive leave/rejoin cycles — the consumer controls their lifetime
+        // via the returned Unsubscribe, removeAllListeners(), or disposeRoom().
+        getRoom().joined = false
       },
 
       emit: <K extends keyof TEvents>(event: K, data: TEvents[K]) => {
@@ -442,18 +462,20 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
 
       on: <K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>): Unsubscribe => {
         const eventKey = event as string
-        const room = getRoom()
-        if (!room.handlers.has(eventKey)) room.handlers.set(eventKey, new Set())
-        room.handlers.get(eventKey)!.add(handler)
-        return () => { getRoom().handlers.get(eventKey)?.delete(handler) }
+        const map = this.getOrCreateHandlers(roomId)
+        if (!map.has(eventKey)) map.set(eventKey, new Set())
+        map.get(eventKey)!.add(handler)
+        return () => {
+          this.roomHandlers.get(roomId)?.get(eventKey)?.delete(handler)
+        }
       },
 
       onSystem: (event: string, handler: EventHandler): Unsubscribe => {
         const eventKey = `$${event}`
-        const room = getRoom()
-        if (!room.handlers.has(eventKey)) room.handlers.set(eventKey, new Set())
-        room.handlers.get(eventKey)!.add(handler)
-        return () => { getRoom().handlers.get(eventKey)?.delete(handler) }
+        const map = this.getOrCreateHandlers(roomId)
+        if (!map.has(eventKey)) map.set(eventKey, new Set())
+        map.get(eventKey)!.add(handler)
+        return () => { this.roomHandlers.get(roomId)?.get(eventKey)?.delete(handler) }
       },
 
       setState: (updates: Partial<TState>) => {
@@ -467,6 +489,20 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
           data: updates,
           timestamp: Date.now(),
         })
+      },
+
+      removeAllListeners: (event?: keyof TEvents | string) => {
+        const map = this.roomHandlers.get(roomId)
+        if (!map) return
+        if (event === undefined) {
+          map.clear()
+          return
+        }
+        const key = event as string
+        // Try as plain event first, then as a system event (with $ prefix) if
+        // the caller passed e.g. 'state:change' instead of '$state:change'.
+        map.get(key)?.clear()
+        if (!key.startsWith('$')) map.get(`$${key}`)?.clear()
       },
     }
 
@@ -529,6 +565,12 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
           return defaultHandle.setState(updates)
         },
       },
+      removeAllListeners: {
+        value: (event?: keyof TEvents | string) => {
+          if (!defaultHandle) throw new Error('No default room set')
+          return defaultHandle.removeAllListeners(event)
+        },
+      },
     })
 
     // Wrap top-level proxy so $room.players reads from default room state.
@@ -560,17 +602,48 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
     this.componentId = id
   }
 
-  /** Cleanup — unsubscribes handlers but keeps factory refs for resubscribe() */
+  /**
+   * Transport cleanup for unmount/remount cycles (e.g. React Strict Mode).
+   *
+   * Unsubscribes from the transport and clears room/handle caches, but
+   * PRESERVES consumer-registered handlers (this.roomHandlers). This matches
+   * the natural React pattern where handlers are registered inside useEffect
+   * and cleaned up via the effect's return function — not by the framework.
+   *
+   * Call `resubscribe()` on remount to re-wire the transport. Call
+   * `disposeRoom(roomId)` or `removeAllListeners()` on a handle to explicitly
+   * drop handlers when the consumer is truly done with a room.
+   *
+   * Breaking change in v0.9.0 (issue #28): prior versions wiped handlers here,
+   * which silently dropped callbacks across unmount/remount cycles.
+   */
   destroy(): void {
     this.globalUnsubscribe?.()
     this.globalUnsubscribe = null
     this.binaryUnsubscribe?.()
     this.binaryUnsubscribe = null
-    for (const [, room] of this.rooms) {
-      room.handlers.clear()
-    }
     this.rooms.clear()
     this.handles.clear()
+    // Intentionally NOT clearing this.roomHandlers — see doc above.
+  }
+
+  /**
+   * Explicitly drop all state and handlers for a single room. Use this when
+   * the consumer is truly finished with a room (not just unmounting).
+   */
+  disposeRoom(roomId: string): void {
+    this.rooms.delete(roomId)
+    this.handles.delete(roomId)
+    this.roomHandlers.delete(roomId)
+  }
+
+  /**
+   * Drop everything — transport, rooms, handles, handlers. Terminal; the
+   * manager becomes unusable after this.
+   */
+  disposeAll(): void {
+    this.destroy()
+    this.roomHandlers.clear()
   }
 }
 

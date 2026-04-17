@@ -278,12 +278,13 @@ describe('Issue #27: room.on()/onSystem() silent handler loss after destroy+resu
         state: { messages: [{ text: 'after-remount' }] },
       }))
 
-      // firstHandler was registered BEFORE destroy(); destroy() clears
-      // room.handlers, so it is legitimately gone — this is intentional cleanup.
-      expect(firstHandler).not.toHaveBeenCalled()
+      // Since v0.9.0 (issue #28): destroy() preserves this.roomHandlers, so
+      // firstHandler — registered before destroy — also fires on re-join.
+      // Consumers that want to wipe handlers must call removeAllListeners()
+      // or disposeRoom(roomId) explicitly.
+      expect(firstHandler).toHaveBeenCalledTimes(1)
 
-      // Both handlers registered AFTER the destroy cycle fire — regardless of
-      // which handle object they were registered on.
+      // Handlers registered AFTER the destroy cycle also fire.
       expect(secondHandler).toHaveBeenCalledTimes(1)
       expect(restoredHandler).toHaveBeenCalledTimes(1)
 
@@ -375,10 +376,10 @@ describe('Issue #27: room.on()/onSystem() silent handler loss after destroy+resu
       })
       expect(handleFromRemount.state).toEqual(handleFromFirstMount.state)
 
-      // firstStateHandler was wiped by destroy() — expected cleanup.
-      expect(firstStateHandler).not.toHaveBeenCalled()
-      // secondStateHandler, registered via the pre-destroy handle after remount,
-      // fires because the handle now looks up the current room object.
+      // Since v0.9.0 (issue #28): destroy() no longer wipes handlers.
+      // Both firstStateHandler (registered before destroy) and
+      // secondStateHandler (registered after) fire on the state delta.
+      expect(firstStateHandler).toHaveBeenCalledTimes(1)
       expect(secondStateHandler).toHaveBeenCalledTimes(1)
       expect(secondStateHandler).toHaveBeenCalledWith({
         messages: [{ playerId: 'p1', text: 'visible-in-state' }],

@@ -103,7 +103,7 @@
     },
     "packages/cli": {
       "name": "@fluxstack/live-cli",
-      "version": "0.7.2",
+      "version": "0.9.0",
       "bin": {
         "fluxstack-inspect": "./dist/inspector.js",
       },
@@ -117,9 +117,9 @@
     },
     "packages/client": {
       "name": "@fluxstack/live-client",
-      "version": "0.7.2",
+      "version": "0.9.0",
       "dependencies": {
-        "@fluxstack/live": "^0.7.0",
+        "@fluxstack/live": "^0.8.0",
       },
       "devDependencies": {
         "tsup": "^8.4.0",
@@ -128,7 +128,7 @@
     },
     "packages/core": {
       "name": "@fluxstack/live",
-      "version": "0.7.2",
+      "version": "0.9.0",
       "devDependencies": {
         "@types/node": "^25.3.3",
         "ioredis": "^5.10.0",
@@ -142,9 +142,9 @@
     },
     "packages/elysia": {
       "name": "@fluxstack/live-elysia",
-      "version": "0.7.1",
+      "version": "0.9.0",
       "dependencies": {
-        "@fluxstack/live": "^0.7.0",
+        "@fluxstack/live": "^0.9.0",
       },
       "devDependencies": {
         "elysia": "^1.4.6",
@@ -157,7 +157,7 @@
     },
     "packages/express": {
       "name": "@fluxstack/live-express",
-      "version": "0.7.1",
+      "version": "0.9.0",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
         "@fluxstack/live-client": "^0.7.0",
@@ -177,7 +177,7 @@
     },
     "packages/fastify": {
       "name": "@fluxstack/live-fastify",
-      "version": "0.7.1",
+      "version": "0.9.0",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
         "@fluxstack/live-client": "^0.7.0",
@@ -203,10 +203,10 @@
     },
     "packages/react": {
       "name": "@fluxstack/live-react",
-      "version": "0.7.2",
+      "version": "0.9.0",
       "dependencies": {
-        "@fluxstack/live": "^0.7.0",
-        "@fluxstack/live-client": "^0.7.0",
+        "@fluxstack/live": "^0.8.0",
+        "@fluxstack/live-client": "^0.8.0",
       },
       "devDependencies": {
         "@types/react": "^19.0.0",
@@ -222,7 +222,7 @@
     },
     "packages/redis": {
       "name": "@fluxstack/live-redis",
-      "version": "0.7.1",
+      "version": "0.9.0",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
       },
@@ -237,7 +237,7 @@
     },
     "packages/vue": {
       "name": "@fluxstack/live-vue",
-      "version": "0.7.1",
+      "version": "0.9.0",
       "dependencies": {
         "@fluxstack/live": "^0.7.0",
         "@fluxstack/live-client": "^0.7.0",

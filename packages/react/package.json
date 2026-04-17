@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-react",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "React hooks and providers for @fluxstack/live — Live.use(), $field(), LiveComponentsProvider",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -26,8 +26,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.8.0",
-    "@fluxstack/live-client": "^0.8.0"
+    "@fluxstack/live": "^0.9.0",
+    "@fluxstack/live-client": "^0.9.0"
   },
   "peerDependencies": {
     "react": ">=18.0.0",

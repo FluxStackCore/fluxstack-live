@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the `0.x` convention where minor bumps may include breaking changes.
 
+## [0.9.0] - 2026-04-16
+
+Handler decoupling (issue #28), binary state codec, and React provider async-import fix. All packages bumped to 0.9.0.
+
+### Fixed
+
+- **react**: handlers registered synchronously in child `useEffect` during the first render were silently dropped because `LiveConnection` is created via async dynamic `import()` inside the provider's own `useEffect`. Before the import resolved, `registerRoomBinaryHandler` (and peers) returned an `() => {}` stub. Binary `ROOM_EVENT` frames arriving after that were routed to an empty handler set, so room `on('event', …)` callbacks never fired. The provider now queues handlers registered pre-connection and drains them after `LiveConnection` is constructed; the returned unsub works in both the queued and post-drain states.
+- **client**: `RoomHandle` lookup is now decoupled from the manager's lifecycle (issue #28), so `destroy()` + re-join cycles (React Strict Mode, route remounts) no longer leak stale handler references.
+
+### Changed — Breaking
+
+- **core**: `timestamp` field removed from outgoing `STATE_DELTA`, `STATE_UPDATE`, `BROADCAST`, and `ERROR` message payloads. Clients that read `msg.timestamp` will see `undefined`. Read timestamps from wrapping transports or re-add explicitly if needed.
+
+### Added
+
+- **Binary state codec** — new `BinaryStateCodec` in both core and client packages for zero-copy, zero-GC, fixed-layout binary encoding of state deltas (auto-generated from a component's `defaultState`).
+- **React Strict Mode test suite** — `rooms.react-strict-mode.test.ts` covers the destroy/rejoin cycles that broke in issue #27/#28.
+
 ## [0.8.0] - 2026-04-14
 
 Performance and ID generation overhaul. Core, client, react, vue, and redis packages bumped.

@@ -452,7 +452,9 @@ export class LiveConnection {
   /** Register a handler for binary room frames (0x02 / 0x03). Returns unsubscribe. */
   registerRoomBinaryHandler(callback: (frame: Uint8Array) => void): () => void {
     this.roomBinaryHandlers.add(callback)
-    return () => { this.roomBinaryHandlers.delete(callback) }
+    return () => {
+      this.roomBinaryHandlers.delete(callback)
+    }
   }
 
   /** Register a binary message handler for a component */
