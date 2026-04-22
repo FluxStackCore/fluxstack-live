@@ -67,8 +67,18 @@ export function LiveComponentsProvider({
 
   // Create connection in useEffect — SSR-safe (useEffect is skipped on the server)
   useEffect(() => {
-    // Dynamic import to avoid loading LiveConnection module at SSR import time
+    // `cancelled` guards the async import: if the effect cleanup runs before
+    // the dynamic import resolves (React Strict Mode double-invoke, or fast
+    // unmount), we must not create the connection at all. Otherwise the
+    // unmount's disconnect() runs against a null ref and leaks the socket.
+    let cancelled = false
+    let localConn: import('@fluxstack/live-client').LiveConnection | null = null
+    let localUnsub: (() => void) | null = null
+    let localLoadCleanup: (() => void) | null = null
+
     import('@fluxstack/live-client').then(({ LiveConnection }) => {
+      if (cancelled) return
+
       const conn = new LiveConnection({
         url,
         auth,
@@ -79,6 +89,7 @@ export function LiveComponentsProvider({
         debug,
       })
 
+      localConn = conn
       connectionRef.current = conn
 
       // Drain any handlers registered before the connection existed.
@@ -89,7 +100,7 @@ export function LiveComponentsProvider({
         pendingRoomBinaryUnsubsRef.current.set(handler, realUnsub)
       }
 
-      const unsub = conn.onStateChange((state) => {
+      localUnsub = conn.onStateChange((state) => {
         setConnected(state.connected)
         setConnecting(state.connecting)
         setError(state.error)
@@ -107,24 +118,19 @@ export function LiveComponentsProvider({
         } else if (typeof window !== 'undefined') {
           const onReady = () => conn.connect()
           window.addEventListener('load', onReady, { once: true })
-          ;(connectionRef as any).__loadCleanup = () => window.removeEventListener('load', onReady)
+          localLoadCleanup = () => window.removeEventListener('load', onReady)
         } else {
           conn.connect()
         }
       }
-
-      // Cleanup stored for unmount
-      ;(connectionRef as any).__unsub = unsub
     })
 
     return () => {
-      const unsub = (connectionRef as any).__unsub
-      if (unsub) unsub()
-      const loadCleanup = (connectionRef as any).__loadCleanup
-      if (loadCleanup) loadCleanup()
-      if (connectionRef.current) {
-        connectionRef.current.disconnect()
-      }
+      cancelled = true
+      if (localUnsub) localUnsub()
+      if (localLoadCleanup) localLoadCleanup()
+      if (localConn) localConn.disconnect()
+      if (connectionRef.current === localConn) connectionRef.current = null
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 

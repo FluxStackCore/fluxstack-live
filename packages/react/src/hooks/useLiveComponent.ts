@@ -537,6 +537,10 @@ export function useLiveComponent<
     if (!componentId) return
 
     const unregister = registerComponent(componentId, (message: WebSocketResponse) => {
+      // Message routed via connection's map may arrive in the gap between
+      // unmount and unregister(). Dropping it avoids poisoning zustand with
+      // state that will resurface on the next mount.
+      if (!hookAliveRef.current) return
       switch (message.type) {
         case 'STATE_UPDATE':
           if (message.payload?.state) {
@@ -612,10 +616,18 @@ export function useLiveComponent<
     }
   }, [componentId, registerComponent, registerBinaryHandler, updateState])
 
+  // Tracks whether this hook instance is still mounted. Set false in the
+  // final cleanup effect. Async callbacks (rehydrate().then, setTimeout)
+  // consult this before calling into mount/setState paths, so that a fast
+  // unmount (Strict Mode, route change mid-flight) cannot resurrect state
+  // on a disposed instance.
+  const hookAliveRef = useRef(true)
+
   // ===== Auto Mount =====
   useEffect(() => {
     if (connected && autoMount && !mountedRef.current && !componentId && !mountingRef.current && !rehydrating && !mountFailed) {
       rehydrate().then(ok => {
+        if (!hookAliveRef.current) return
         if (!ok && !mountedRef.current && !mountFailed) mount()
       })
     }
@@ -635,7 +647,11 @@ export function useLiveComponent<
       setError(null)
       mountedRef.current = false
       mountingRef.current = false
-      setTimeout(() => mountFnRef.current?.(), 50)
+      const timer = setTimeout(() => {
+        if (!hookAliveRef.current) return
+        mountFnRef.current?.()
+      }, 50)
+      return () => clearTimeout(timer)
     }
   }, [wsAuthenticated, authDenied, log])
 
@@ -647,10 +663,13 @@ export function useLiveComponent<
       setComponentId(null)
       onDisconnect?.()
     }
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
     if (!prevConnected.current && connected) {
       onConnect?.()
       if (!mountedRef.current && !mountingRef.current) {
-        setTimeout(() => {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null
+          if (!hookAliveRef.current) return
           const persisted = getPersistedState(persistEnabled, componentName)
           if (persisted?.signedState) rehydrate()
           else mount()
@@ -658,6 +677,9 @@ export function useLiveComponent<
       }
     }
     prevConnected.current = connected
+    return () => {
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+    }
   }, [connected, mount, rehydrate, componentName, onConnect, onDisconnect])
 
   // ===== Room Manager =====
@@ -698,10 +720,27 @@ export function useLiveComponent<
   }, [roomManager])
 
   // ===== Cleanup =====
+  // Defer unmount via microtask/timeout so React Strict Mode's
+  // mount → unmount → remount cycle doesn't tear down the server-side
+  // component between the two mounts. If the component remounts before
+  // the timeout fires, we cancel the pending unmount.
+  const pendingUnmountRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
+    // Remount: re-arm liveness and cancel any pending unmount.
+    hookAliveRef.current = true
+    if (pendingUnmountRef.current) {
+      clearTimeout(pendingUnmountRef.current)
+      pendingUnmountRef.current = null
+    }
     return () => {
+      hookAliveRef.current = false
       debounceTimers.current.forEach(t => clearTimeout(t))
-      if (mountedRef.current) unmount()
+      if (mountedRef.current) {
+        pendingUnmountRef.current = setTimeout(() => {
+          pendingUnmountRef.current = null
+          if (mountedRef.current) unmount()
+        }, 0)
+      }
     }
   }, [unmount])
 
