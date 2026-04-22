@@ -10,3 +10,4 @@ packages/*/bun.lock
 # npm auth tokens — never commit
 .npmrc
 packages/*/.npmrc
+.claude/settings.local.json
