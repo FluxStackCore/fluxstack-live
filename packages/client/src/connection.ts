@@ -62,6 +62,8 @@ export class LiveConnection {
   private options: Required<Omit<LiveConnectionOptions, 'url' | 'auth'>> & { url?: string; auth?: LiveAuthOptions }
   private reconnectAttempts = 0
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null
+  private manualReconnectTimeout: ReturnType<typeof setTimeout> | null = null
+  private destroyed = false
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private componentCallbacks = new Map<string, ComponentCallback>()
   private binaryCallbacks = new Map<string, (payload: Uint8Array) => void>()
@@ -221,6 +223,10 @@ export class LiveConnection {
       clearTimeout(this.reconnectTimeout)
       this.reconnectTimeout = null
     }
+    if (this.manualReconnectTimeout) {
+      clearTimeout(this.manualReconnectTimeout)
+      this.manualReconnectTimeout = null
+    }
     this.stopHeartbeat()
     if (this.ws) {
       this.ws.close()
@@ -232,9 +238,14 @@ export class LiveConnection {
 
   /** Manual reconnect */
   reconnect(): void {
+    if (this.destroyed) return
     this.disconnect()
     this.reconnectAttempts = 0
-    setTimeout(() => this.connect(), 100)
+    this.manualReconnectTimeout = setTimeout(() => {
+      this.manualReconnectTimeout = null
+      if (this.destroyed) return
+      this.connect()
+    }, 100)
   }
 
   private attemptReconnect(): void {
@@ -507,6 +518,7 @@ export class LiveConnection {
 
   /** Destroy the connection and clean up all resources */
   destroy(): void {
+    this.destroyed = true
     this.disconnect()
     this.componentCallbacks.clear()
     this.binaryCallbacks.clear()
