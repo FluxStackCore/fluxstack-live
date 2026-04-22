@@ -360,7 +360,16 @@ export class ComponentRoomProxy {
           // Bind methods to the instance
           return typeof val === 'function' ? val.bind(instance) : val
         }
-        return undefined
+        // Issue #30: when no instance exists, silently returning `undefined`
+        // makes the caller crash later with an opaque "X is not a function"
+        // at the call site — usually minified and hard to trace. Throw a
+        // descriptive error instead so the failure is discoverable and the
+        // fix path is obvious.
+        throw new Error(
+          `Room '${roomId}' has no live instance — call .join() (and await it) ` +
+          `before accessing '${String(prop)}' on $room(${roomClass.roomName}, '${instanceId}'), ` +
+          `or ensure at least one client has joined the room.`
+        )
       },
     })
 
