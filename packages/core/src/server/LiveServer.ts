@@ -534,7 +534,9 @@ export class LiveServer {
           }))
           break
         }
-        this.roomManager.setRoomState(roomId, message.payload?.state, componentId)
+        // Use the client-facing variant: filters $-prefix + prototype-pollution
+        // keys so the client can't inject server-only fields into shared room state.
+        this.roomManager.setRoomStateFromClient(roomId, message.payload?.state, componentId)
         break
       }
       case 'ROOM_STATE_GET': {
