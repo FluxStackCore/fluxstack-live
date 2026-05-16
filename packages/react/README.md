@@ -82,7 +82,10 @@ const component = Live.use<MyComponent>('MyComponent', {
 component.$state.count
 
 // Connection & loading status
-component.$connected
+component.$connected   // WebSocket open?         (transport-level)
+component.$ready       // WebSocket open AND      (use this to gate actions)
+                       // server-side mount done
+component.$status      // detailed lifecycle phase
 component.$loading
 component.$error
 
@@ -91,14 +94,55 @@ await component.increment()
 await component.sendMessage({ text: 'Hello' })
 ```
 
+### Wait for `$ready` before calling actions
+
+`$connected` reflects only the underlying WebSocket. Live Components have a
+**second lifecycle step** — the server has to create the component instance
+and respond with its `componentId` — that runs **after** the WebSocket
+opens. Between those two events there's a brief window where `$connected`
+is already `true` but the component isn't mounted yet, and any action call
+will throw.
+
+```tsx
+// ❌ wrong — racy: actions fire during the "mounting" window
+useEffect(() => {
+  if (!hunt.$connected) return
+  hunt.move({ lat, lng })   // → "component not mounted yet"
+}, [hunt.$connected])
+
+// ✅ correct — waits until the server-side mount completes
+useEffect(() => {
+  if (!hunt.$ready) return
+  hunt.move({ lat, lng })
+}, [hunt.$ready])
+```
+
+`$ready` is `true` iff `$status === 'synced'`. The full status progression:
+
+| `$status`        | meaning                                                |
+|------------------|--------------------------------------------------------|
+| `connecting`     | WebSocket still opening (or down)                      |
+| `reconnecting`   | WebSocket open; restoring state from before disconnect |
+| `loading`        | mount request in flight                                |
+| `mounting`       | WebSocket open, waiting for the server `componentId`   |
+| `error`          | mount failed                                           |
+| `synced`         | **`$ready === true`** — safe to call actions           |
+
+If you call an action before `$ready`, the error message distinguishes the
+two failure modes (`WebSocket is not connected` vs `component '<name>' is
+not mounted yet`) so you can tell which signal to wait on.
+
 ### `useLiveComponent(name, options?)`
 
 Hook equivalent of `Live.use()`:
 
 ```tsx
-const { $state, $connected, call } = useLiveComponent('Counter', {
+const { $state, $ready, call } = useLiveComponent('Counter', {
   defaultState: { count: 0 },
 })
+
+if (!$ready) return <Spinner />     // gate actions on $ready, not $connected
+await call('increment')
 ```
 
 ### `$field(name, options?)`
