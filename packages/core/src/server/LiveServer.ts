@@ -296,6 +296,14 @@ export class LiveServer {
       return
     }
 
+    // Reject non-object root values (null, numbers, strings, arrays, booleans).
+    // Valid LiveMessages are always objects — a bare value cannot be dispatched
+    // and reading `.payload` on it would throw.
+    if (message === null || typeof message !== 'object' || Array.isArray(message)) {
+      sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Invalid message: expected object' }))
+      return
+    }
+
     // Strip prototype pollution keys from payload
     if (message.payload) {
       message.payload = sanitizePayload(message.payload)
