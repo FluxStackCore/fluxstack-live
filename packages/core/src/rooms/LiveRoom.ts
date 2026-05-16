@@ -13,23 +13,58 @@
 
 import type { LiveRoomManagerInterface } from '../component/context'
 import type { RoomCodecOption } from './RoomCodec'
+import type { LiveAuthSession } from '../auth/types'
 
 // ===== Lifecycle Context Types =====
 
-export interface RoomJoinContext {
+export interface RoomJoinContext<TMembership = any> {
   componentId: string
+  /**
+   * Full auth session of the joining peer (when authenticated). Generic by
+   * design — only `id` is fixed; any field on `LiveAuthSession` can be a
+   * user, bot, device, service, etc. depending on the auth provider.
+   * Frozen — do not mutate; use `membership` for per-member state.
+   */
+  session?: LiveAuthSession
+  /** @deprecated Use `session?.id`. Kept for backwards compatibility. */
   userId?: string
   payload?: any
+  /**
+   * Per-member, server-only metadata bag. Mutate freely from `onJoin`
+   * (e.g. `ctx.membership.playerId = payload.playerId`); the same object
+   * is handed back to `onLeave` so domain code can clean up state keyed
+   * by app-specific identifiers (#36).
+   *
+   * Lives only inside the room — never sent to clients.
+   */
+  membership: TMembership
 }
 
-export interface RoomLeaveContext {
+export interface RoomLeaveContext<TMembership = any> {
   componentId: string
+  /**
+   * Full auth session captured at join time. See `RoomJoinContext.session`.
+   */
+  session?: LiveAuthSession
+  /** @deprecated Use `session?.id`. Kept for backwards compatibility. */
   userId?: string
   reason: 'leave' | 'disconnect' | 'cleanup'
+  /**
+   * The membership bag populated during `onJoin`. Use this to find and
+   * remove entries from `room.state` that are keyed by an app-specific id
+   * rather than the framework's `componentId` (#36).
+   *
+   * Always defined (defaults to an empty object) so consumers can read
+   * fields without nil-checking the whole object.
+   */
+  membership: TMembership
 }
 
 export interface RoomEventContext {
   componentId: string
+  /** Full auth session of the emitter, when authenticated. */
+  session?: LiveAuthSession
+  /** @deprecated Use `session?.id`. Kept for backwards compatibility. */
   userId?: string
 }
 

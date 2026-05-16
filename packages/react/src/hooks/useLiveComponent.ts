@@ -22,6 +22,7 @@ import {
 import type { RoomProxy, RoomServerMessage } from '@fluxstack/live-client'
 import type { WebSocketResponse } from '@fluxstack/live'
 import { generateId } from '@fluxstack/live-client'
+import { computeStatus, notReadyError as makeNotReadyError } from './readiness'
 
 // ===== Deep Merge (always-on, retrocompatible) =====
 
@@ -96,6 +97,16 @@ export interface LiveComponentProxy<
 > {
   readonly $state: TState
   readonly $connected: boolean
+  /**
+   * `true` when the component has finished its server-side mount handshake
+   * and is safe to call actions on (equivalent to `$status === 'synced'`).
+   *
+   * Prefer `$ready` over `$connected` as an action gate: `$connected` only
+   * reflects the underlying WebSocket and may be `true` during the brief
+   * window before the component is mounted on the server — actions fired
+   * in that window will reject with "Component not yet mounted" (#35).
+   */
+  readonly $ready: boolean
   readonly $loading: boolean
   readonly $error: string | null
   readonly $status: 'synced' | 'disconnected' | 'connecting' | 'reconnecting' | 'loading' | 'mounting' | 'error'
@@ -176,12 +187,15 @@ export interface UseLiveComponentOptions extends HybridComponentOptions {
 // ===== Reserved Props =====
 
 const RESERVED_PROPS = new Set([
-  '$state', '$connected', '$loading', '$error', '$status', '$componentId', '$dirty', '$authenticated', '$auth',
+  '$state', '$connected', '$ready', '$loading', '$error', '$status', '$componentId', '$dirty', '$authenticated', '$auth',
   '$call', '$callAndWait', '$fire', '$mount', '$unmount', '$refresh', '$set', '$onBroadcast', '$updateLocal',
   '$room', '$rooms', '$field', '$sync',
   'then', 'toJSON', 'valueOf', 'toString',
   Symbol.toStringTag, Symbol.iterator,
 ])
+
+/** @internal Exposed for tests. Subject to change without notice. */
+export const _RESERVED_PROPS = RESERVED_PROPS
 
 // ===== Zustand Store =====
 
@@ -420,10 +434,15 @@ export function useLiveComponent<
     }
   }, [connected, componentName, sendMessageAndWait, onRehydrate])
 
+  // Build a precise error explaining WHY an action can't run right now.
+  // Differentiates "WebSocket down" from "component not mounted yet" (#35).
+  const notReadyError = (action: string): Error =>
+    makeNotReadyError(action, componentName, { connected, rehydrating, loading, error, componentId })
+
   // ===== Call Action =====
   const call = useCallback(async (action: string, payload?: any) => {
     const id = componentId || lastComponentIdRef.current
-    if (!id || !connected) throw new Error('Not connected')
+    if (!id || !connected) throw notReadyError(action)
 
     const response = await sendMessageAndWait({
       type: 'CALL_ACTION',
@@ -437,7 +456,7 @@ export function useLiveComponent<
 
   const callAndWait = useCallback(async <R = any>(action: string, payload?: any, timeout = 10000): Promise<R> => {
     const id = componentId || lastComponentIdRef.current
-    if (!id || !connected) throw new Error('Not connected')
+    if (!id || !connected) throw notReadyError(action)
 
     const response = await sendMessageAndWait({
       type: 'CALL_ACTION',
@@ -745,14 +764,13 @@ export function useLiveComponent<
   }, [unmount])
 
   // ===== Status =====
-  const getStatus = () => {
-    if (!connected) return 'connecting'
-    if (rehydrating) return 'reconnecting'
-    if (loading) return 'loading'
-    if (error) return 'error'
-    if (!componentId) return 'mounting'
-    return 'synced'
-  }
+  const getStatus = () => computeStatus({
+    connected,
+    rehydrating,
+    loading,
+    error,
+    componentId,
+  })
 
   // ===== Proxy =====
   const proxy = useMemo(() => {
@@ -766,6 +784,7 @@ export function useLiveComponent<
         switch (prop) {
           case '$state': return storeRef.current?.getState().state ?? stateData
           case '$connected': return connected
+          case '$ready': return getStatus() === 'synced'
           case '$loading': return loading
           case '$error': return error
           case '$status': return getStatus()
@@ -808,7 +827,7 @@ export function useLiveComponent<
         // Action (anything not in state or reserved)
         return async (payload?: any) => {
           const id = componentId || lastComponentIdRef.current
-          if (!id || !connected) throw new Error('Not connected')
+          if (!id || !connected) throw notReadyError(prop)
 
           const response = await sendMessageAndWait({
             type: 'CALL_ACTION',
@@ -836,7 +855,7 @@ export function useLiveComponent<
       ownKeys() {
         return [
           ...Object.keys(stateData),
-          '$state', '$connected', '$loading', '$error', '$status', '$componentId', '$dirty', '$authenticated', '$auth',
+          '$state', '$connected', '$ready', '$loading', '$error', '$status', '$componentId', '$dirty', '$authenticated', '$auth',
           '$call', '$callAndWait', '$fire', '$mount', '$unmount', '$refresh', '$set', '$field', '$sync',
           '$onBroadcast', '$updateLocal', '$room', '$rooms',
         ]

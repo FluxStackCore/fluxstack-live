@@ -658,9 +658,59 @@ export class ComponentRegistry {
     return await component.executeAction?.(action, payload)
   }
 
+  /**
+   * Apply a client-driven property update to a mounted component.
+   *
+   * Security: the property name is attacker-controlled. We MUST restrict
+   * which keys the client can write, otherwise a malicious frame like
+   *   { type: 'PROPERTY_UPDATE', property: 'session', payload: { value: { roles: ['admin'] } } }
+   * would inject arbitrary fields into `this.state`, polluting reads from
+   * `this.state.session` in subsequent action handlers (CVE-class issue).
+   *
+   * Three rules, evaluated in order:
+   *   1. Prototype-pollution keys (`__proto__`, `constructor`, `prototype`)
+   *      are ALWAYS rejected.
+   *   2. `$`-prefixed keys are server-only by convention — the client cannot
+   *      write them via PROPERTY_UPDATE. The server can still mutate them
+   *      via `this.setState({ $x: ... })` since that bypasses this path.
+   *   3. The key must be in EITHER `static updatableFields` (explicit
+   *      allowlist, takes precedence) OR `static defaultState` (default).
+   */
   updateProperty(componentId: string, property: string, value: any) {
     const component = this.components.get(componentId)
     if (!component) throw new Error(`Component '${componentId}' not found`)
+
+    // (1) Prototype-pollution defense — always rejected.
+    if (property === '__proto__' || property === 'constructor' || property === 'prototype') {
+      throw new Error(`PROPERTY_UPDATE rejected: '${property}' is a reserved key`)
+    }
+
+    // (2) `$`-prefix convention — server-only fields.
+    if (property.startsWith('$')) {
+      throw new Error(
+        `PROPERTY_UPDATE rejected: '${property}' is server-only ` +
+        `($-prefixed fields cannot be written by the client). ` +
+        `Use a server action to mutate it.`
+      )
+    }
+
+    // (3) Allowlist check.
+    const componentClass = component.constructor as any
+    const explicit = componentClass.updatableFields as readonly string[] | undefined
+    const defaults = componentClass.defaultState
+      ? Object.keys(componentClass.defaultState as Record<string, unknown>)
+      : []
+    const allowed = explicit ?? defaults
+
+    if (!allowed.includes(property)) {
+      throw new Error(
+        `PROPERTY_UPDATE rejected: '${property}' is not an updatable field of ` +
+        `'${componentClass.componentName || componentClass.name}'. ` +
+        `Allowed: [${allowed.join(', ')}]. ` +
+        `Declare it in 'static defaultState' or 'static updatableFields' to allow client writes.`
+      )
+    }
+
     component.setState?.({ [property]: value })
   }
 
