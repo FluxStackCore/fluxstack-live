@@ -6,6 +6,25 @@
 import type { WebSocketMessage, WebSocketResponse } from '@fluxstack/live'
 import { generateId } from './generateId'
 
+/**
+ * Deep-freeze a session mirror so client code cannot mutate fields locally.
+ * The server-side `AuthenticatedContext` is already frozen — this mirrors
+ * that guarantee on the client so accidental writes
+ * (`proxy.$auth.session.plan = 'enterprise'`) throw in strict mode instead
+ * of silently corrupting the shared reference.
+ *
+ * The deep walk is bounded (depth 8) — auth sessions are leaf-ish objects,
+ * not arbitrary graphs, so this is cheap.
+ */
+function deepFreezeSession(s: unknown, depth = 0): unknown {
+  if (s === null || typeof s !== 'object' || depth > 8) return s
+  if (Object.isFrozen(s)) return s
+  for (const key of Object.keys(s as Record<string, unknown>)) {
+    deepFreezeSession((s as Record<string, unknown>)[key], depth + 1)
+  }
+  return Object.freeze(s)
+}
+
 /** Auth credentials to send during WebSocket connection */
 export interface LiveAuthOptions {
   /** JWT or opaque token */
@@ -308,7 +327,10 @@ export class LiveConnection {
             if (payload?.authenticated) {
               this.setState({
                 authenticated: true,
-                auth: { authenticated: true, session: payload.session || null },
+                auth: {
+                  authenticated: true,
+                  session: deepFreezeSession(payload.session ?? null) as Record<string, unknown> | null,
+                },
               })
             }
           })
@@ -324,7 +346,11 @@ export class LiveConnection {
         authenticated,
         auth: {
           authenticated,
-          session: authenticated ? (payload?.session || null) : null,
+          // Deep-freeze the mirror so consumer code cannot mutate locally
+          // (mirrors the server-side AuthenticatedContext.freeze).
+          session: authenticated
+            ? (deepFreezeSession(payload?.session ?? null) as Record<string, unknown> | null)
+            : null,
         },
       })
     }
@@ -502,7 +528,10 @@ export class LiveConnection {
         authenticated: success,
         auth: {
           authenticated: success,
-          session: success ? (payload?.session || null) : null,
+          // Deep-freeze the mirror (see deepFreezeSession at top).
+          session: success
+            ? (deepFreezeSession(payload?.session ?? null) as Record<string, unknown> | null)
+            : null,
         },
       })
       return success
