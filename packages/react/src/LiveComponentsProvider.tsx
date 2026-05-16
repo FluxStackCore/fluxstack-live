@@ -6,6 +6,7 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
 import type { LiveAuthOptions, LiveConnectionOptions, LiveClientAuth } from '@fluxstack/live-client'
 import type { WebSocketMessage, WebSocketResponse } from '@fluxstack/live'
+import { acquire as poolAcquire, release as poolRelease, poolKey } from './connectionPool'
 
 export interface LiveComponentsContextValue {
   connected: boolean
@@ -76,10 +77,18 @@ export function LiveComponentsProvider({
     let localUnsub: (() => void) | null = null
     let localLoadCleanup: (() => void) | null = null
 
+    const key = poolKey({ url, auth })
+    let acquired = false
+
     import('@fluxstack/live-client').then(({ LiveConnection }) => {
       if (cancelled) return
 
-      const conn = new LiveConnection({
+      // Pool the connection so React StrictMode's mount → unmount → remount
+      // cycle reuses the same socket instead of opening two simultaneous
+      // handshakes (#34). The pool keeps the connection alive for a short
+      // grace window after release(), which covers StrictMode's sequential
+      // remount.
+      const conn = poolAcquire(key, () => new LiveConnection({
         url,
         auth,
         autoConnect: false,
@@ -87,7 +96,8 @@ export function LiveComponentsProvider({
         maxReconnectAttempts,
         heartbeatInterval,
         debug,
-      })
+      }))
+      acquired = true
 
       localConn = conn
       connectionRef.current = conn
@@ -113,6 +123,9 @@ export function LiveComponentsProvider({
         // Wait for DOM to be fully loaded before connecting.
         // This prevents the WS handshake from competing with
         // initial resource loading (scripts, styles, images).
+        // Calling connect() on an already-connected pooled connection is a
+        // no-op (LiveConnection guards readyState), so this is safe to run
+        // for every acquire().
         if (typeof document !== 'undefined' && document.readyState === 'complete') {
           conn.connect()
         } else if (typeof window !== 'undefined') {
@@ -129,7 +142,9 @@ export function LiveComponentsProvider({
       cancelled = true
       if (localUnsub) localUnsub()
       if (localLoadCleanup) localLoadCleanup()
-      if (localConn) localConn.disconnect()
+      // Release the pooled connection. The pool handles the actual
+      // disconnect after a short grace window — see connectionPool.ts.
+      if (acquired) poolRelease(key)
       if (connectionRef.current === localConn) connectionRef.current = null
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
