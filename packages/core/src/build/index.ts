@@ -86,29 +86,97 @@ function extractDefaultState(classBody: string): string {
 
 /**
  * Remove `as <Type>` casts, handling nested generics/brackets.
+ *
+ * Critical: the scan must skip over string literals, template literals, and
+ * comments so that user data like `'Use as dicas!'` is never treated as a
+ * cast site (issue #33).
  */
 function stripAsCasts(s: string): string {
-  const RE = /\s+as\s+/g
-  let out = '', last = 0, m: RegExpExecArray | null
+  let out = ''
+  let i = 0
 
-  while ((m = RE.exec(s)) !== null) {
-    out += s.slice(last, m.index)
-    let i = m.index + m[0].length
-    const stack: string[] = []
+  while (i < s.length) {
+    const c = s[i]!
 
-    while (i < s.length) {
-      const c = s[i]
-      if (c === '{' || c === '<' || c === '(') { stack.push(c === '{' ? '}' : c === '<' ? '>' : ')'); i++ }
-      else if (c === '[' && s[i + 1] === ']') { i += 2 }
-      else if (c === '[') { stack.push(']'); i++ }
-      else if (stack.length && c === stack[stack.length - 1]) { stack.pop(); i++; while (s[i] === '[' && s[i + 1] === ']') i += 2 }
-      else if (!stack.length && (c === ',' || c === '\n' || c === '}')) break
-      else i++
+    // Skip string literals — quoted content cannot contain a cast.
+    if (c === '"' || c === "'" || c === '`') {
+      const start = i
+      const quote = c
+      i++
+      while (i < s.length) {
+        const ch = s[i]!
+        if (ch === '\\') { i += 2; continue }
+        if (ch === quote) { i++; break }
+        if (quote === '`' && ch === '$' && s[i + 1] === '{') {
+          // Skip ${...} expression inside template literal (balanced braces).
+          i += 2
+          let depth = 1
+          while (i < s.length && depth > 0) {
+            const e = s[i]!
+            if (e === '{') depth++
+            else if (e === '}') depth--
+            i++
+          }
+          continue
+        }
+        i++
+      }
+      out += s.slice(start, i)
+      continue
     }
-    last = i
+
+    // Skip // line comments
+    if (c === '/' && s[i + 1] === '/') {
+      const start = i
+      while (i < s.length && s[i] !== '\n') i++
+      out += s.slice(start, i)
+      continue
+    }
+
+    // Skip /* block comments */
+    if (c === '/' && s[i + 1] === '*') {
+      const start = i
+      i += 2
+      while (i < s.length && !(s[i] === '*' && s[i + 1] === '/')) i++
+      i += 2
+      out += s.slice(start, i)
+      continue
+    }
+
+    // Detect ` as ` (with surrounding whitespace) at the current position.
+    // Whitespace on both sides guarantees `as` is a standalone token — it
+    // cannot be a substring of an identifier like `class` or `wasnt`.
+    if (/\s/.test(c) && s.startsWith('as', i + 1) && /\s/.test(s[i + 3] ?? '')) {
+      i += 4 // consume ` as `
+      const stack: string[] = []
+      while (i < s.length) {
+        const cc = s[i]!
+        // Strings inside the type cast (rare, e.g. `as 'literal'`) must be skipped too.
+        if (cc === '"' || cc === "'" || cc === '`') {
+          const q = cc
+          i++
+          while (i < s.length) {
+            if (s[i] === '\\') { i += 2; continue }
+            if (s[i] === q) { i++; break }
+            i++
+          }
+          continue
+        }
+        if (cc === '{' || cc === '<' || cc === '(') { stack.push(cc === '{' ? '}' : cc === '<' ? '>' : ')'); i++ }
+        else if (cc === '[' && s[i + 1] === ']') { i += 2 }
+        else if (cc === '[') { stack.push(']'); i++ }
+        else if (stack.length && cc === stack[stack.length - 1]) { stack.pop(); i++; while (s[i] === '[' && s[i + 1] === ']') i += 2 }
+        else if (!stack.length && (cc === ',' || cc === '\n' || cc === '}')) break
+        else i++
+      }
+      continue
+    }
+
+    out += c
+    i++
   }
 
-  return out + s.slice(last)
+  return out
 }
 
 // ===== Component Discovery & Code Generation =====
@@ -239,6 +307,10 @@ function buildStub(metas: ComponentMeta[]): string {
     `}`
   ).join('\n\n')
 }
+
+// ===== Internals exposed for testing =====
+// Not part of the public API. Subject to change without notice.
+export const _internals = { extractMeta, extractDefaultState, stripAsCasts, buildStub }
 
 // ===== Plugin =====
 
