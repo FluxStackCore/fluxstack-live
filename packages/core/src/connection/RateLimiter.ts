@@ -18,6 +18,11 @@ export class ConnectionRateLimiter {
   }
 
   tryConsume(count = 1): boolean {
+    // Reject pathological inputs early. Without this guard,
+    // tryConsume(-N) would REFUND tokens (a hostile client could exceed
+    // the cap), tryConsume(NaN) would silently corrupt the bucket via
+    // `tokens - NaN`, and tryConsume(Infinity) is meaningless.
+    if (!Number.isFinite(count) || count < 0) return false
     this.refill()
     if (this.tokens >= count) {
       this.tokens -= count
@@ -28,7 +33,12 @@ export class ConnectionRateLimiter {
 
   private refill(): void {
     const now = Date.now()
-    const elapsed = (now - this.lastRefill) / 1000
+    // Clamp elapsed to a non-negative value. If the system clock moved
+    // backwards (NTP adjustment, container clock drift, manual change),
+    // a negative elapsed would credit *negative* tokens, leaving the
+    // bucket below zero — every subsequent tryConsume would then reject
+    // even legitimate traffic. Treat backwards-clock as "no time passed".
+    const elapsed = Math.max(0, (now - this.lastRefill) / 1000)
     this.tokens = Math.min(this.maxTokens, this.tokens + elapsed * this.refillRate)
     this.lastRefill = now
   }
