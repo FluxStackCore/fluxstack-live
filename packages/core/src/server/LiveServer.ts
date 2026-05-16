@@ -51,6 +51,15 @@ export interface LiveServerOptions {
   rateLimitMaxTokens?: number
   /** Rate limiter: tokens refilled per second */
   rateLimitRefillRate?: number
+  /**
+   * Maximum JSON nesting depth accepted on incoming WebSocket frames.
+   * Defaults to MAX_JSON_DEPTH (32). Set to -1 to disable the check.
+   *
+   * Disabling the check is dangerous: a client can pin the JSON parser
+   * with `'[' x 10_000` and exhaust CPU. Only opt out if you trust all
+   * clients (e.g. internal tooling) and have an explicit reason.
+   */
+  maxJsonDepth?: number
   /** Components path for auto-discovery */
   componentsPath?: string
   /** HTTP monitoring routes prefix. Set to false to disable. Defaults to '/api/live' */
@@ -291,8 +300,9 @@ export class LiveServer {
     // Cheap pre-parse depth check — bail out before JSON.parse spends CPU on
     // a pathologically nested payload (10k '[' chars can pin the parser).
     // We count maximum opening-bracket nesting while ignoring brackets that
-    // appear inside string literals.
-    {
+    // appear inside string literals. A negative limit disables the check.
+    const depthLimit = this.options.maxJsonDepth ?? MAX_JSON_DEPTH
+    if (depthLimit >= 0) {
       let depth = 0
       let max = 0
       let inString = false
@@ -309,8 +319,8 @@ export class LiveServer {
         else if (ch === 0x7b /* { */ || ch === 0x5b /* [ */) {
           depth++
           if (depth > max) max = depth
-          if (max > MAX_JSON_DEPTH) {
-            sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: `JSON nesting too deep (max ${MAX_JSON_DEPTH})` }))
+          if (max > depthLimit) {
+            sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: `JSON nesting too deep (max ${depthLimit})` }))
             return
           }
         }
