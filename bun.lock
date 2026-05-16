@@ -235,6 +235,18 @@
         "ioredis": ">=5.0.0",
       },
     },
+    "packages/spatial-room": {
+      "name": "@fluxstack/spatial-room",
+      "version": "0.9.0",
+      "devDependencies": {
+        "tsup": "^8.0.0",
+        "typescript": "^5.3.3",
+        "vitest": "^3.2.4",
+      },
+      "peerDependencies": {
+        "@fluxstack/live": "^0.9.0",
+      },
+    },
     "packages/vue": {
       "name": "@fluxstack/live-vue",
       "version": "0.9.0",
@@ -360,6 +372,8 @@
     "@fluxstack/live-vue": ["@fluxstack/live-vue@workspace:packages/vue"],
 
     "@fluxstack/plugin-kit": ["@fluxstack/plugin-kit@workspace:packages/plugin-kit"],
+
+    "@fluxstack/spatial-room": ["@fluxstack/spatial-room@workspace:packages/spatial-room"],
 
     "@ioredis/commands": ["@ioredis/commands@1.5.1", "", {}, "sha512-JH8ZL/ywcJyR9MmJ5BNqZllXNZQqQbnVZOqpPQqE1vHiFgAw4NHbvE0FOduNU8IX9babitBT46571OnPTT0Zcw=="],
 

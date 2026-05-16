@@ -519,6 +519,58 @@ export class LiveRoomManager {
   }
 
   /**
+   * Emit an event to a SUBSET of room members (filtered by componentId).
+   *
+   * Used by interest-management plugins (e.g. @fluxstack/spatial-room) to
+   * deliver an event only to nearby members. The set must contain valid
+   * componentIds already joined to the room; unknown ids are skipped.
+   *
+   * Skips `onEvent` lifecycle, the server-side RoomEventBus, and cluster
+   * pubsub — those are global signals and would defeat the filter.
+   *
+   * @returns number of members the event was sent to
+   */
+  emitToRoomMembers(
+    roomId: string,
+    members: Iterable<string>,
+    event: string,
+    data: any,
+  ): number {
+    const room = this.rooms.get(roomId)
+    if (!room) return 0
+    const now = Date.now()
+    room.lastActivity = now
+
+    let sent = 0
+    if (room.codec) {
+      // Binary path: encode payload once, build shared tail, prepend per-member header.
+      const payload = room.codec.encode(data)
+      const tail = buildRoomFrameTail(roomId, event, payload)
+      for (const cid of members) {
+        const member = room.members.get(cid)
+        if (!member || member.ws.readyState !== 1) continue
+        const frame = prependMemberHeader(BINARY_ROOM_EVENT, cid, tail)
+        sendBinaryImmediate(member.ws, frame)
+        sent++
+      }
+    } else {
+      // JSON path: build template once, splice componentId per member.
+      const message = { type: 'ROOM_EVENT', componentId: '', roomId, event, data, timestamp: now }
+      const { componentId: _, ...rest } = message
+      const jsonBody = JSON.stringify(rest)
+      const prefix = '{"componentId":"'
+      const suffix = '",' + jsonBody.slice(1)
+      for (const cid of members) {
+        const member = room.members.get(cid)
+        if (!member || member.ws.readyState !== 1) continue
+        queuePreSerialized(member.ws, prefix + cid + suffix)
+        sent++
+      }
+    }
+    return sent
+  }
+
+  /**
    * Strip keys that the client is never allowed to set on room state:
    *   - prototype-pollution keys (`__proto__`, `constructor`, `prototype`)
    *   - `$`-prefixed keys (server-only convention, mirrors PROPERTY_UPDATE rule)

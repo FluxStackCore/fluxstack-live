@@ -9,5 +9,6 @@ export default defineWorkspace([
   'packages/fastify',
   'packages/client',
   'packages/react',
+  'packages/spatial-room',
   '__tests__',
 ])

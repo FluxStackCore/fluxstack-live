@@ -14,6 +14,8 @@ export interface LiveRoomManagerInterface {
   leaveRoom(componentId: string, roomId: string, leaveReason?: 'leave' | 'disconnect' | 'cleanup'): void | Promise<void>
   cleanupComponent(componentId: string): void | Promise<void>
   emitToRoom(roomId: string, event: string, data: any, excludeComponentId?: string): number
+  /** Emit to a specific subset of room members. Used by interest-management plugins. */
+  emitToRoomMembers?(roomId: string, members: Iterable<string>, event: string, data: any): number
   setRoomState(roomId: string, updates: any, excludeComponentId?: string): void
   getRoomState<TState = any>(roomId: string): TState
   isInRoom(componentId: string, roomId: string): boolean
