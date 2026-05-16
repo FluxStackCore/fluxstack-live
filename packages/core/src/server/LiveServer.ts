@@ -20,7 +20,7 @@ import type { LiveComponent } from '../component/LiveComponent'
 import { RateLimiterRegistry } from '../connection/RateLimiter'
 import { liveLog } from '../debug/LiveLogger'
 import { decodeBinaryChunk } from '../protocol/binary'
-import { DEFAULT_WS_PATH, MAX_MESSAGE_SIZE, MAX_ROOMS_PER_CONNECTION } from '../protocol/constants'
+import { DEFAULT_WS_PATH, MAX_MESSAGE_SIZE, MAX_ROOMS_PER_CONNECTION, MAX_JSON_DEPTH } from '../protocol/constants'
 import { sendImmediate } from '../transport/WsSendBatcher'
 import { sanitizePayload } from '../security/sanitize'
 import type { LiveAuthProvider } from '../auth/types'
@@ -286,6 +286,38 @@ export class LiveServer {
     if (str.length > MAX_MESSAGE_SIZE) {
       sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Message too large' }))
       return
+    }
+
+    // Cheap pre-parse depth check — bail out before JSON.parse spends CPU on
+    // a pathologically nested payload (10k '[' chars can pin the parser).
+    // We count maximum opening-bracket nesting while ignoring brackets that
+    // appear inside string literals.
+    {
+      let depth = 0
+      let max = 0
+      let inString = false
+      let escape = false
+      for (let i = 0; i < str.length; i++) {
+        const ch = str.charCodeAt(i)
+        if (escape) { escape = false; continue }
+        if (inString) {
+          if (ch === 0x5c /* \\ */) escape = true
+          else if (ch === 0x22 /* " */) inString = false
+          continue
+        }
+        if (ch === 0x22 /* " */) { inString = true }
+        else if (ch === 0x7b /* { */ || ch === 0x5b /* [ */) {
+          depth++
+          if (depth > max) max = depth
+          if (max > MAX_JSON_DEPTH) {
+            sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: `JSON nesting too deep (max ${MAX_JSON_DEPTH})` }))
+            return
+          }
+        }
+        else if (ch === 0x7d /* } */ || ch === 0x5d /* ] */) {
+          depth--
+        }
+      }
     }
 
     let message: LiveMessage

@@ -4,8 +4,19 @@
 // from incoming client payloads recursively.
 // Optimized: only clones when dangerous keys are found.
 
+import { MAX_JSON_DEPTH } from '../protocol/constants'
+
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
-const MAX_DEPTH = 10
+
+/**
+ * Bound on recursion for the sanitize walker. Aligned with MAX_JSON_DEPTH —
+ * payloads deeper than that are rejected by LiveServer before reaching us,
+ * so a payload arriving here can never legitimately exceed this. Keeping
+ * sanitize in sync ensures __proto__ at any reachable depth is stripped
+ * (the previous bound of 10 left a window where deeply nested dangerous
+ * keys slipped through).
+ */
+const MAX_DEPTH = MAX_JSON_DEPTH
 
 /**
  * Recursively strip dangerous keys from an object.
