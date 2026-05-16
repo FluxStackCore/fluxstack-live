@@ -51,8 +51,10 @@ export class StateValidator {
     excludeFields: string[] = ['lastUpdated', 'version'],
   ): StateConflict[] {
     const conflicts: StateConflict[] = []
-    const clientKeys = Object.keys(clientState as any)
-    const serverKeys = Object.keys(serverState as any)
+    // Guard against null/undefined — Object.keys throws on those, and the
+    // hybrid-state path can hand us either side as null (mount-before-sync).
+    const clientKeys = (clientState && typeof clientState === 'object') ? Object.keys(clientState as any) : []
+    const serverKeys = (serverState && typeof serverState === 'object') ? Object.keys(serverState as any) : []
     const allKeys = Array.from(new Set([...clientKeys, ...serverKeys]))
 
     for (const key of allKeys) {
