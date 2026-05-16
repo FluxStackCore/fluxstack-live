@@ -87,6 +87,10 @@ export class BinaryStateCodec<TState = Record<string, any>> {
   private readonly _bitmaskBytes: number
   private _encodeBuf: Uint8Array
   private _encodeView: DataView
+  /** Reused per encode — avoids one Uint8Array allocation per call. */
+  private _bitmaskScratch: Uint8Array
+  /** Reused per encode — avoids one array allocation per call when strings present. */
+  private _strBytesScratch: (Uint8Array | null)[]
 
   /**
    * Create a codec from defaultState.
@@ -139,6 +143,9 @@ export class BinaryStateCodec<TState = Record<string, any>> {
     const initialSize = this._bitmaskBytes + maxFixed + 4096
     this._encodeBuf = new Uint8Array(initialSize)
     this._encodeView = new DataView(this._encodeBuf.buffer)
+    // Pre-allocate per-encode scratch — reused across encodeDelta calls.
+    this._bitmaskScratch = new Uint8Array(this._bitmaskBytes)
+    this._strBytesScratch = new Array(this._fields.length).fill(null)
   }
 
   get info(): BinaryCodecInfo {
@@ -166,7 +173,12 @@ export class BinaryStateCodec<TState = Record<string, any>> {
     let jsonFallback: Record<string, any> | null = null
     let hasBinary = false
 
-    const bitmask = new Uint8Array(this._bitmaskBytes)
+    // Reuse the scratch bitmask — zero it first.
+    const bitmask = this._bitmaskScratch
+    for (let i = 0; i < bitmask.length; i++) bitmask[i] = 0
+    // Reuse the scratch string-bytes array — null entries are skipped.
+    const strBytes = this._strBytesScratch
+
     for (const key of Object.keys(d)) {
       const idx = this._fieldIndex.get(key)
       if (idx !== undefined) {
@@ -180,14 +192,21 @@ export class BinaryStateCodec<TState = Record<string, any>> {
 
     if (!hasBinary) return { binary: null, jsonFallback }
 
-    // Calculate needed size
+    // Calculate needed size — and CACHE the encoded bytes for strings so
+    // we don't double-encode them in the write loop below.
     let neededSize = this._bitmaskBytes
     for (let i = 0; i < this._fields.length; i++) {
-      if (!(bitmask[i >> 3] & (1 << (i & 7)))) continue
+      if (!(bitmask[i >> 3] & (1 << (i & 7)))) {
+        strBytes[i] = null
+        continue
+      }
       const field = this._fields[i]
       if (field.wireType === TYPE_STRING) {
-        neededSize += 2 + _enc.encode(d[field.name] as string).length
+        const enc = _enc.encode(d[field.name] as string)
+        strBytes[i] = enc
+        neededSize += 2 + enc.length
       } else {
+        strBytes[i] = null
         neededSize += field.fixedSize
       }
     }
@@ -245,11 +264,12 @@ export class BinaryStateCodec<TState = Record<string, any>> {
           offset += 1
           break
         case TYPE_STRING: {
-          const strBytes = _enc.encode(val)
-          this._encodeView.setUint16(offset, strBytes.length, true)
+          // Reuse the bytes we already encoded during size calculation.
+          const enc = strBytes[i]!
+          this._encodeView.setUint16(offset, enc.length, true)
           offset += 2
-          this._encodeBuf.set(strBytes, offset)
-          offset += strBytes.length
+          this._encodeBuf.set(enc, offset)
+          offset += enc.length
           break
         }
       }
