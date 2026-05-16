@@ -198,41 +198,45 @@ function flushOne(ws: GenericWebSocket): void {
         ws.send(JSON.stringify(item))
       }
     } else {
-      // Multiple items — need to build array
-      // Separate pre-serialized strings from objects that need dedup
-      const objects: PendingMessage[] = []
-      const preSerialized: string[] = []
-
-      for (const item of queue) {
-        if (typeof item === 'string') {
-          preSerialized.push(item)
-        } else {
-          objects.push(item)
+      // Multiple items — single-pass partition while counting both sides.
+      // The previous code did one partition pass, then up to two more
+      // iterations during serialization. We collapse to one pass and one
+      // serialize loop, building the output via Array.join (V8-optimised)
+      // instead of string concatenation (`result += ...`).
+      let firstObjIdx = -1
+      let preSerCount = 0
+      for (let i = 0; i < queue.length; i++) {
+        if (typeof queue[i] === 'string') {
+          preSerCount++
+        } else if (firstObjIdx === -1) {
+          firstObjIdx = i
         }
       }
 
-      // Send pre-serialized messages: if only pre-serialized, wrap in array
-      // If mixed, we need to combine them
-      if (objects.length === 0) {
-        // All pre-serialized — build array manually without re-parsing
-        ws.send('[' + preSerialized.join(',') + ']')
-      } else if (preSerialized.length === 0) {
-        // All objects — deduplicate and serialize
-        const deduped = deduplicateDeltas(objects)
+      if (firstObjIdx === -1) {
+        // All pre-serialized — build array manually without re-parsing.
+        // queue is already a string[], so join() is the cheapest path.
+        ws.send('[' + (queue as string[]).join(',') + ']')
+      } else if (preSerCount === 0) {
+        // All objects — deduplicate and serialize in one shot.
+        const deduped = deduplicateDeltas(queue as PendingMessage[])
         ws.send(JSON.stringify(deduped))
       } else {
-        // Mixed — serialize objects, build final string directly (no intermediate arrays)
+        // Mixed — partition once, serialize each side, join via Array.
+        // Using Array.join scales better than `result += JSON.stringify(...)`
+        // because V8 internally builds a rope/cons-string for the latter
+        // and flattens later, which is O(N) per concat in the worst case.
+        const objects: PendingMessage[] = []
+        const preSerialized: string[] = []
+        for (const item of queue) {
+          if (typeof item === 'string') preSerialized.push(item)
+          else objects.push(item)
+        }
         const deduped = deduplicateDeltas(objects)
-        let result = '['
-        for (let i = 0; i < deduped.length; i++) {
-          if (i > 0) result += ','
-          result += JSON.stringify(deduped[i])
-        }
-        for (const ps of preSerialized) {
-          result += ',' + ps
-        }
-        result += ']'
-        ws.send(result)
+        const parts = new Array<string>(deduped.length + preSerialized.length)
+        for (let i = 0; i < deduped.length; i++) parts[i] = JSON.stringify(deduped[i])
+        for (let i = 0; i < preSerialized.length; i++) parts[deduped.length + i] = preSerialized[i]!
+        ws.send('[' + parts.join(',') + ']')
       }
     }
   } catch (err: any) {
@@ -271,32 +275,62 @@ function mergeDeltas(a: Record<string, unknown>, b: Record<string, unknown>): Re
 /**
  * Merge STATE_DELTA messages for the same componentId.
  * Other message types are preserved as-is.
+ *
+ * Fast path (the common case): if no componentId appears twice in the batch,
+ * we return the input array unchanged — zero allocation. Only when a
+ * conflict is detected do we clone the conflicting message and switch to
+ * the slow path that materialises a new array. This matters because every
+ * fanned-out STATE_DELTA broadcast hits this function once per recipient.
  */
 function deduplicateDeltas(messages: PendingMessage[]): PendingMessage[] {
-  // Track last STATE_DELTA index per componentId for merging
-  const deltaIndices = new Map<string, number>()
-  const result: PendingMessage[] = []
+  // Fast path: scan once to detect duplicates. If none, return input as-is.
+  const firstSeen = new Map<string, number>()
+  let firstDupIdx = -1
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!
+    if (msg.type === 'STATE_DELTA' && msg.componentId && msg.payload?.delta) {
+      if (firstSeen.has(msg.componentId)) {
+        firstDupIdx = i
+        break
+      }
+      firstSeen.set(msg.componentId, i)
+    }
+  }
+  if (firstDupIdx === -1) return messages
 
-  for (const msg of messages) {
+  // Slow path: at least one duplicate exists. Build a deduplicated array
+  // starting from the conflict point — earlier entries are kept as-is.
+  const deltaIndices = new Map<string, number>()
+  const result: PendingMessage[] = new Array(firstDupIdx)
+  for (let i = 0; i < firstDupIdx; i++) {
+    const m = messages[i]!
+    result[i] = m
+    if (m.type === 'STATE_DELTA' && m.componentId && m.payload?.delta) {
+      deltaIndices.set(m.componentId, i)
+    }
+  }
+  for (let i = firstDupIdx; i < messages.length; i++) {
+    const msg = messages[i]!
     if (msg.type === 'STATE_DELTA' && msg.componentId && msg.payload?.delta) {
       const existing = deltaIndices.get(msg.componentId)
       if (existing !== undefined) {
-        // Deep-merge delta into existing message (fixes #22: shallow spread dropped nested keys)
-        const target = result[existing]
-        target.payload = {
-          delta: mergeDeltas(target.payload.delta, msg.payload.delta)
+        // Deep-merge into existing message. We clone the target lazily here
+        // (once per dedup site) so the original input is never mutated.
+        const target = result[existing]!
+        const cloned: PendingMessage = {
+          ...target,
+          payload: { delta: mergeDeltas(target.payload.delta, msg.payload.delta) },
+          timestamp: msg.timestamp,
         }
-        target.timestamp = msg.timestamp // use latest timestamp
+        result[existing] = cloned
       } else {
         deltaIndices.set(msg.componentId, result.length)
-        // Clone to avoid mutating original
-        result.push({ ...msg, payload: { delta: { ...msg.payload.delta } } })
+        result.push(msg)
       }
     } else {
       result.push(msg)
     }
   }
-
   return result
 }
 
