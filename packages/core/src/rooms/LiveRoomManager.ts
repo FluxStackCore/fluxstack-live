@@ -11,6 +11,7 @@ import type { IRoomPubSubAdapter } from './adapters'
 import { computeDeepDiff, deepAssign } from '../utils/deepDiff'
 import type { LiveRoom } from './LiveRoom'
 import type { RoomRegistry } from './RoomRegistry'
+import type { LiveAuthSession } from '../auth/types'
 import {
   resolveCodec,
   buildRoomFrameTail,
@@ -34,6 +35,24 @@ interface RoomMember {
   componentId: string
   ws: GenericWebSocket
   joinedAt: number
+  /**
+   * Full auth session captured at join time. Surfaced back in onLeave so
+   * room cleanup can read any provider-defined field (user/bot/device id,
+   * roles, etc.) even on abrupt disconnect.
+   */
+  session?: LiveAuthSession
+  /**
+   * Resolved id used for onLeave's deprecated `userId` field. Preferred
+   * source is `session.id`; falls back to an explicit `joinContext.userId`
+   * when callers haven't migrated to passing session yet.
+   */
+  userId?: string
+  /**
+   * Per-member, server-only metadata. Populated by `LiveRoom.onJoin` and
+   * passed back to `onLeave` so domain code can clean up `room.state`
+   * entries keyed by app-specific ids (#36).
+   */
+  membership: Record<string, any>
 }
 
 interface Room<TState = any> {
@@ -87,7 +106,7 @@ export class LiveRoomManager {
     ws: GenericWebSocket,
     initialState?: TState,
     options?: { deepDiff?: boolean; deepDiffDepth?: number; serverOnlyState?: boolean },
-    joinContext?: { userId?: string; payload?: any },
+    joinContext?: { userId?: string; session?: LiveAuthSession; payload?: any },
   ): Promise<{ state: TState; rejected?: false } | { rejected: true; reason: string }> {
     // Validate room name format (uses pre-compiled regex from constants)
     if (!roomId || !ROOM_NAME_REGEX.test(roomId)) {
@@ -170,13 +189,25 @@ export class LiveRoomManager {
     // Call onJoin lifecycle hook for LiveRoom-backed rooms. Isolated so a
     // broken onJoin cannot leak an exception out of joinRoom either — we
     // treat throws as an implicit rejection (same path as result === false).
+    //
+    // The `membership` bag is created here, threaded into the hook, and
+    // attached to the RoomMember entry below — so onLeave gets it back even
+    // on abrupt disconnects when only `componentId` is known (#36).
+    const membership: Record<string, any> = {}
+    // Resolve session: prefer explicit joinContext.session, fall back to
+    // ws.data.authContext.session for callers that haven't been updated yet.
+    const session = joinContext?.session
+      ?? (ws as any)?.data?.authContext?.session
+    const resolvedUserId = joinContext?.userId ?? session?.id
     if (room.instance) {
       let joinResult: void | false
       try {
         joinResult = await room.instance.onJoin({
           componentId,
-          userId: joinContext?.userId,
+          session,
+          userId: resolvedUserId,
           payload: joinContext?.payload,
+          membership,
         })
       } catch (err: any) {
         liveWarn('rooms', componentId, `Room '${roomId}' onJoin threw: ${err?.message || err}`)
@@ -196,11 +227,14 @@ export class LiveRoomManager {
       }
     }
 
-    // Add member
+    // Add member (carry the onJoin-populated membership bag for onLeave).
     room.members.set(componentId, {
       componentId,
       ws,
-      joinedAt: now
+      joinedAt: now,
+      session,
+      userId: resolvedUserId,
+      membership,
     })
     room.lastActivity = now
 
@@ -246,10 +280,14 @@ export class LiveRoomManager {
     // Fixes #5 H6: isolate throws so a broken hook cannot prevent member removal
     // and the downstream broadcasts below.
     if (room.instance) {
+      const memberEntry = room.members.get(componentId)
       try {
         await room.instance.onLeave({
           componentId,
+          session: memberEntry?.session,
+          userId: memberEntry?.userId,
           reason: leaveReason,
+          membership: memberEntry?.membership ?? {},
         })
       } catch (err: any) {
         liveWarn('rooms', componentId, `Room '${roomId}' onLeave threw: ${err?.message || err}. Continuing with cleanup.`)
@@ -344,10 +382,14 @@ export class LiveRoomManager {
       // room and componentRooms.delete() at the end of this method would
       // never execute, leaking memory and missing leave notifications.
       if (room.instance) {
+        const memberEntry = room.members.get(componentId)
         try {
           await room.instance.onLeave({
             componentId,
+            session: memberEntry?.session,
+            userId: memberEntry?.userId,
             reason: 'disconnect',
+            membership: memberEntry?.membership ?? {},
           })
         } catch (err: any) {
           liveWarn('rooms', componentId, `Room '${roomId}' onLeave threw during cleanup: ${err?.message || err}. Continuing with remaining rooms.`)
@@ -436,6 +478,37 @@ export class LiveRoomManager {
       data,
       timestamp: now
     }, excludeComponentId)
+  }
+
+  /**
+   * Strip keys that the client is never allowed to set on room state:
+   *   - prototype-pollution keys (`__proto__`, `constructor`, `prototype`)
+   *   - `$`-prefixed keys (server-only convention, mirrors PROPERTY_UPDATE rule)
+   *
+   * Returns a NEW shallow object so the original payload is untouched.
+   * Server-side callers bypass this filter by calling setRoomState directly.
+   */
+  private filterClientRoomStateKeys(updates: any): Record<string, unknown> {
+    if (updates === null || typeof updates !== 'object') return {}
+    const safe: Record<string, unknown> = {}
+    for (const key of Object.keys(updates)) {
+      if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue
+      if (key.startsWith('$')) continue
+      safe[key] = updates[key]
+    }
+    return safe
+  }
+
+  /**
+   * Client-driven variant of setRoomState. Filters out keys the client must
+   * never write (prototype-pollution + `$`-prefix) before delegating to the
+   * normal setRoomState. Use this on the path that processes ROOM_STATE_SET
+   * messages — server-internal callers should keep using setRoomState
+   * directly so they retain full authority over the state shape.
+   */
+  setRoomStateFromClient(roomId: string, updates: any, excludeComponentId?: string): void {
+    const safe = this.filterClientRoomStateKeys(updates)
+    this.setRoomState(roomId, safe, excludeComponentId)
   }
 
   /**
