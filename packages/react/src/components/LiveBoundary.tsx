@@ -23,6 +23,22 @@ interface LiveLike {
   $error: string | null
 }
 
+/** Qual slot o Boundary deve renderizar dado o estado. Função pura (testável sem render). */
+export type BoundarySlot = 'error' | 'loading' | 'offline' | 'children'
+
+export function resolveBoundarySlot(
+  live: Pick<LiveLike, '$status' | '$connected'>,
+  showWhileOffline = false,
+): BoundarySlot {
+  const status = live.$status
+  if (status === 'error') return 'error'
+  if (status === 'connecting' || status === 'mounting' || status === 'loading' || status === 'reconnecting') {
+    return 'loading'
+  }
+  if (!live.$connected && !showWhileOffline) return 'offline'
+  return 'children'
+}
+
 export interface LiveBoundaryProps {
   live: LiveLike
   children: ReactNode
@@ -67,18 +83,18 @@ function DefaultOffline() {
  * quando está pronto. Ordem: erro > conectando/montando > offline > pronto.
  */
 export function LiveBoundary({ live, children, loading, error, offline, showWhileOffline = false }: LiveBoundaryProps) {
-  const status = live.$status
-
-  if (status === 'error') {
-    return <>{error ? error(live.$error ?? 'Erro desconhecido') : <DefaultError message={live.$error ?? 'Erro desconhecido'} />}</>
+  switch (resolveBoundarySlot(live, showWhileOffline)) {
+    case 'error': {
+      const msg = live.$error ?? 'Erro desconhecido'
+      return <>{error ? error(msg) : <DefaultError message={msg} />}</>
+    }
+    case 'loading':
+      return <>{loading ?? <DefaultLoading />}</>
+    case 'offline':
+      return <>{offline ?? <DefaultOffline />}</>
+    default:
+      return <>{children}</>
   }
-  if (status === 'connecting' || status === 'mounting' || status === 'loading' || status === 'reconnecting') {
-    return <>{loading ?? <DefaultLoading />}</>
-  }
-  if (!live.$connected && !showWhileOffline) {
-    return <>{offline ?? <DefaultOffline />}</>
-  }
-  return <>{children}</>
 }
 
 export interface LiveStatusProps {
