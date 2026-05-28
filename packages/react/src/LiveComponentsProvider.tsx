@@ -1,7 +1,13 @@
+'use client'
 // @fluxstack/live-react - LiveComponentsProvider
 //
 // React context provider wrapping LiveConnection for use by hooks.
 // SSR-safe: connection is created in useEffect (client-only), not during render.
+//
+// 'use client': marca este módulo como client boundary. Necessário para RSC —
+// usa createContext/hooks que não existem no ambiente react-server. Sem isto,
+// importar o Provider (mesmo indiretamente) num server component quebra com
+// "createContext is not a function".
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
 import type { LiveAuthOptions, LiveConnectionOptions, LiveClientAuth } from '@fluxstack/live-client'
