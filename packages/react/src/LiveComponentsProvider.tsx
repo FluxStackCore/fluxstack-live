@@ -264,10 +264,41 @@ export function LiveComponentsProvider({
   )
 }
 
+/**
+ * Contexto inerte usado no SSR quando não há Provider. Permite que Live.use()
+ * renderize no servidor como placeholder (estado inicial, desconectado, actions
+ * no-op) em vez de quebrar — base do "SSR de brinde": o dev escreve Live.use()
+ * normal e o componente vira placeholder no server, montando/conectando só no
+ * client. NÃO é usado no browser (lá a ausência de Provider continua sendo erro).
+ */
+const SSR_NOOP_CONTEXT: LiveComponentsContextValue = {
+  connected: false,
+  connecting: false,
+  error: null,
+  connectionId: null,
+  authenticated: false,
+  $auth: { authenticated: false, session: null },
+  sendMessage: async () => {},
+  sendMessageAndWait: async () => ({ success: false }) as WebSocketResponse,
+  sendBinaryAndWait: async () => ({ success: false }) as WebSocketResponse,
+  registerComponent: () => () => {},
+  registerBinaryHandler: () => () => {},
+  registerRoomBinaryHandler: () => () => {},
+  unregisterComponent: () => {},
+  connect: () => {},
+  reconnect: () => {},
+  disconnect: () => {},
+  authenticate: async () => false,
+  getWebSocket: () => null,
+}
+
 /** Hook to access the LiveComponents context */
 export function useLiveComponents(): LiveComponentsContextValue {
   const context = useContext(LiveComponentsContext)
   if (!context) {
+    // SSR sem Provider: devolve contexto inerte (placeholder), não quebra.
+    // No browser, Provider ausente continua sendo erro de programação.
+    if (typeof window === 'undefined') return SSR_NOOP_CONTEXT
     throw new Error('useLiveComponents must be used within LiveComponentsProvider')
   }
   return context
