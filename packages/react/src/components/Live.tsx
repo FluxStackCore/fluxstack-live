@@ -72,8 +72,14 @@ function useLive<
 
 // ===== Export =====
 
+import { LiveBoundary, LiveStatus } from './LiveBoundary'
+
 export const Live = {
   use: useLive,
+  /** <Live.Boundary live={x}> — mostra loading/erro/offline automático; children só quando pronto */
+  Boundary: LiveBoundary,
+  /** <Live.Status live={x} /> — pill Connected/Offline pronto */
+  Status: LiveStatus,
 }
 
 export default Live

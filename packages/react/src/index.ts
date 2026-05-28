@@ -14,6 +14,10 @@ export type {
 // Live.use() API
 export { Live } from './components/Live'
 
+// Helpers de UI de estado (também acessíveis via Live.Boundary / Live.Status)
+export { LiveBoundary, LiveStatus } from './components/LiveBoundary'
+export type { LiveBoundaryProps, LiveStatusProps } from './components/LiveBoundary'
+
 // Core Hook
 export { useLiveComponent, useLiveComponent as useLive, createLiveComponent } from './hooks/useLiveComponent'
 export type {
