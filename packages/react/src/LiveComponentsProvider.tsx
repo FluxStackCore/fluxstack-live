@@ -110,14 +110,20 @@ export function LiveComponentsProvider({
         pendingRoomBinaryUnsubsRef.current.set(handler, realUnsub)
       }
 
-      localUnsub = conn.onStateChange((state) => {
+      const applyState = (state: typeof conn.state) => {
         setConnected(state.connected)
         setConnecting(state.connecting)
         setError(state.error)
         setConnectionId(state.connectionId)
         setAuthenticated(state.authenticated)
         set$auth(state.auth)
-      })
+      }
+      localUnsub = conn.onStateChange(applyState)
+      // Sincroniza o estado ATUAL imediatamente: ao adquirir uma conexão do pool
+      // que JÁ está conectada (ex: troca de página com keep-alive), onStateChange
+      // só dispara em mudanças futuras — sem isto o novo Provider ficaria preso
+      // em "Offline" mesmo com a conexão ativa.
+      applyState(conn.state)
 
       if (autoConnect) {
         // Wait for DOM to be fully loaded before connecting.
