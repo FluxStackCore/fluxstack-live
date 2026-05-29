@@ -1,7 +1,13 @@
+'use client'
 // @fluxstack/live-react - LiveComponentsProvider
 //
 // React context provider wrapping LiveConnection for use by hooks.
 // SSR-safe: connection is created in useEffect (client-only), not during render.
+//
+// 'use client': marca este módulo como client boundary. Necessário para RSC —
+// usa createContext/hooks que não existem no ambiente react-server. Sem isto,
+// importar o Provider (mesmo indiretamente) num server component quebra com
+// "createContext is not a function".
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
 import type { LiveAuthOptions, LiveConnectionOptions, LiveClientAuth } from '@fluxstack/live-client'
@@ -110,14 +116,20 @@ export function LiveComponentsProvider({
         pendingRoomBinaryUnsubsRef.current.set(handler, realUnsub)
       }
 
-      localUnsub = conn.onStateChange((state) => {
+      const applyState = (state: typeof conn.state) => {
         setConnected(state.connected)
         setConnecting(state.connecting)
         setError(state.error)
         setConnectionId(state.connectionId)
         setAuthenticated(state.authenticated)
         set$auth(state.auth)
-      })
+      }
+      localUnsub = conn.onStateChange(applyState)
+      // Sincroniza o estado ATUAL imediatamente: ao adquirir uma conexão do pool
+      // que JÁ está conectada (ex: troca de página com keep-alive), onStateChange
+      // só dispara em mudanças futuras — sem isto o novo Provider ficaria preso
+      // em "Offline" mesmo com a conexão ativa.
+      applyState(conn.state)
 
       if (autoConnect) {
         // Wait for DOM to be fully loaded before connecting.
@@ -258,10 +270,41 @@ export function LiveComponentsProvider({
   )
 }
 
+/**
+ * Contexto inerte usado no SSR quando não há Provider. Permite que Live.use()
+ * renderize no servidor como placeholder (estado inicial, desconectado, actions
+ * no-op) em vez de quebrar — base do "SSR de brinde": o dev escreve Live.use()
+ * normal e o componente vira placeholder no server, montando/conectando só no
+ * client. NÃO é usado no browser (lá a ausência de Provider continua sendo erro).
+ */
+const SSR_NOOP_CONTEXT: LiveComponentsContextValue = {
+  connected: false,
+  connecting: false,
+  error: null,
+  connectionId: null,
+  authenticated: false,
+  $auth: { authenticated: false, session: null },
+  sendMessage: async () => {},
+  sendMessageAndWait: async () => ({ success: false }) as WebSocketResponse,
+  sendBinaryAndWait: async () => ({ success: false }) as WebSocketResponse,
+  registerComponent: () => () => {},
+  registerBinaryHandler: () => () => {},
+  registerRoomBinaryHandler: () => () => {},
+  unregisterComponent: () => {},
+  connect: () => {},
+  reconnect: () => {},
+  disconnect: () => {},
+  authenticate: async () => false,
+  getWebSocket: () => null,
+}
+
 /** Hook to access the LiveComponents context */
 export function useLiveComponents(): LiveComponentsContextValue {
   const context = useContext(LiveComponentsContext)
   if (!context) {
+    // SSR sem Provider: devolve contexto inerte (placeholder), não quebra.
+    // No browser, Provider ausente continua sendo erro de programação.
+    if (typeof window === 'undefined') return SSR_NOOP_CONTEXT
     throw new Error('useLiveComponents must be used within LiveComponentsProvider')
   }
   return context

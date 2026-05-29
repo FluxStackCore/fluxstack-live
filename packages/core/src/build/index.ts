@@ -336,6 +336,7 @@ export function liveStripPlugin(options: LiveStripPluginOptions = {}): Plugin {
 
   let projectRoot: string
   let stubDir: string
+  let isMultiEnvBuild = false
   const nameToFile = new Map<string, string>()
   const fileToName = new Map<string, string>()
   const cache = new Map<string, string>()
@@ -346,6 +347,10 @@ export function liveStripPlugin(options: LiveStripPluginOptions = {}): Plugin {
     const stubPath = join(stubDir, `${name}.js`)
     const content = buildStub(extractMeta(serverPath))
     if (cache.get(name) !== content) {
+      // Garante o diretório antes de escrever. No build RSC multi-ambiente,
+      // configResolved roda por ambiente e o stubDir pode não ter sido criado
+      // no contexto atual — sem isto, writeFileSync falha com ENOENT.
+      if (!existsSync(stubDir)) mkdirSync(stubDir, { recursive: true })
       writeFileSync(stubPath, content, 'utf-8')
       cache.set(name, content)
       log(`Generated stub: ${name}`)
@@ -359,8 +364,23 @@ export function liveStripPlugin(options: LiveStripPluginOptions = {}): Plugin {
 
     configResolved(config) {
       projectRoot = config.configFile ? dirname(config.configFile) : resolve(config.root, '../..')
-      stubDir = join(config.root, stubDirName)
+      // stubDir ANCORADO no config.root do client (estável). No build RSC há
+      // múltiplos ambientes (rsc/ssr/client) com config.root DIFERENTES — se o
+      // stubDir variar, um ambiente escreve o stub e outro não o acha (ENOENT).
+      // Detecta o client root: se config.root já aponta pro client (tem index.html
+      // ou /src), usa ele; senão deriva do projectRoot + clientDir.
+      const clientRoot = config.root.replace(/[\\/]+$/, '').endsWith('client')
+        ? config.root
+        : join(projectRoot, 'app', 'client')
+      stubDir = join(clientRoot, stubDirName)
       if (!existsSync(stubDir)) mkdirSync(stubDir, { recursive: true })
+
+      // Detecta build RSC multi-ambiente: o plugin-rsc registra os ambientes
+      // 'rsc' e 'ssr' além do client. Se existirem, o cleanup dos stubs no
+      // buildEnd (que roda por ambiente) apagaria stubs que outro ambiente ainda
+      // vai ler — então só limpamos em build single-env (SPA).
+      const envs = (config as { environments?: Record<string, unknown> }).environments ?? {}
+      isMultiEnvBuild = !!(envs.rsc || envs.ssr)
     },
 
     resolveId(source, importer) {
@@ -411,7 +431,13 @@ export function liveStripPlugin(options: LiveStripPluginOptions = {}): Plugin {
     },
 
     buildEnd() {
-      if (existsSync(stubDir)) rmSync(stubDir, { recursive: true, force: true })
+      // Em build RSC multi-ambiente, NÃO apagar os stubs aqui: cada ambiente
+      // (rsc/ssr/client) tem seu próprio buildEnd, e apagar num faz o próximo
+      // falhar com ENOENT ao lê-los. Stubs são temporários (.live-stubs, gitignored).
+      // Só limpamos em build single-env (SPA).
+      if (!isMultiEnvBuild && existsSync(stubDir)) {
+        rmSync(stubDir, { recursive: true, force: true })
+      }
     },
   }
 }

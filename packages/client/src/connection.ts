@@ -83,6 +83,8 @@ export class LiveConnection {
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null
   private manualReconnectTimeout: ReturnType<typeof setTimeout> | null = null
   private destroyed = false
+  /** true quando disconnect() foi chamado de propósito — bloqueia auto-reconnect */
+  private intentionalClose = false
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null
   private componentCallbacks = new Map<string, ComponentCallback>()
   private binaryCallbacks = new Map<string, (payload: Uint8Array) => void>()
@@ -109,14 +111,62 @@ export class LiveConnection {
       auth: options.auth,
       autoConnect: options.autoConnect ?? true,
       reconnectInterval: options.reconnectInterval ?? 1000,
-      maxReconnectAttempts: options.maxReconnectAttempts ?? 5,
+      // Infinito por padrão: app tempo real não deve "morrer" após N falhas e
+      // exigir F5. O backoff tem teto (16s), então retry infinito é barato.
+      // 0 ou Infinity = infinito. Um número finito mantém o limite (compat).
+      maxReconnectAttempts: options.maxReconnectAttempts ?? Infinity,
       heartbeatInterval: options.heartbeatInterval ?? 30000,
       debug: options.debug ?? false,
     }
 
+    // Reconexão guiada pela rede/visibilidade: quando o navegador volta a ficar
+    // online ou a aba volta ao foco, tentamos reconectar IMEDIATAMENTE (sem
+    // esperar o backoff). Essencial pra tempo real: fechou o laptop, reabriu →
+    // reconecta na hora, sem o usuário precisar interagir.
+    this.installNetworkListeners()
+
     if (this.options.autoConnect) {
       this.connect()
     }
+  }
+
+  private onlineHandler: (() => void) | null = null
+  private visibilityHandler: (() => void) | null = null
+
+  private installNetworkListeners(): void {
+    if (typeof window === 'undefined') return
+
+    // Reconexão imediata: cancela o backoff pendente e tenta já (resetando o
+    // contador). connect() é no-op se já estiver CONNECTING/OPEN.
+    const reconnectNow = () => {
+      if (this.destroyed || this.intentionalClose) return
+      if (this.reconnectTimeout) {
+        clearTimeout(this.reconnectTimeout)
+        this.reconnectTimeout = null
+      }
+      this.reconnectAttempts = 0
+      this.connect()
+    }
+    this.onlineHandler = () => {
+      this.log('Network back online — reconnecting')
+      reconnectNow()
+    }
+    this.visibilityHandler = () => {
+      if (document.visibilityState === 'visible' && this.ws?.readyState !== WebSocket.OPEN) {
+        this.log('Tab visible again — reconnecting')
+        reconnectNow()
+      }
+    }
+    window.addEventListener('online', this.onlineHandler)
+    document.addEventListener('visibilitychange', this.visibilityHandler)
+  }
+
+  private removeNetworkListeners(): void {
+    if (typeof window === 'undefined') return
+    if (this.onlineHandler) window.removeEventListener('online', this.onlineHandler)
+    if (this.visibilityHandler) document.removeEventListener('visibilitychange', this.visibilityHandler)
+    this.onlineHandler = null
+    this.visibilityHandler = null
   }
 
   get state(): LiveConnectionState {
@@ -169,6 +219,9 @@ export class LiveConnection {
       return
     }
 
+    // Reconectar (manual, online, visibility, ou auto) limpa a flag de
+    // fechamento intencional — a partir daqui quedas voltam a reconectar.
+    this.intentionalClose = false
     this.setState({ connecting: true, error: null })
     const url = this.getWebSocketUrl()
     this.log('Connecting...', { url })
@@ -238,6 +291,10 @@ export class LiveConnection {
 
   /** Disconnect from WebSocket server */
   disconnect(): void {
+    // Marca fechamento INTENCIONAL: o onclose resultante NÃO deve disparar
+    // reconexão automática (senão, com retry infinito, o disconnect manual
+    // ficaria reconectando pra sempre). reconnect()/connect() limpam a flag.
+    this.intentionalClose = true
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout)
       this.reconnectTimeout = null
@@ -268,13 +325,21 @@ export class LiveConnection {
   }
 
   private attemptReconnect(): void {
-    if (this.reconnectAttempts < this.options.maxReconnectAttempts) {
+    if (this.destroyed || this.intentionalClose) return
+    // 0 ou Infinity = reconectar indefinidamente (default p/ tempo real).
+    const max = this.options.maxReconnectAttempts
+    const infinite = max === 0 || max === Infinity
+
+    if (infinite || this.reconnectAttempts < max) {
       this.reconnectAttempts++
+      // Backoff exponencial com teto de 16s — no modo infinito, fica tentando
+      // a cada 16s indefinidamente (barato) em vez de desistir.
       const delay = Math.min(
         this.options.reconnectInterval * Math.pow(2, this.reconnectAttempts - 1),
         16000
       )
-      this.log(`Reconnecting in ${delay}ms... (${this.reconnectAttempts}/${this.options.maxReconnectAttempts})`)
+      const label = infinite ? `${this.reconnectAttempts}` : `${this.reconnectAttempts}/${max}`
+      this.log(`Reconnecting in ${delay}ms... (${label})`)
       this.reconnectTimeout = setTimeout(() => this.connect(), delay)
     } else {
       this.setState({ error: 'Max reconnection attempts reached' })
@@ -548,6 +613,7 @@ export class LiveConnection {
   /** Destroy the connection and clean up all resources */
   destroy(): void {
     this.destroyed = true
+    this.removeNetworkListeners()
     this.disconnect()
     this.componentCallbacks.clear()
     this.binaryCallbacks.clear()

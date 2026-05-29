@@ -1,3 +1,4 @@
+'use client'
 // @fluxstack/live-react - useLiveComponent Hook
 //
 // Proxy-based state access for Live Components.
