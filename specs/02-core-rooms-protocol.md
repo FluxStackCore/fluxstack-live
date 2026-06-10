@@ -137,7 +137,7 @@ ou builder streaming acima de um threshold de membros.
 
 | Prio | Item | Detalhe |
 |---|---|---|
-| 🟠 | Resync no backpressure-drop | FP-1: drop silencioso → marcar conexão para full resync. `WsSendBatcher.ts:121-123` |
+| ✅ | ~~Resync no backpressure-drop~~ | FP-1 — CORRIGIDO: `setResyncHandler` + `LiveServer` reenvia snapshot (`resyncConnection`). |
 | 🟡 | Validar resultado de codec custom | Se um `RoomCodec` custom é passado, validar que `encode()` retorna `Uint8Array`. `RoomCodec.ts:37-189` |
 | 🟡 | Versionar frames binários | Prepend de byte de versão → clients antigos detectam incompatibilidade quando o formato mudar (ex.: length u8→u16). Hoje não há versão. |
 | ⚪ | Documentar `onEvent` fire-and-forget | FP-3 — deixar claro no JSDoc e no LLMD. |

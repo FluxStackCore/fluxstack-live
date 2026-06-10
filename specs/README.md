@@ -38,3 +38,21 @@ Severidades: 🔴 critical · 🟠 high · 🟡 medium · ⚪ low.
 - Pacotes novos ainda **sem documentação** fora destas specs: `cli`, `spatial-room`, `plugin-kit`.
 - O gargalo arquitetural dominante continua sendo o **broadcast O(n²)** em sala
   compartilhada (trade-off de design, não bug) — ver `02` e `05` (spatial-room mitiga).
+
+## ✅ Hardening aplicado (rev. 2026-06-10, com TDD)
+
+| Item | Spec | Status |
+|---|---|---|
+| Backpressure FIFO-drop → resync no `LiveServer` | `02` FP-1 | ✅ |
+| `RedisRoomAdapter.publishStateChange` atômico (Lua) | `05` FP-1 | ✅ |
+| Cluster delta sem dedup/ordenação (`seq` monotônico) | `05` FP-2 | ✅ |
+| CLI msgpack sem depth guard | `05` FP-3 | ✅ |
+| Client decoder: depth guard + decode defensivo | `04` FP-3 | ✅ |
+| `LiveAuthContext` provider não-freezado (RBAC) | `03` FP-2 | ✅ |
+| Race da eviction de nonce | `03` FP-1 | ✅ verificado/endurecido |
+| Whitelist NPM enforçada no `.use()` | `06` FP-1 | ✅ |
+
+**Suítes verdes:** core 1209 · redis 45 · cli 6 · client 107 · plugin-kit 7.
+**Ainda abertos** (não-críticos): proxy shallow nested (`01` FP-1), `onEvent` doc (`02` FP-3),
+Vue auto-reconnect (`05` FP-4), AES-GCM (`03` FP-3), e o **O(n²)** arquitetural.
+Bugs do bug-hunt de abril: ver `99`.

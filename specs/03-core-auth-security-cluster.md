@@ -136,8 +136,8 @@ não é detectado (o HMAC assina o *plaintext*, mas a combinação não é AEAD)
 
 | Prio | Item | Detalhe |
 |---|---|---|
-| 🟠 | Fechar a janela de race do nonce | FP-1: ordem delete↔mark, e considerar nonce monotônico anti clock-skew. |
-| 🟠 | Forçar `AuthenticatedContext` no `authenticate()` | FP-2: wrappar o retorno do provider para garantir freeze. |
+| ✅ | ~~Fechar a janela de race do nonce~~ | FP-1 — VERIFICADO (sem race; síncrono) + endurecido (mark antes do delete). |
+| ✅ | ~~Forçar `AuthenticatedContext` no `authenticate()`~~ | FP-2 — CORRIGIDO via `freezeAuthContext()`. |
 | 🟡 | Documentar footgun de referência em `setState` | Nested updates completos; não passar `room.state`/`component.state` por referência — usar spread. |
 | 🟡 | Exportar stats do rate limiter | `getStats()` com drops por conexão e global (hoje drops são silenciosos). |
 | ⚪ | `try/catch` no `structuredClone` do `deepAssign` | Fallback gracioso para tipos não-serializáveis. `deepDiff.ts:160-166` |
