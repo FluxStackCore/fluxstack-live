@@ -73,13 +73,21 @@ outra instância podia modificar o state e o SET o **sobrescrevia silenciosament
 > de duas instâncias; todos os 100 campos sobrevivem. Sanity TDD: falhava (`undefined`)
 > com a versão GET+assign+SET. Requer Redis (Docker :16379).
 
-### 🟡 FP-2 — Cluster delta sem versão/dedup
-`publishDelta()` não carrega version/timestamp → em echo ou partição de rede, deltas
-duplicadas podem ser reaplicadas. **Fix:** incluir version e dedup map no receptor.
+### 🟡 FP-2 — Cluster delta sem versão/dedup  ✅ CORRIGIDO (2026-06-10)
+Era: `publishDelta()` sem version → redelivery do pub/sub (reconexão) ou reordenação
+reaplicava deltas duplicadas/velhas, sobrescrevendo estado novo.
+> **Fix:** `publishDelta` estampa um **`seq` monotônico por componente**; `handleDelta`
+> descarta `seq <= último visto` por `(origin, componentId)` (dedup + ordenação).
+> Mensagens sem `seq` (publishers antigos) passam (back-compat).
+> `RedisClusterAdapter.ts:publishDelta/handleDelta`. **Testes:**
+> `RedisClusterAdapter.delta-dedup.test.ts` (6, com stub — sem Docker).
 
-### 🟡 FP-3 — `cli` msgpack sem guarda de profundidade/circular
-O decoder do CLI assume payload válido (sem seen-set nem max-depth) → delta cíclica
-ou muito profunda pode estourar a stack. **Fix:** `--max-depth` (default 50).
+### 🟡 FP-3 — `cli` msgpack sem guarda de profundidade  ✅ CORRIGIDO (2026-06-10)
+Era: decoder recursivo sem limite → frame com aninhamento profundo estourava a stack.
+> **Fix:** `decodeMsgpack(buf, maxDepth=100)` propaga `depth` por toda a recursão e
+> lança `RangeError` ao exceder. `cli/src/msgpack.ts`. **Testes:** `cli/src/__tests__/msgpack.test.ts`
+> (6 — incl. 5000 níveis → RangeError). O pacote `cli` entrou no `vitest.workspace.ts`
+> (antes não tinha testes).
 
 ### ⚪ FP-4 — Vue `useLiveComponent` sem auto-reconnect
 Diferente do client React, o composable Vue **não** reconecta sozinho se o WS cai.
@@ -93,8 +101,8 @@ Diferente do client React, o composable Vue **não** reconecta sozinho se o WS c
 | ✅ | ~~**Atomicidade no `RedisRoomAdapter`**~~ | FP-1 — **CORRIGIDO** via Lua script (`MERGE_STATE_LUA`). |
 | ✅ | ~~**Build scripts faltando**~~ | **CORRIGIDO (2026-06-10):** adicionados `build:redis`, `build:vue`, `build:spatial` ao `package.json` e incluídos no `bun run build` agregado. |
 | 🟠 | **Documentar estes pacotes** | `CLAUDE.md`/`llms.txt` mencionam só core/client/react. Adapters (GenericWebSocket), Redis (atomicidade/heartbeat/failover), Vue, CLI e `spatial-room` precisam de seção própria. |
-| 🟡 | Versionar/deduplicar cluster deltas | FP-2. |
-| 🟡 | `--max-depth` no deepMerge do CLI | FP-3. |
+| ✅ | ~~Versionar/deduplicar cluster deltas~~ | FP-2 — CORRIGIDO (seq monotônico). |
+| ✅ | ~~`--max-depth` no msgpack do CLI~~ | FP-3 — CORRIGIDO (maxDepth=100). |
 | ⚪ | Vue: auto-reconnect com backoff + replay | FP-4. |
 
 ---

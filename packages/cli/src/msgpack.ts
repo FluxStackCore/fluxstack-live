@@ -3,12 +3,18 @@
 
 const decoder = new TextDecoder()
 
-export function decodeMsgpack(buf: Uint8Array): unknown {
-  const result = decodeAt(buf, 0)
+/** Max nesting depth — guards against stack overflow on malicious/corrupt frames. */
+const MAX_DECODE_DEPTH = 100
+
+export function decodeMsgpack(buf: Uint8Array, maxDepth = MAX_DECODE_DEPTH): unknown {
+  const result = decodeAt(buf, 0, 0, maxDepth)
   return result.value
 }
 
-function decodeAt(buf: Uint8Array, pos: number): { value: unknown; offset: number } {
+function decodeAt(buf: Uint8Array, pos: number, depth = 0, maxDepth = MAX_DECODE_DEPTH): { value: unknown; offset: number } {
+  if (depth > maxDepth) {
+    throw new RangeError(`msgpack: max nesting depth ${maxDepth} exceeded (possible cyclic or malicious frame)`)
+  }
   if (pos >= buf.length) return { value: null, offset: pos }
 
   const b = buf[pos]
@@ -17,9 +23,9 @@ function decodeAt(buf: Uint8Array, pos: number): { value: unknown; offset: numbe
   // positive fixint
   if (b <= 0x7f) return { value: b, offset: pos + 1 }
   // fixmap
-  if ((b & 0xf0) === 0x80) return readMap(buf, pos + 1, b & 0x0f)
+  if ((b & 0xf0) === 0x80) return readMap(buf, pos + 1, b & 0x0f, depth, maxDepth)
   // fixarray
-  if ((b & 0xf0) === 0x90) return readArray(buf, pos + 1, b & 0x0f)
+  if ((b & 0xf0) === 0x90) return readArray(buf, pos + 1, b & 0x0f, depth, maxDepth)
   // fixstr
   if ((b & 0xe0) === 0xa0) {
     const n = b & 0x1f
@@ -58,33 +64,33 @@ function decodeAt(buf: Uint8Array, pos: number): { value: unknown; offset: numbe
     case 0xdb: { const n = view.getUint32(pos + 1, false); return { value: decoder.decode(buf.subarray(pos + 5, pos + 5 + n)), offset: pos + 5 + n } }
 
     // array 16/32
-    case 0xdc: return readArray(buf, pos + 3, view.getUint16(pos + 1, false))
-    case 0xdd: return readArray(buf, pos + 5, view.getUint32(pos + 1, false))
+    case 0xdc: return readArray(buf, pos + 3, view.getUint16(pos + 1, false), depth, maxDepth)
+    case 0xdd: return readArray(buf, pos + 5, view.getUint32(pos + 1, false), depth, maxDepth)
 
     // map 16/32
-    case 0xde: return readMap(buf, pos + 3, view.getUint16(pos + 1, false))
-    case 0xdf: return readMap(buf, pos + 5, view.getUint32(pos + 1, false))
+    case 0xde: return readMap(buf, pos + 3, view.getUint16(pos + 1, false), depth, maxDepth)
+    case 0xdf: return readMap(buf, pos + 5, view.getUint32(pos + 1, false), depth, maxDepth)
 
     default:
       return { value: `<0x${b.toString(16)}>`, offset: pos + 1 }
   }
 }
 
-function readArray(buf: Uint8Array, offset: number, count: number): { value: unknown[]; offset: number } {
+function readArray(buf: Uint8Array, offset: number, count: number, depth: number, maxDepth: number): { value: unknown[]; offset: number } {
   const arr: unknown[] = []
   for (let i = 0; i < count; i++) {
-    const r = decodeAt(buf, offset)
+    const r = decodeAt(buf, offset, depth + 1, maxDepth)
     arr.push(r.value)
     offset = r.offset
   }
   return { value: arr, offset }
 }
 
-function readMap(buf: Uint8Array, offset: number, count: number): { value: Record<string, unknown>; offset: number } {
+function readMap(buf: Uint8Array, offset: number, count: number, depth: number, maxDepth: number): { value: Record<string, unknown>; offset: number } {
   const obj: Record<string, unknown> = {}
   for (let i = 0; i < count; i++) {
-    const k = decodeAt(buf, offset)
-    const v = decodeAt(buf, k.offset)
+    const k = decodeAt(buf, offset, depth + 1, maxDepth)
+    const v = decodeAt(buf, k.offset, depth + 1, maxDepth)
     obj[String(k.value)] = v.value
     offset = v.offset
   }
