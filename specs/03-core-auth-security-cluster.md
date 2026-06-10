@@ -83,7 +83,18 @@ relógio andando pra trás não vira DoS.
 
 ## 2. Pontos de falha (confirmados)
 
-### 🟠 FP-1 — Janela de race na eviction de nonce + clock-skew
+### 🟠 FP-1 — Janela de race na eviction de nonce + clock-skew  ✅ VERIFICADO/ENDURECIDO (2026-06-10)
+> **Veredito após leitura:** a "race" **não existe na prática** — `validateState`
+> é totalmente **síncrono** (sem `await` entre `usedNonces.has` e `.set`), então em
+> Node/Bun single-thread é atômico (não há TOCTOU como havia no crypto-auth).
+> Clock-skew futuro **já era tratado** (`validateNonce` rejeita `age < -30s`), e o
+> ts embedded é **HMAC-assinado** (cliente não forja). **Endurecimento aplicado:**
+> `evictOldNoncesIfNeeded` agora **avança o high-water mark ANTES de deletar** os
+> nonces (2 passes) — robusto mesmo se a rotina virar interruptível um dia.
+> `StateSignature.ts:evictOldNoncesIfNeeded`. **Testes:**
+> `__tests__/security/StateSignature.replay-window.test.ts` (4: replay, clock-skew
+> forjado, fail-closed pós-eviction).
+
 O `evictionHighWaterMark` é fail-closed, mas existe **race entre a deleção do nonce
 (`:401`) e o avanço do mark (`:407`)**: um atacante com `(SignedState, nonce)`
 capturado do lote evicted pode dar replay nessa janela — `validateState()` (`:242`)
@@ -96,7 +107,15 @@ discretos, deixando janelas potenciais de minutos.
 **Fix:** advancar o mark **antes** de deletar; usar contador monotônico
 (`counter:random:mac`) em vez de timestamp; ou rastrear first-seen no server.
 
-### 🟡 FP-2 — `LiveAuthContext` permite provider não-freezado
+### 🟡 FP-2 — `LiveAuthContext` permite provider não-freezado  ✅ CORRIGIDO (2026-06-10)
+> **Fix:** `LiveAuthManager` agora **normaliza** todo contexto autenticado via
+> `freezeAuthContext()` — se a `session` não estiver frozen (provider retornou
+> objeto literal), re-wrappa num `AuthenticatedContext` (que faz deep-freeze).
+> `AuthenticatedContext` real passa direto (fast-path). Fecha a escalada de RBAC
+> via `$auth.session.roles.push('admin')`. `LiveAuthManager.ts:freezeAuthContext`.
+> **Testes:** `__tests__/auth/provider-freeze-normalization.test.ts` (3). Sanity TDD:
+> falhava antes (push de role funcionava).
+
 O freeze está correto em `AuthenticatedContext`, mas a interface `LiveAuthProvider`
 permite **retornar qualquer objeto** `LiveAuthContext`. Não há validação
 `instanceof AuthenticatedContext` em `LiveAuthManager.authenticate()` nem em

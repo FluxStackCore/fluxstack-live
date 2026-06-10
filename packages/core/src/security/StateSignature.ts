@@ -386,11 +386,17 @@ export class StateSignatureManager {
   private evictOldNoncesIfNeeded(): void {
     if (this.usedNonces.size <= StateSignatureManager.MAX_NONCES) return
     const toRemove = Math.floor(this.usedNonces.size * 0.1)
-    let removed = 0
+
+    // Pass 1: select the keys to evict and compute the new high-water mark from
+    // their embedded timestamps. We ADVANCE THE MARK FIRST (before deleting), so
+    // that even if this routine were ever made interruptible, a replay of an
+    // about-to-be-evicted nonce is already rejected by `validateNonce`'s
+    // `timestamp <= evictionHighWaterMark` check. The embedded ts is HMAC-signed,
+    // so a client cannot forge it to dodge the mark.
+    const keysToEvict: string[] = []
     let newestEvictedTs = this.evictionHighWaterMark
     for (const [key] of this.usedNonces) {
-      if (removed >= toRemove) break
-      // Extract embedded timestamp from `ts:rand:mac` nonce format.
+      if (keysToEvict.length >= toRemove) break
       const colonIdx = key.indexOf(':')
       if (colonIdx > 0) {
         const embeddedTs = Number(key.slice(0, colonIdx))
@@ -398,15 +404,17 @@ export class StateSignatureManager {
           newestEvictedTs = embeddedTs
         }
       }
-      this.usedNonces.delete(key)
-      removed++
+      keysToEvict.push(key)
     }
-    // Fail-closed: advance the high-water mark so any future nonce from the
-    // evicted window is rejected as a potential replay.
+
+    // Fail-closed: advance the mark BEFORE removing the entries.
     if (newestEvictedTs > this.evictionHighWaterMark) {
       this.evictionHighWaterMark = newestEvictedTs
-      liveWarn('state', null, `Nonce map capped at ${StateSignatureManager.MAX_NONCES}; evicted ${removed} entries. Replay-protection window advanced to ts=${newestEvictedTs}. Clients with in-flight state older than this will be rejected.`)
+      liveWarn('state', null, `Nonce map capped at ${StateSignatureManager.MAX_NONCES}; evicting ${keysToEvict.length} entries. Replay-protection window advanced to ts=${newestEvictedTs}. Clients with in-flight state older than this will be rejected.`)
     }
+
+    // Pass 2: now it is safe to delete — the mark already rejects this window.
+    for (const key of keysToEvict) this.usedNonces.delete(key)
   }
 
   shutdown(): void {
