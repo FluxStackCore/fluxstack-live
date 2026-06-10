@@ -9,6 +9,7 @@ vi.mock('../../transport/WsSendBatcher', () => ({
   queueWsMessage: vi.fn(),
   queuePreSerialized: vi.fn(),
   sendImmediate: vi.fn(),
+  setResyncHandler: vi.fn(),
   sendBinaryImmediate: vi.fn(),
 }))
 

@@ -846,6 +846,38 @@ export class ComponentRegistry {
     ws.data.components.clear()
   }
 
+  /**
+   * Re-send the current signed state of every component mounted on this
+   * connection. Used to recover a client whose outgoing queue overflowed
+   * (backpressure drop) and is therefore missing one or more STATE_DELTAs —
+   * a full STATE_UPDATE snapshot brings it back in sync. Best-effort: skips
+   * if the socket is gone, never throws.
+   */
+  resyncConnection(ws: GenericWebSocket): void {
+    if (!ws || ws.readyState !== 1 || !ws.data?.components) return
+
+    for (const componentId of Array.from(ws.data.components.keys()) as string[]) {
+      const component = this.components.get(componentId)
+      if (!component) continue
+      try {
+        const componentName =
+          (component.constructor as { componentName?: string }).componentName ||
+          this.metadata.get(componentId)?.name
+        const currentState = component.getSerializableState()
+        const signedState = this.stateSignature.signState(component.id, {
+          ...(currentState as Record<string, unknown>),
+          __componentName: componentName,
+        }, 1, { compress: true, backup: true })
+
+        sendImmediate(ws, JSON.stringify({
+          type: 'STATE_UPDATE',
+          componentId: component.id,
+          payload: { state: currentState, signedState },
+        }))
+      } catch { /* best-effort recovery — never break the send path */ }
+    }
+  }
+
   getStats() {
     return {
       components: this.components.size,

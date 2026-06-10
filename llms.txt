@@ -3,6 +3,11 @@
 > Real-time server-client state synchronization framework for TypeScript.
 > Server components with reactive state, actions, rooms, auth, file uploads, and binary deltas.
 
+> ⚠️ **Tabela de pacotes incompleta (rev. 2026-06-09).** Faltam três pacotes novos:
+> `@fluxstack/live-cli` (inspector WS interativo), `@fluxstack/spatial-room`
+> (interest management p/ jogos, mitiga broadcast O(n²)) e `@fluxstack/plugin-kit`
+> (runtime de plugins). Fonte de verdade atual: `fluxstack-live/specs/`.
+
 ## What is FluxStack Live?
 
 FluxStack Live lets you write **server-side components** that automatically synchronize state to connected browser clients over WebSocket. Think Phoenix LiveView for the TypeScript/Node.js ecosystem, but framework-agnostic on both server (Elysia, Express, Fastify) and client (React, vanilla JS, Vue).

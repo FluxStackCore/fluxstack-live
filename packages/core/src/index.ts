@@ -20,7 +20,7 @@ export type {
   HttpRequest,
   HttpResponse,
 } from './transport/types'
-export { queueWsMessage, sendImmediate, sendBinaryImmediate } from './transport/WsSendBatcher'
+export { queueWsMessage, sendImmediate, sendBinaryImmediate, getBatcherStats, setResyncHandler } from './transport/WsSendBatcher'
 
 // ===== Protocol Messages =====
 export type {

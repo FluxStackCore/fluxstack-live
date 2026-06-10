@@ -15,6 +15,33 @@ import type { IRoomPubSubAdapter } from '@fluxstack/live'
 import { generateId } from '@fluxstack/live'
 import type Redis from 'ioredis'
 
+/**
+ * Atomic GET + shallow-merge + SET for room state.
+ * KEYS[1] = state key, ARGV[1] = JSON of fields to merge, ARGV[2] = TTL secs (0 = none).
+ * Runs entirely server-side so concurrent writers can't lose each other's fields.
+ * A corrupted/non-JSON existing value is treated as empty (start fresh), matching
+ * the previous behaviour.
+ */
+const MERGE_STATE_LUA = `
+local cur = redis.call('GET', KEYS[1])
+local state = {}
+if cur then
+  local ok, decoded = pcall(cjson.decode, cur)
+  if ok and type(decoded) == 'table' then state = decoded end
+end
+local updates = cjson.decode(ARGV[1])
+for k, v in pairs(updates) do state[k] = v end
+local encoded = cjson.encode(state)
+-- cjson encodes an empty table as '{}' (object), which is what we want for state.
+local ttl = tonumber(ARGV[2])
+if ttl and ttl > 0 then
+  redis.call('SET', KEYS[1], encoded, 'EX', ttl)
+else
+  redis.call('SET', KEYS[1], encoded)
+end
+return encoded
+`
+
 export interface RedisRoomAdapterOptions {
   /** ioredis client instance for commands (publish, get, set, etc.) */
   redis: Redis
@@ -168,19 +195,19 @@ export class RedisRoomAdapter implements IRoomPubSubAdapter {
   }
 
   async publishStateChange(roomId: string, updates: any): Promise<void> {
-    // 1. Persist state update to Redis (for new instances joining later)
+    // 1. Persist state update to Redis (for new instances joining later).
+    //    Done atomically via a Lua script: the GET, shallow-merge and SET run
+    //    server-side as one unit, so concurrent writes from other instances can
+    //    no longer clobber each other (specs/05 FP-1). Previously this was a
+    //    GET + Object.assign + SET round-trip with a lost-update race window.
     const key = this.stateKey(roomId)
-    const current = await this.redis.get(key)
-    let state: Record<string, unknown> = {}
-    if (current) {
-      try { state = JSON.parse(current) } catch { /* corrupted state, start fresh */ }
-    }
-    Object.assign(state, updates)
-    if (this.stateTtl > 0) {
-      await this.redis.set(key, JSON.stringify(state), 'EX', this.stateTtl)
-    } else {
-      await this.redis.set(key, JSON.stringify(state))
-    }
+    await this.redis.eval(
+      MERGE_STATE_LUA,
+      1,            // numKeys
+      key,          // KEYS[1]
+      JSON.stringify(updates), // ARGV[1] — fields to merge
+      String(this.stateTtl > 0 ? this.stateTtl : 0), // ARGV[2] — TTL (0 = no expiry)
+    )
 
     // 2. Publish change to other instances
     const msg: PubSubMessage = {

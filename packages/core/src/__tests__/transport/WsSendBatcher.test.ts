@@ -1,6 +1,6 @@
 // Tests for WsSendBatcher — message batching, deduplication, backpressure
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { queueWsMessage, queuePreSerialized, sendImmediate } from '../../transport/WsSendBatcher'
+import { queueWsMessage, queuePreSerialized, sendImmediate, setResyncHandler } from '../../transport/WsSendBatcher'
 import type { GenericWebSocket } from '../../transport/types'
 import { MAX_QUEUE_SIZE } from '../../protocol/constants'
 
@@ -133,6 +133,56 @@ describe('WsSendBatcher', () => {
       const parsed = JSON.parse(ws._sent[0] as string)
       // Should have exactly MAX_QUEUE_SIZE messages (oldest 50 were dropped)
       expect(parsed.length).toBe(MAX_QUEUE_SIZE)
+    })
+
+    it('requests a resync for the connection when a message is dropped', async () => {
+      const ws = createMockWs()
+      const onResync = vi.fn()
+      setResyncHandler(onResync)
+
+      try {
+        // Overflow the queue so at least one drop happens.
+        for (let i = 0; i < MAX_QUEUE_SIZE + 5; i++) {
+          queueWsMessage(ws, msg('ACTION_RESPONSE', `c${i}`, { i }))
+        }
+        await flush()
+
+        // The dropped connection must have been flagged for recovery.
+        expect(onResync).toHaveBeenCalled()
+        expect(onResync).toHaveBeenCalledWith(ws)
+      } finally {
+        setResyncHandler(null)
+      }
+    })
+
+    it('does NOT request a resync when there is no drop', async () => {
+      const ws = createMockWs()
+      const onResync = vi.fn()
+      setResyncHandler(onResync)
+
+      try {
+        queueWsMessage(ws, msg('STATE_DELTA', 'c1', { delta: { x: 1 } }))
+        await flush()
+        expect(onResync).not.toHaveBeenCalled()
+      } finally {
+        setResyncHandler(null)
+      }
+    })
+
+    it('a throwing resync handler never breaks the send path', async () => {
+      const ws = createMockWs()
+      setResyncHandler(() => { throw new Error('boom') })
+
+      try {
+        for (let i = 0; i < MAX_QUEUE_SIZE + 5; i++) {
+          queueWsMessage(ws, msg('ACTION_RESPONSE', `c${i}`, { i }))
+        }
+        // Should not throw despite the handler throwing.
+        await flush()
+        expect(ws.send).toHaveBeenCalled()
+      } finally {
+        setResyncHandler(null)
+      }
     })
   })
 

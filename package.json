@@ -8,13 +8,16 @@
     "examples/*"
   ],
   "scripts": {
-    "build": "bun run build:plugin-kit && bun run build:core && bun run build:adapters && bun run build:client && bun run build:react && bun run build:cli",
+    "build": "bun run build:plugin-kit && bun run build:core && bun run build:adapters && bun run build:client && bun run build:react && bun run build:cli && bun run build:redis && bun run build:vue && bun run build:spatial",
     "build:plugin-kit": "cd packages/plugin-kit && bunx tsup",
     "build:core": "cd packages/core && bunx tsup",
     "build:adapters": "cd packages/elysia && bunx tsup & cd packages/express && bunx tsup & cd packages/fastify && bunx tsup",
     "build:client": "cd packages/client && bunx tsup",
     "build:react": "cd packages/react && bunx tsup",
     "build:cli": "cd packages/cli && bunx tsup",
+    "build:redis": "cd packages/redis && bunx tsup",
+    "build:vue": "cd packages/vue && bunx tsup",
+    "build:spatial": "cd packages/spatial-room && bunx tsup",
     "inspect": "bun packages/cli/src/inspector.ts",
     "dev": "bunx tsup --watch",
     "load-test": "node scripts/load-test.mjs",

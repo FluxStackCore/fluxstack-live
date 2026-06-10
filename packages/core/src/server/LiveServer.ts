@@ -21,7 +21,7 @@ import { RateLimiterRegistry } from '../connection/RateLimiter'
 import { liveLog } from '../debug/LiveLogger'
 import { decodeBinaryChunk } from '../protocol/binary'
 import { DEFAULT_WS_PATH, MAX_MESSAGE_SIZE, MAX_ROOMS_PER_CONNECTION, MAX_JSON_DEPTH } from '../protocol/constants'
-import { sendImmediate } from '../transport/WsSendBatcher'
+import { sendImmediate, setResyncHandler } from '../transport/WsSendBatcher'
 import { sanitizePayload } from '../security/sanitize'
 import type { LiveAuthProvider } from '../auth/types'
 import type { IRoomPubSubAdapter } from '../rooms/adapters'
@@ -103,6 +103,8 @@ export class LiveServer {
 
   private transport: LiveTransport
   private options: LiveServerOptions
+  /** Connections with a backpressure resync coalesced for the current microtask. */
+  private _pendingResync = new Set<GenericWebSocket>()
 
   constructor(options: LiveServerOptions) {
     this.options = options
@@ -133,6 +135,19 @@ export class LiveServer {
       performanceMonitor: this.performanceMonitor,
       cluster: options.cluster,
       generateId: options.generateId,
+    })
+
+    // Recover connections that dropped outgoing messages to backpressure: the
+    // batcher calls this with the affected ws; we re-send a full signed snapshot
+    // of every component on it. Coalesce per-ws within a microtask so a burst of
+    // drops triggers a single resync.
+    setResyncHandler((ws) => {
+      if (this._pendingResync.has(ws)) return
+      this._pendingResync.add(ws)
+      queueMicrotask(() => {
+        this._pendingResync.delete(ws)
+        this.registry.resyncConnection(ws)
+      })
     })
 
     // Register statically-provided component classes (used in production bundles)
