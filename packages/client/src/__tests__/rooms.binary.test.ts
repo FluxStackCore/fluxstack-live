@@ -349,6 +349,39 @@ describe('RoomManager binary frame handling', () => {
     })
   })
 
+  // Robustness: a corrupt/pathological binary frame must not crash the client
+  // (spec 04 FP-3 / 05 FP-3). The decoder has a depth guard; handleBinaryFrame
+  // catches and drops gracefully.
+  describe('corrupt frame handling', () => {
+    /** Build a frame with a raw (already-encoded) payload, bypassing msgpackEncode. */
+    function frameWithRawPayload(roomId: string, event: string, payload: Uint8Array): Uint8Array {
+      const compIdBytes = encoder.encode('comp-test-1')
+      const roomIdBytes = encoder.encode(roomId)
+      const eventBytes = encoder.encode(event)
+      const total = 1 + 1 + compIdBytes.length + 1 + roomIdBytes.length + 2 + eventBytes.length + payload.length
+      const frame = new Uint8Array(total)
+      let o = 0
+      frame[o++] = 0x02
+      frame[o++] = compIdBytes.length; frame.set(compIdBytes, o); o += compIdBytes.length
+      frame[o++] = roomIdBytes.length; frame.set(roomIdBytes, o); o += roomIdBytes.length
+      frame[o++] = (eventBytes.length >> 8) & 0xff; frame[o++] = eventBytes.length & 0xff
+      frame.set(eventBytes, o); o += eventBytes.length
+      frame.set(payload, o)
+      return frame
+    }
+
+    it('drops a pathologically nested payload without throwing', () => {
+      joinRoom('r1')
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      // 5000 nested 1-element arrays → would overflow a naive recursive decoder.
+      const payload = new Uint8Array([...Array(5000).fill(0x91), 0x00])
+      const frame = frameWithRawPayload('r1', 'evt', payload)
+      expect(() => binaryHandler!(frame)).not.toThrow()
+      expect(warn).toHaveBeenCalled()
+      warn.mockRestore()
+    })
+  })
+
   describe('cleanup', () => {
     it('unsubscribes binary handler on destroy', () => {
       expect(binaryHandler).not.toBeNull()

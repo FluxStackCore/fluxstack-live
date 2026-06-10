@@ -106,7 +106,16 @@ Interfaces **diferentes**: o handle vanilla expõe métodos explícitos (`mount(
 `call()`, `fire()`, getter `state`); o React expõe um **Proxy** mágico. Docs antigas
 sugerem que são a mesma coisa. **Fix:** documentar a diferença.
 
-### ⚪ FP-3 — Decoder msgpack do client devolve `null` em underrun
+### ⚪ FP-3 — Decoder msgpack do client: underrun + sem depth guard  ✅ CORRIGIDO (2026-06-10)
+> **Fix:** o decoder ganhou **depth guard** (`_MSGPACK_MAX_DEPTH=100`, throw `RangeError`
+> em aninhamento patológico) e `handleBinaryFrame` agora **envolve o decode em
+> try/catch** — frame corrompido/profundo é **dropado graciosamente** com `console.warn`
+> (não quebra a UI). `client/src/rooms.ts`. **Teste:** `rooms.binary.test.ts` (frame de
+> 5000 níveis → não lança, warn chamado). Postura "fail-loud em dev, gracioso em prod".
+> _(underrun ainda retorna null silencioso em leitura parcial — baixo impacto; o depth
+> guard + try/catch cobrem o caso de crash.)_
+
+### ⚪ FP-3b (orig) — Decoder msgpack do client devolvia `null` em underrun
 `rooms.ts _decodeAt()` retorna `null` silenciosamente quando `offset >= buf.length`
 → frame malformado indistinguível de `null` legítimo. (O **core** já corrige isso
 com throw; o client ainda não.) **Fix:** throw/warn.

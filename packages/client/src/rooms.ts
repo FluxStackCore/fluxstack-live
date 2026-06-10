@@ -60,19 +60,24 @@ const BINARY_ROOM_STATE = 0x03
 // ===== Lightweight msgpack decoder (client-side, decode-only) =====
 
 const _decoder = new TextDecoder()
+/** Max nesting depth — guards against stack overflow on malicious/corrupt frames. */
+const _MSGPACK_MAX_DEPTH = 100
 
 function msgpackDecode(buf: Uint8Array): unknown {
-  return _decodeAt(buf, 0).value
+  return _decodeAt(buf, 0, 0).value
 }
 
-function _decodeAt(buf: Uint8Array, offset: number): { value: unknown; offset: number } {
+function _decodeAt(buf: Uint8Array, offset: number, depth: number): { value: unknown; offset: number } {
+  if (depth > _MSGPACK_MAX_DEPTH) {
+    throw new RangeError(`msgpack: max nesting depth ${_MSGPACK_MAX_DEPTH} exceeded (corrupt frame)`)
+  }
   if (offset >= buf.length) return { value: null, offset }
   const byte = buf[offset]
   const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
 
   if (byte < 0x80) return { value: byte, offset: offset + 1 }
-  if (byte >= 0x80 && byte <= 0x8f) return _decodeMap(buf, offset + 1, byte & 0x0f)
-  if (byte >= 0x90 && byte <= 0x9f) return _decodeArr(buf, offset + 1, byte & 0x0f)
+  if (byte >= 0x80 && byte <= 0x8f) return _decodeMap(buf, offset + 1, byte & 0x0f, depth)
+  if (byte >= 0x90 && byte <= 0x9f) return _decodeArr(buf, offset + 1, byte & 0x0f, depth)
   if (byte >= 0xa0 && byte <= 0xbf) {
     const len = byte & 0x1f
     return { value: _decoder.decode(buf.subarray(offset + 1, offset + 1 + len)), offset: offset + 1 + len }
@@ -96,25 +101,25 @@ function _decodeAt(buf: Uint8Array, offset: number): { value: unknown; offset: n
     case 0xd9: { const l = buf[offset + 1]; return { value: _decoder.decode(buf.subarray(offset + 2, offset + 2 + l)), offset: offset + 2 + l } }
     case 0xda: { const l = view.getUint16(offset + 1, false); return { value: _decoder.decode(buf.subarray(offset + 3, offset + 3 + l)), offset: offset + 3 + l } }
     case 0xdb: { const l = view.getUint32(offset + 1, false); return { value: _decoder.decode(buf.subarray(offset + 5, offset + 5 + l)), offset: offset + 5 + l } }
-    case 0xdc: return _decodeArr(buf, offset + 3, view.getUint16(offset + 1, false))
-    case 0xdd: return _decodeArr(buf, offset + 5, view.getUint32(offset + 1, false))
-    case 0xde: return _decodeMap(buf, offset + 3, view.getUint16(offset + 1, false))
-    case 0xdf: return _decodeMap(buf, offset + 5, view.getUint32(offset + 1, false))
+    case 0xdc: return _decodeArr(buf, offset + 3, view.getUint16(offset + 1, false), depth)
+    case 0xdd: return _decodeArr(buf, offset + 5, view.getUint32(offset + 1, false), depth)
+    case 0xde: return _decodeMap(buf, offset + 3, view.getUint16(offset + 1, false), depth)
+    case 0xdf: return _decodeMap(buf, offset + 5, view.getUint32(offset + 1, false), depth)
   }
   return { value: null, offset: offset + 1 }
 }
 
-function _decodeArr(buf: Uint8Array, offset: number, count: number): { value: unknown[]; offset: number } {
+function _decodeArr(buf: Uint8Array, offset: number, count: number, depth: number): { value: unknown[]; offset: number } {
   const arr: unknown[] = new Array(count)
-  for (let i = 0; i < count; i++) { const r = _decodeAt(buf, offset); arr[i] = r.value; offset = r.offset }
+  for (let i = 0; i < count; i++) { const r = _decodeAt(buf, offset, depth + 1); arr[i] = r.value; offset = r.offset }
   return { value: arr, offset }
 }
 
-function _decodeMap(buf: Uint8Array, offset: number, count: number): { value: Record<string, unknown>; offset: number } {
+function _decodeMap(buf: Uint8Array, offset: number, count: number, depth: number): { value: Record<string, unknown>; offset: number } {
   const obj: Record<string, unknown> = {}
   for (let i = 0; i < count; i++) {
-    const k = _decodeAt(buf, offset); offset = k.offset
-    const v = _decodeAt(buf, offset); offset = v.offset
+    const k = _decodeAt(buf, offset, depth + 1); offset = k.offset
+    const v = _decodeAt(buf, offset, depth + 1); offset = v.offset
     obj[String(k.value)] = v.value
   }
   return { value: obj, offset }
@@ -343,7 +348,15 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       return
     }
 
-    const data = msgpackDecode(parsed.payload)
+    // Decode defensively: a corrupt/truncated/deeply-nested frame must not crash
+    // the client. Fail loud in the console, drop the frame gracefully.
+    let data: unknown
+    try {
+      data = msgpackDecode(parsed.payload)
+    } catch (err) {
+      console.warn('[live-client] dropped a corrupt binary room frame:', err)
+      return
+    }
 
     if (parsed.frameType === BINARY_ROOM_EVENT) {
       // Dispatch directly — handlers live in this.roomHandlers (persistent)
