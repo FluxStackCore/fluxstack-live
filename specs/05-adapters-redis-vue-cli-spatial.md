@@ -89,8 +89,13 @@ Era: decoder recursivo sem limite → frame com aninhamento profundo estourava a
 > (6 — incl. 5000 níveis → RangeError). O pacote `cli` entrou no `vitest.workspace.ts`
 > (antes não tinha testes).
 
-### ⚪ FP-4 — Vue `useLiveComponent` sem auto-reconnect
-Diferente do client React, o composable Vue **não** reconecta sozinho se o WS cai.
+### ⚪ FP-4 — Vue `useLiveComponent` sem auto-reconnect  ✅ NÃO PROCEDE (rev. 2026-06-10)
+> **Verificado:** o Vue **já reconecta automaticamente**. `provideLiveConnection` usa
+> `LiveConnection` de `@fluxstack/live-client` (`vue/src/index.ts:29,116`) — a **mesma**
+> conexão resiliente do React (auto-reconnect infinito + listeners `online`/
+> `visibilitychange` + backoff, `client/connection.ts:117,150-161`). O `reconnect()`
+> exposto (`:147`) é só o gatilho manual. A afirmação original estava desatualizada
+> (era verdade quando o Vue tinha conexão própria). **Nada a corrigir.**
 
 ---
 

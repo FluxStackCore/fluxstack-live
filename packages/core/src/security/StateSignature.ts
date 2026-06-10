@@ -1,7 +1,7 @@
 // @fluxstack/live - State Signature (HMAC-SHA256)
 //
 // Cryptographic state signing for secure client-side persistence.
-// Supports: key rotation, compression (gzip), encryption (AES-256-CBC),
+// Supports: key rotation, compression (gzip), encryption (AES-256-GCM, AEAD),
 // hybrid anti-replay nonces (stateless HMAC + replay detection), state backups, and state migrations.
 
 import { createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync, timingSafeEqual as cryptoTimingSafeEqual } from 'crypto'
@@ -188,14 +188,17 @@ export class StateSignatureManager {
       }
     }
 
-    // Encryption
+    // Encryption — AES-256-GCM (AEAD): the auth tag detects any tampering of the
+    // ciphertext on decrypt. (Was AES-256-CBC, which is malleable and unauthenticated.)
+    // Wire format: ivB64:tagB64:ciphertextB64 (12-byte IV, 16-byte tag).
     if (this.config.encryptionEnabled) {
-      const iv = randomBytes(16)
+      const iv = randomBytes(12)
       const key = this.deriveEncryptionKey()
-      const cipher = createCipheriv('aes-256-cbc', key, iv)
+      const cipher = createCipheriv('aes-256-gcm', key, iv)
       let encryptedData = cipher.update(dataStr, 'utf-8', 'base64')
       encryptedData += cipher.final('base64')
-      dataStr = iv.toString('base64') + ':' + encryptedData
+      const tag = cipher.getAuthTag()
+      dataStr = iv.toString('base64') + ':' + tag.toString('base64') + ':' + encryptedData
       encrypted = true
     }
 
@@ -275,12 +278,15 @@ export class StateSignatureManager {
   extractData(signedState: SignedState): Record<string, unknown> {
     let dataStr = signedState.data
 
-    // Decrypt
+    // Decrypt — AES-256-GCM. The auth tag is verified on final(): any tampering
+    // of the ciphertext (or wrong key) throws, so we never return forged plaintext.
     if (signedState.encrypted) {
-      const [ivB64, encryptedData] = dataStr.split(':')
+      const [ivB64, tagB64, encryptedData] = dataStr.split(':')
       const iv = Buffer.from(ivB64, 'base64')
+      const tag = Buffer.from(tagB64, 'base64')
       const key = this.deriveEncryptionKey()
-      const decipher = createDecipheriv('aes-256-cbc', key, iv)
+      const decipher = createDecipheriv('aes-256-gcm', key, iv)
+      decipher.setAuthTag(tag)
       dataStr = decipher.update(encryptedData, 'base64', 'utf-8')
       dataStr += decipher.final('utf-8')
     }

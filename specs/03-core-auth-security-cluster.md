@@ -125,7 +125,12 @@ bug #2 ($auth.session mutável). Todos os exemplos do repo usam corretamente.
 **Fix:** normalizar/wrappar o retorno do provider num `AuthenticatedContext` (freeze
 forçado) dentro do `authenticate()`.
 
-### ⚪ FP-3 — AES-256-CBC sem autenticação
+### ⚪ FP-3 — AES-256-CBC sem autenticação  ✅ CORRIGIDO (2026-06-10)
+> **Fix:** a cripto opcional do state migrou de **AES-256-CBC → AES-256-GCM** (AEAD).
+> Agora o **auth tag** detecta qualquer tampering do ciphertext no decrypt (CBC era
+> malleável/não-autenticado). Wire: `iv:tag:ciphertext` (IV 12B, tag 16B).
+> `StateSignature.ts:195-201,279-286`. **Testes:** `StateSignature.encryption.test.ts`
+> (+3: formato GCM, tampering de ciphertext e de tag → throw).
 A cripto opcional do state usa **CBC**, que não autentica → tampering do ciphertext
 não é detectado (o HMAC assina o *plaintext*, mas a combinação não é AEAD).
 **Fix:** AES-256-GCM ou `HMAC(ciphertext)`.

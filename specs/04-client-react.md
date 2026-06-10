@@ -66,6 +66,12 @@ counter.$auth.session
 > **`$connected` ≠ pronto.** Faça gate de actions em **`$ready`** (= `$status === 'synced'`).
 > Chamar action entre WS-aberto e mount-concluído lança erro. `:777-865`.
 
+> **Actions recebem UM único payload (issue #49).** `counter.spawn(a, b)` encaminha só
+> `a` — o resto é descartado (vira `undefined` no server). TS não pega (a assinatura do
+> método na classe é a do dev). **Use um objeto:** `spawn({ agent, cwd })`, lido como 1º
+> parâmetro no server. Em **dev**, chamar com >1 arg posicional emite `console.warn`
+> (`useLiveComponent.ts`). **Teste:** `action-positional-args.test.ts`.
+
 ### 1.6 `Live.Boundary` / `Live.Status` (NOVOS) — `components/LiveBoundary.tsx`
 
 Helpers de UI: `<Live.Boundary>` com slots loading/error/offline; `<Live.Status>`
@@ -94,7 +100,8 @@ mirando 200ms (min 16KB, max 1MB).
 
 ## 2. Pontos de falha (confirmados)
 
-### 🟠 FP-1 — `maxReconnectAttempts = Infinity` é breaking change de contrato
+### 🟠 FP-1 — `maxReconnectAttempts = Infinity` (mudança de contrato)  ✅ DOCUMENTADO (2026-06-10)
+> Documentado no `CLAUDE.md` raiz (seção Pacotes) e nesta spec. Comportamento intencional.
 O default mudou de **5 → Infinity** (`connection.ts:117`). Apps que dependiam de
 "desistir após 5 tentativas" mudam de comportamento sem aviso. É **intencional e
 desejável** para realtime, mas **não está documentado** no CLAUDE.md/llms.txt.

@@ -38,6 +38,11 @@ export interface ComponentOptions {
   deepDiffDepth?: number
   /** When true, room state can only be set from server-side code. Client ROOM_STATE_SET is rejected. Default: false */
   serverOnlyRoomState?: boolean
+  /** When true, the state proxy is RECURSIVE: a nested mutation like
+   *  `this.state.nested.x = y` is detected and synced (default proxy is shallow,
+   *  so nested mutations are silently dropped). Opt-in — costs extra proxies.
+   *  Reference identity is preserved (`state.x === state.x`). Default: false. */
+  recursiveProxy?: boolean
 }
 
 export abstract class LiveComponent<
@@ -166,6 +171,7 @@ export abstract class LiveComponent<
       onStateChangeFn: (changes) => this.onStateChange(changes),
       deepDiff: (ctor as any).$options?.deepDiff ?? true,
       deepDiffDepth: (ctor as any).$options?.deepDiffDepth,
+      recursiveProxy: (ctor as any).$options?.recursiveProxy ?? false,
     })
 
     // Expose proxy state as `this.state`
