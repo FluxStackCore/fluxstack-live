@@ -57,6 +57,8 @@ interface ClusterMessage {
   componentId?: string
   componentName?: string
   delta?: any
+  /** Monotonic per-(origin,component) sequence for dedup + ordering of deltas. */
+  seq?: number
   // action fields
   request?: ClusterActionRequest
   response?: ClusterActionResponse
@@ -153,13 +155,21 @@ export class RedisClusterAdapter implements IClusterAdapter {
 
   // ── State Delta Pub/Sub ──────────────────────────────
 
+  /** Outgoing per-component sequence number (monotonic, this instance). */
+  private deltaSeq: Map<string, number> = new Map()
+  /** Highest delta seq seen per `${origin}:${componentId}` (dedup + ordering). */
+  private seenDeltaSeq: Map<string, number> = new Map()
+
   async publishDelta(componentId: string, componentName: string, delta: any): Promise<void> {
+    const seq = (this.deltaSeq.get(componentId) ?? 0) + 1
+    this.deltaSeq.set(componentId, seq)
     const msg: ClusterMessage = {
       type: 'delta',
       origin: this.instanceId,
       componentId,
       componentName,
       delta,
+      seq,
     }
     await this.redis.publish(this.deltaChannel(), JSON.stringify(msg))
   }
@@ -334,6 +344,16 @@ export class RedisClusterAdapter implements IClusterAdapter {
 
   private handleDelta(msg: ClusterMessage): void {
     if (!this.deltaHandler || !msg.componentId || !msg.componentName) return
+    // Dedup + ordering: drop deltas we've already seen or that arrive out of
+    // order. Redis pub/sub can redeliver on reconnect, and the network can
+    // reorder — without this, a stale delta would clobber newer state.
+    // Messages without a seq (older publishers) are always delivered.
+    if (typeof msg.seq === 'number') {
+      const key = `${msg.origin}:${msg.componentId}`
+      const last = this.seenDeltaSeq.get(key) ?? 0
+      if (msg.seq <= last) return // duplicate or out-of-order → drop
+      this.seenDeltaSeq.set(key, msg.seq)
+    }
     this.deltaHandler(msg.componentId, msg.componentName, msg.delta, msg.origin)
   }
 

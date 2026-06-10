@@ -10,5 +10,6 @@ export default defineWorkspace([
   'packages/client',
   'packages/react',
   'packages/spatial-room',
+  'packages/cli',
   '__tests__',
 ])

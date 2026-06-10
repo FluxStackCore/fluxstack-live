@@ -84,10 +84,24 @@ function scheduleWs(ws: GenericWebSocket): void {
 }
 
 /**
- * Record a backpressure drop and warn once per connection.
- * Fixes #7 H7: previously the batcher silently `shift()`-ed the oldest
- * message with no telemetry, so bursty producers caused state drift on
- * the client with no visible signal.
+ * Optional handler invoked when a connection drops a message to backpressure.
+ * Dropping the oldest message means the client has now MISSED a STATE_DELTA and
+ * its state has silently drifted. The host (LiveServer) can register a handler
+ * here to recover — typically by re-sending a full signed snapshot to that WS.
+ * Without a handler, the drop is still counted + warned (see recordBackpressureDrop).
+ */
+let resyncHandler: ((ws: GenericWebSocket) => void) | null = null
+
+/** Register a handler to recover connections whose queue overflowed. */
+export function setResyncHandler(handler: ((ws: GenericWebSocket) => void) | null): void {
+  resyncHandler = handler
+}
+
+/**
+ * Record a backpressure drop, warn once per connection, and request a resync.
+ * Fixes #7 H7: previously the batcher silently `shift()`-ed the oldest message
+ * with no telemetry. Now we also flag the connection for recovery so the client
+ * doesn't stay permanently drifted (FP-1 in specs/02-core-rooms-protocol).
  */
 function recordBackpressureDrop(ws: GenericWebSocket): void {
   stats.droppedBackpressure++
@@ -95,8 +109,13 @@ function recordBackpressureDrop(ws: GenericWebSocket): void {
     backpressureWarned.add(ws)
     liveWarn('websocket', null,
       `WsSendBatcher backpressure on connection: per-WS queue reached ${MAX_QUEUE_SIZE} messages. ` +
-      `Oldest messages are being dropped. This warning is one-shot per connection; ` +
-      `check server.getBatcherStats() for running totals.`)
+      `Oldest messages are being dropped — client state has drifted and a resync ` +
+      `${resyncHandler ? 'was requested' : 'handler is NOT registered (state will stay stale)'}. ` +
+      `This warning is one-shot per connection; check server.getBatcherStats() for running totals.`)
+  }
+  // Request recovery on every drop; the handler is expected to debounce/coalesce.
+  if (resyncHandler) {
+    try { resyncHandler(ws) } catch { /* never let recovery break the send path */ }
   }
 }
 

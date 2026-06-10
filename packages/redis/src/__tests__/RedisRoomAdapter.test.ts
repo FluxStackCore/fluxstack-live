@@ -219,6 +219,35 @@ describe('RedisRoomAdapter', () => {
       await adapter2.shutdown()
       redis2.disconnect()
     })
+
+    // Atomicity: concurrent writes from two instances must NOT lose updates
+    // (specs/05 FP-1). The old GET+assign+SET had a race where the last SET
+    // overwrote a concurrent instance's field. With an atomic merge, every
+    // distinct field written concurrently must survive.
+    it('does not lose concurrent updates from two instances (atomic merge)', async () => {
+      const redis2 = new Redis({ host: REDIS_HOST, port: REDIS_PORT, db: 13 })
+      const adapter2 = new RedisRoomAdapter({ redis: redis2, prefix: 'test:room:', stateTtl: 60 })
+
+      // Fire many interleaved writes: adapter writes a*, adapter2 writes b*.
+      const N = 50
+      const ops: Promise<void>[] = []
+      for (let i = 0; i < N; i++) {
+        ops.push(adapter.publishStateChange('race-room', { [`a${i}`]: i }))
+        ops.push(adapter2.publishStateChange('race-room', { [`b${i}`]: i }))
+      }
+      await Promise.all(ops)
+
+      const state = (await adapter.getPersistedState('race-room')) as Record<string, number>
+      // All 2*N distinct fields must be present — none clobbered by a racing SET.
+      for (let i = 0; i < N; i++) {
+        expect(state[`a${i}`]).toBe(i)
+        expect(state[`b${i}`]).toBe(i)
+      }
+      expect(Object.keys(state).length).toBe(2 * N)
+
+      await adapter2.shutdown()
+      redis2.disconnect()
+    })
   })
 
   // ── Shutdown ──────────────────────────────────────

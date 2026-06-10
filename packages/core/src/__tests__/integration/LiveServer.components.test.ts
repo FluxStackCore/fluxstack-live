@@ -2,6 +2,8 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { LiveServer } from '../../server/LiveServer'
 import { LiveComponent } from '../../component/LiveComponent'
 import { createMockWS, spyOnConsole } from '../helpers'
+import { queueWsMessage } from '../../transport/WsSendBatcher'
+import { MAX_QUEUE_SIZE } from '../../protocol/constants'
 import type { LiveTransport, WebSocketConfig, HttpRouteDefinition } from '../../transport/types'
 
 // ===== Fake transport (no real server) =====
@@ -157,5 +159,46 @@ describe('LiveServer components[] option', () => {
     const ws = createMockWS()
     await expect(server.registry.mountComponent(ws, 'NotRegistered'))
       .rejects.toThrow()
+  })
+})
+
+// Backpressure recovery: when a connection drops outgoing messages because its
+// queue overflowed, the LiveServer must re-send a full signed STATE_UPDATE
+// snapshot of every component on it so the client recovers from the silent drift.
+describe('LiveServer — backpressure resync', () => {
+  let consoleSpy: ReturnType<typeof spyOnConsole>
+  afterEach(() => consoleSpy?.restore())
+
+  const flushMicrotasks = () => new Promise<void>(r => queueMicrotask(r))
+
+  it('re-sends a STATE_UPDATE snapshot for mounted components after a drop', async () => {
+    consoleSpy = spyOnConsole()
+    const server = new LiveServer({
+      transport: createNoopTransport(),
+      components: [CounterComponent],
+    })
+
+    const ws = createMockWS()
+    const { componentId } = await server.registry.mountComponent(ws, 'Counter')
+    ws._messages.length = 0 // ignore the mount STATE_UPDATE
+
+    // Overflow the outgoing queue → at least one message is dropped, which
+    // triggers the LiveServer resync handler registered in its constructor.
+    for (let i = 0; i < MAX_QUEUE_SIZE + 5; i++) {
+      queueWsMessage(ws, { type: 'ACTION_RESPONSE', componentId, payload: { i } } as any)
+    }
+    await flushMicrotasks() // batcher flush + coalesced resync both run on microtasks
+    await flushMicrotasks()
+
+    // Collect every message frame (some are JSON objects, some JSON arrays).
+    const frames = ws._messages.flatMap(m => {
+      try { const v = JSON.parse(m); return Array.isArray(v) ? v : [v] } catch { return [] }
+    })
+    const resyncs = frames.filter(
+      (f: any) => f && f.type === 'STATE_UPDATE' && f.componentId === componentId,
+    )
+
+    expect(resyncs.length).toBeGreaterThan(0)
+    expect(resyncs[0].payload).toHaveProperty('signedState')
   })
 })

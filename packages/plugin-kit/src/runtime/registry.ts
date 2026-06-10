@@ -65,6 +65,12 @@ export interface PluginRegistrySettings {
   discoverProjectPlugins?: boolean
   /** Whether to scan `node_modules/` for `fluxstack-plugin-*` packages */
   discoverNpmPlugins?: boolean
+  /**
+   * Enforce the npm plugin whitelist at registration time (including `.use()`).
+   * Default: true (secure by default). Set to false to trust all `.use()`-d
+   * plugins (e.g. internal monorepo where every plugin is first-party).
+   */
+  enforceNpmWhitelist?: boolean
 }
 
 export interface PluginRegistryConfig {
@@ -273,6 +279,7 @@ export class PluginRegistry {
       )
     }
 
+    this.enforceWhitelist(plugin)
     this.validatePlugin(plugin)
     this.plugins.set(plugin.name, plugin)
 
@@ -337,6 +344,44 @@ export class PluginRegistry {
    * - Project plugins (plugins/) are ALWAYS trusted (developer put them there)
    * - NPM plugins (node_modules/) REQUIRE whitelist (supply chain protection)
    */
+  /**
+   * Heuristic: does this plugin come from npm (3rd-party supply chain)?
+   *
+   * Built-in plugins use the `category: 'built-in'` marker; project plugins are
+   * authored locally and named freely. npm plugins follow the publishing
+   * convention: a scoped name (`@scope/...`) or the `fluxstack-plugin-*` prefix.
+   * `@fluxstack/live*` internal packages are excluded (first-party).
+   */
+  private isNpmPlugin(plugin: FluxStackPlugin): boolean {
+    if ((plugin as { category?: string }).category === 'built-in') return false
+    const name = plugin.name || ''
+    if (name.startsWith('@fluxstack/live')) return false
+    return name.startsWith('@') || name.startsWith('fluxstack-plugin-')
+  }
+
+  /**
+   * Enforce the npm plugin whitelist at registration time (including `.use()`).
+   *
+   * Supply-chain protection: a 3rd-party npm plugin must appear in
+   * `allowedPlugins` (env `PLUGINS_ALLOWED`) to be registered. Built-in and
+   * project plugins are always trusted. Set `enforceNpmWhitelist: false` to
+   * opt out (e.g. trusted internal monorepo).
+   */
+  private enforceWhitelist(plugin: FluxStackPlugin): void {
+    if (this.settings?.enforceNpmWhitelist === false) return
+    if (!this.isNpmPlugin(plugin)) return
+
+    const allowed = this.settings?.allowedPlugins || []
+    if (!allowed.includes(plugin.name)) {
+      throw new PluginError(
+        `npm plugin '${plugin.name}' is not whitelisted. Add it to PLUGINS_ALLOWED ` +
+          `(allowedPlugins) to enable it, or set enforceNpmWhitelist: false to opt out.`,
+        'PLUGIN_NOT_WHITELISTED',
+        403,
+      )
+    }
+  }
+
   private isPluginAllowed(pluginName: string, source: 'npm' | 'project'): boolean {
     const allowedPlugins = this.settings?.allowedPlugins || []
 

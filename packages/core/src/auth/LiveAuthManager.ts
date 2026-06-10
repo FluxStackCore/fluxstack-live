@@ -10,7 +10,22 @@ import type {
   LiveActionAuth,
   LiveAuthResult,
 } from './types'
-import { ANONYMOUS_CONTEXT } from './LiveAuthContext'
+import { ANONYMOUS_CONTEXT, AuthenticatedContext } from './LiveAuthContext'
+
+/**
+ * Normalize a context returned by a provider so an AUTHENTICATED context always
+ * has a deep-frozen session. A provider may return a plain object literal
+ * (not an AuthenticatedContext); without this, a handler could mutate
+ * `$auth.session.roles` and escalate RBAC. Anonymous/null contexts pass through.
+ */
+function freezeAuthContext(context: LiveAuthContext | null): LiveAuthContext | null {
+  if (!context || !context.authenticated || !context.session) return context
+  // Already frozen by AuthenticatedContext? leave as-is (fast path).
+  if (context instanceof AuthenticatedContext) return context
+  if (Object.isFrozen(context.session) && Object.isFrozen(context.session.roles)) return context
+  // Re-wrap to guarantee the freeze; preserves session content + token.
+  return new AuthenticatedContext(context.session, context.token)
+}
 
 /**
  * Coerce the result of a user-provided `authorize()` callback into a strict
@@ -109,7 +124,7 @@ export class LiveAuthManager {
       }
       try {
         const context = await provider.authenticate(credentials)
-        return context || ANONYMOUS_CONTEXT
+        return freezeAuthContext(context) || ANONYMOUS_CONTEXT
       } catch (error: any) {
         console.error(`[Auth] Failed via '${providerName}':`, error.message)
         return ANONYMOUS_CONTEXT
@@ -136,7 +151,7 @@ export class LiveAuthManager {
       try {
         const context = await provider.authenticate(credentials)
         if (context && context.authenticated) {
-          return context
+          return freezeAuthContext(context)!
         }
       } catch (error: any) {
         console.warn(`[Auth] Provider '${provider.name}' threw during authentication:`, error.message)
