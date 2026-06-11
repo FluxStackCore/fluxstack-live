@@ -826,7 +826,19 @@ export function useLiveComponent<
         }
 
         // Action (anything not in state or reserved)
-        return async (payload?: any) => {
+        return async (...args: any[]) => {
+          // Footgun guard (issue #49): actions forward a SINGLE payload object.
+          // Calling `list.spawn(a, b)` silently drops `b` (becomes undefined on
+          // the server). TS can't catch it because the method signature on the
+          // class is the dev's own. Warn loudly in dev; zero cost in prod.
+          if (process.env.NODE_ENV !== 'production' && args.length > 1) {
+            console.warn(
+              `[live-react] action "${String(prop)}" was called with ${args.length} positional ` +
+              `arguments, but Live actions forward only ONE payload object — the rest are dropped. ` +
+              `Use a single object: ${String(prop)}({ ... }) and read it as the first parameter on the server.`,
+            )
+          }
+          const payload = args[0]
           const id = componentId || lastComponentIdRef.current
           if (!id || !connected) throw notReadyError(prop)
 

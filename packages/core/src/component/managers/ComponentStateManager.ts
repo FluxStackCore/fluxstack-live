@@ -11,6 +11,13 @@ import { liveWarn } from '../../debug/LiveLogger'
 /** Per-class cache for forbidden property names in createDirectStateAccessors */
 const _forbiddenSetCache = new WeakMap<Function, Set<string>>()
 
+/** True for plain objects and arrays (the structures we recursively proxy). */
+function isPlainObjectOrArray(v: unknown): v is object {
+  if (v === null || typeof v !== 'object') return false
+  if (Array.isArray(v)) return true
+  return Object.getPrototypeOf(v) === Object.prototype
+}
+
 export interface StateManagerOptions<TState> {
   componentId: string
   initialState: TState
@@ -19,6 +26,7 @@ export interface StateManagerOptions<TState> {
   onStateChangeFn: (changes: Partial<TState>) => void
   deepDiff?: boolean
   deepDiffDepth?: number
+  recursiveProxy?: boolean
 }
 
 export class ComponentStateManager<TState = ComponentState> {
@@ -28,6 +36,9 @@ export class ComponentStateManager<TState = ComponentState> {
   private _idBytes: Uint8Array | null = null
   private _deepDiff: boolean
   private _deepDiffDepth: number
+  private _recursiveProxy: boolean
+  /** Caches child proxies per nested object so identity is preserved. */
+  private _childProxies = new WeakMap<object, object>()
 
   private componentId: string
   private ws: GenericWebSocket
@@ -41,6 +52,7 @@ export class ComponentStateManager<TState = ComponentState> {
     this.onStateChangeFn = opts.onStateChangeFn
     this._deepDiff = opts.deepDiff ?? true
     this._deepDiffDepth = opts.deepDiffDepth ?? 3
+    this._recursiveProxy = opts.recursiveProxy ?? false
     // When deepDiff is enabled, deep-clone initialState so deepAssign
     // doesn't mutate shared references (e.g. static defaultState).
     this._state = this._deepDiff
@@ -74,9 +86,69 @@ export class ComponentStateManager<TState = ComponentState> {
         return true
       },
       get(target, prop) {
-        return (target as any)[prop]
+        const value = (target as any)[prop]
+        // Recursive proxy (opt-in): wrap nested plain objects so a mutation like
+        // `state.nested.x = y` is detected and synced. Shallow proxy (default)
+        // would drop it silently. Identity is preserved via the child cache.
+        if (self._recursiveProxy && isPlainObjectOrArray(value)) {
+          return self.wrapChild(value, prop as string)
+        }
+        return value
       }
     }) as TState
+  }
+
+  /**
+   * Wrap a nested object/array so writes re-emit through setState under the
+   * top-level `rootKey`, reusing the deep-diff pipeline. Cached per target to
+   * keep reference identity (`state.x === state.x`).
+   *
+   * Writes do NOT mutate the live object directly — they build a clone of the
+   * root value with the change applied and hand it to setState. That way the
+   * deep diff compares the clone against the still-old internal state and emits
+   * the minimal delta (mutating in place would make both sides equal → no delta).
+   */
+  private wrapChild(obj: object, rootKey: string): object {
+    const cached = this._childProxies.get(obj)
+    if (cached) return cached
+    const self = this
+    /** Emit a delta for the nested mutation: snapshot the root, run the mutation,
+     *  diff before/after, and emit only the changed sub-tree under rootKey. */
+    const withDelta = (mutate: () => void) => {
+      const before = structuredClone((self._state as any)[rootKey])
+      mutate()
+      const after = (self._state as any)[rootKey]
+      const subDiff = self._deepDiff
+        ? computeDeepDiff({ [rootKey]: before } as any, { [rootKey]: after } as any, 0, self._deepDiffDepth)
+        : { [rootKey]: after }
+      if (subDiff === null) return
+      self.emitFn('STATE_DELTA', { delta: subDiff })
+      if (!self._inStateChange) {
+        self._inStateChange = true
+        try { self.onStateChangeFn(subDiff as Partial<TState>) } catch (err: any) {
+          console.error(`[${self.componentId}] onStateChange error:`, err?.message || err)
+        } finally { self._inStateChange = false }
+      }
+    }
+    const proxy = new Proxy(obj, {
+      get(target, prop) {
+        const value = (target as any)[prop]
+        if (isPlainObjectOrArray(value)) return self.wrapChild(value, rootKey)
+        return value
+      },
+      set(target, prop, value) {
+        if ((target as any)[prop] === value) return true
+        withDelta(() => { (target as any)[prop] = value })
+        return true
+      },
+      deleteProperty(target, prop) {
+        if (!(prop in target)) return true
+        withDelta(() => { delete (target as any)[prop] })
+        return true
+      },
+    })
+    this._childProxies.set(obj, proxy)
+    return proxy
   }
 
   setState(updates: Partial<TState> | ((prev: TState) => Partial<TState>)): void {

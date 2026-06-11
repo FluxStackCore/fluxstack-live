@@ -97,6 +97,46 @@ describe('StateSignatureManager - Encryption key derivation', () => {
     expect(() => managerB.extractData(signedByA)).toThrow()
   })
 
+  it('uses AES-256-GCM wire format (iv:tag:ciphertext)', async () => {
+    const manager = create({
+      secret: 'test-secret-32chars-minimum-ok!',
+      encryptionEnabled: true,
+      compressionEnabled: false,
+    })
+    const signed = await manager.signState('comp-1', { a: 1 }, 1)
+    // iv : tag : ciphertext — three base64 segments.
+    expect(signed.data.split(':')).toHaveLength(3)
+  })
+
+  it('detects ciphertext tampering on decrypt (AEAD auth tag)', async () => {
+    const manager = create({
+      secret: 'test-secret-32chars-minimum-ok!',
+      encryptionEnabled: true,
+      compressionEnabled: false,
+    })
+    const signed = await manager.signState('comp-1', { secret: 'value' }, 1)
+    const [iv, tag, ct] = signed.data.split(':')
+    // Flip a byte in the ciphertext.
+    const ctBuf = Buffer.from(ct, 'base64')
+    ctBuf[0] ^= 0xff
+    const tampered = { ...signed, data: `${iv}:${tag}:${ctBuf.toString('base64')}` }
+    // GCM auth tag verification must fail → throw, never return forged plaintext.
+    expect(() => manager.extractData(tampered)).toThrow()
+  })
+
+  it('detects auth-tag tampering on decrypt', async () => {
+    const manager = create({
+      secret: 'test-secret-32chars-minimum-ok!',
+      encryptionEnabled: true,
+      compressionEnabled: false,
+    })
+    const signed = await manager.signState('comp-1', { x: 1 }, 1)
+    const [iv, tag, ct] = signed.data.split(':')
+    const tagBuf = Buffer.from(tag, 'base64'); tagBuf[0] ^= 0xff
+    const tampered = { ...signed, data: `${iv}:${tagBuf.toString('base64')}:${ct}` }
+    expect(() => manager.extractData(tampered)).toThrow()
+  })
+
   it('should cache the derived key (same result on multiple calls)', async () => {
     const manager = create({
       secret: 'test-secret-32chars-minimum-ok!',

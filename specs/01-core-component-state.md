@@ -125,7 +125,11 @@ Erros emitem mensagem `ERROR`.
 `this.state.nested.x = y` altera o estado interno mas **não** dispara `STATE_DELTA`
 → divergência silenciosa client/server.
 **Evidência:** `ComponentStateManager.ts:58-80`.
-**Status:** limitação conhecida (era bug #17/#19), **não corrigida**.
+**Status:** ✅ **RESOLVIDO (opt-in, 2026-06-10).** Agora há `static $options = { recursiveProxy: true }`
+que torna o state proxy **recursivo** — `this.state.nested.x = y` é detectado e emite delta
+(via snapshot+diff sob a chave raiz), **preservando identidade referencial** (`state.x === state.x`).
+Default permanece **shallow** (zero overhead). `ComponentStateManager.ts:wrapChild`. **Testes:**
+`__tests__/component/ComponentStateManager.recursive-proxy.test.ts` (8).
 > **Nota (2026-06-10):** já existe warn em dev para o caso de **referência
 > compartilhada** em `setState` (`ComponentStateManager.ts:93-110`). O warn para
 > **mutação nested direta** (`this.state.x.y = z`) foi tentado via tripwire proxy no
