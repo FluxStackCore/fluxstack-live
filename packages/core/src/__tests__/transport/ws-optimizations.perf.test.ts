@@ -13,7 +13,7 @@ function createMockWs(): any {
 }
 
 // ===== Test 1: Broadcast serialization =====
-describe('Broadcast serialization: N×stringify vs 1×stringify + preSerialized', () => {
+describe('Broadcast serialization: N×stringify vs 1×stringify + preSerialized', { timeout: 30_000 }, () => {
   it('measures broadcast to N connections', () => {
     const CONNECTION_COUNTS = [10, 50, 100, 500]
     const broadcastMessage = {

@@ -6,13 +6,14 @@ import { useChunkedUpload } from './useChunkedUpload'
 import type { ChunkedUploadOptions } from '@fluxstack/live-client'
 import type { FileUploadCompleteResponse } from '@fluxstack/live'
 
+/** Actions que o componente de upload do servidor precisa expor (o retorno é ignorado). */
 type LiveUploadActions = {
   $componentId: string | null
-  startUpload: (payload: { fileName: string; fileSize: number; fileType: string }) => Promise<any>
-  updateProgress: (payload: { progress: number; bytesUploaded: number; totalBytes: number }) => Promise<any>
-  completeUpload: (payload: { fileUrl: string }) => Promise<any>
-  failUpload: (payload: { error: string }) => Promise<any>
-  reset: () => Promise<any>
+  startUpload: (payload: { fileName: string; fileSize: number; fileType: string }) => Promise<unknown>
+  updateProgress: (payload: { progress: number; bytesUploaded: number; totalBytes: number }) => Promise<unknown>
+  completeUpload: (payload: { fileUrl: string }) => Promise<unknown>
+  failUpload: (payload: { error: string }) => Promise<unknown>
+  reset: () => Promise<unknown>
 }
 
 export interface LiveChunkedUploadOptions extends Omit<ChunkedUploadOptions, 'sendMessageAndWait' | 'onProgress' | 'onComplete' | 'onError'> {

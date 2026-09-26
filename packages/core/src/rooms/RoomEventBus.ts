@@ -1,16 +1,20 @@
 // @fluxstack/live - Room Event Bus (Pub/Sub server-side)
 
-type EventHandler<T = any> = (data: T) => void
+type EventHandler<T = unknown> = (data: T) => void
 
 interface RoomSubscription {
   roomType: string
   roomId: string
   event: string
-  handler: EventHandler
+  /**
+   * Handler guardado com o payload apagado: o barramento despacha por chave
+   * (tipo:sala:evento), então quem assinou `evento` recebe o dado de `evento`.
+   */
+  handler: EventHandler<unknown>
   componentId: string
 }
 
-export function createTypedRoomEventBus<TRoomEvents extends Record<string, Record<string, any>>>() {
+export function createTypedRoomEventBus<TRoomEvents extends object>() {
   const subscriptions = new Map<string, Set<RoomSubscription>>()
   /** Reverse index: componentId -> Set of subscription keys for O(1) unsubscribeAll */
   const componentIndex = new Map<string, Set<string>>()
@@ -39,7 +43,7 @@ export function createTypedRoomEventBus<TRoomEvents extends Record<string, Recor
         roomType: roomType as string,
         roomId,
         event: event as string,
-        handler,
+        handler: handler as EventHandler<unknown>,
         componentId
       }
 
@@ -172,14 +176,15 @@ export class RoomEventBus {
     return `${roomType}:${roomId}:${event}`
   }
 
-  on(roomType: string, roomId: string, event: string, componentId: string, handler: EventHandler): () => void {
+  /** `T` é o payload esperado do evento (o barramento é indexado por string). */
+  on<T = unknown>(roomType: string, roomId: string, event: string, componentId: string, handler: EventHandler<T>): () => void {
     const key = this.getKey(roomType, roomId, event)
 
     if (!this.subscriptions.has(key)) {
       this.subscriptions.set(key, new Set())
     }
 
-    const subscription: RoomSubscription = { roomType, roomId, event, handler, componentId }
+    const subscription: RoomSubscription = { roomType, roomId, event, handler: handler as EventHandler<unknown>, componentId }
     this.subscriptions.get(key)!.add(subscription)
 
     // Update reverse index
@@ -204,7 +209,7 @@ export class RoomEventBus {
     }
   }
 
-  emit(roomType: string, roomId: string, event: string, data: any, excludeComponentId?: string): number {
+  emit(roomType: string, roomId: string, event: string, data: unknown, excludeComponentId?: string): number {
     const key = this.getKey(roomType, roomId, event)
     const subs = this.subscriptions.get(key)
 

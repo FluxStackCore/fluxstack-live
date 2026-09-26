@@ -19,15 +19,28 @@ import {
   persistState,
   getPersistedState,
   clearPersistedState,
+  clientMessages,
+  isSignedState,
+  readBroadcast,
+  readErrorMessage,
+  readMountResult,
+  readRehydrateResult,
+  readStateDelta,
+  readStateRehydrated,
+  readStateSignature,
+  readStateUpdate,
+  toRecord,
 } from '@fluxstack/live-client'
 import type { RoomProxy, RoomServerMessage } from '@fluxstack/live-client'
 import type { WebSocketResponse } from '@fluxstack/live'
 import { generateId } from '@fluxstack/live-client'
 import { computeStatus, notReadyError as makeNotReadyError } from './readiness'
 
+const errorMessage = (err: unknown): string => err instanceof Error ? err.message : String(err)
+
 // ===== Deep Merge (always-on, retrocompatible) =====
 
-function isPlainObject(v: unknown): v is Record<string, any> {
+function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
     && Object.getPrototypeOf(v) === Object.prototype
 }
@@ -45,22 +58,28 @@ function isPlainObject(v: unknown): v is Record<string, any> {
  *   `Record<string, T>` scenario from issue #1/#3 relies on.
  * - `undefined` is a no-op (skipped) — these values don't cross the wire.
  */
-function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>, seen?: Set<object>): T {
-  return deepMergeImpl(target, source, 0, seen)
+function deepMerge<T extends object>(target: T, source: object, seen?: Set<object>): T {
+  // Deltas do servidor trazem chaves do próprio estado: o resultado mantém o tipo do alvo.
+  return deepMergeImpl(toRecord(target), toRecord(source), 0, seen) as T
 }
 
-function deepMergeImpl<T extends Record<string, any>>(target: T, source: Partial<T>, depth: number, seen?: Set<object>): T {
+function deepMergeImpl(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  depth: number,
+  seen?: Set<object>,
+): Record<string, unknown> {
   if (!seen) seen = new Set()
-  if (seen.has(source as object)) return target
-  seen.add(source as object)
+  if (seen.has(source)) return target
+  seen.add(source)
 
-  const result = { ...target }
-  for (const key of Object.keys(source) as Array<keyof T>) {
+  const result: Record<string, unknown> = { ...target }
+  for (const key of Object.keys(source)) {
     const newVal = source[key]
     if (newVal === undefined) continue
     if (newVal === null) {
       if (depth === 0) {
-        result[key] = null as T[keyof T]
+        result[key] = null
       } else {
         delete result[key]
       }
@@ -68,9 +87,9 @@ function deepMergeImpl<T extends Record<string, any>>(target: T, source: Partial
     }
     const oldVal = result[key]
     if (isPlainObject(oldVal) && isPlainObject(newVal)) {
-      result[key] = deepMergeImpl(oldVal as any, newVal as any, depth + 1, seen) as T[keyof T]
+      result[key] = deepMergeImpl(oldVal, newVal, depth + 1, seen)
     } else {
-      result[key] = newVal as T[keyof T]
+      result[key] = newVal
     }
   }
   return result
@@ -81,20 +100,40 @@ function deepMergeImpl<T extends Record<string, any>>(target: T, source: Partial
 export interface FieldOptions {
   syncOn?: 'change' | 'blur' | 'manual'
   debounce?: number
-  transform?: (value: any) => any
+  /** Transforma o valor digitado antes de sincronizar (sintaxe de método: aceita `(v: string) => ...`). */
+  transform?(value: unknown): unknown
+}
+
+/** Valor aceito pelo `value` de `<input>`, `<textarea>` e `<select>`. */
+export type FieldInputValue = string | number | readonly string[]
+
+/** Evento mínimo lido por `$field().onChange` (compatível com `ChangeEvent` do React). */
+export interface FieldChangeEvent {
+  target: { value: string; type?: string; checked?: boolean }
 }
 
 export interface FieldBinding {
-  value: any
-  onChange: (e: any) => void
+  value: FieldInputValue
+  onChange: (e: FieldChangeEvent) => void
   onBlur: () => void
   name: string
 }
 
+/** Evento de broadcast entregue a `$onBroadcast`. */
+export interface LiveBroadcastEvent {
+  type: string
+  data: unknown
+}
+
+/** Estado padrão de sala quando o componente não declara um. */
+type DefaultRoomState = Record<string, unknown>
+/** Mapa de eventos padrão (nome → payload). */
+type DefaultEventMap = Record<string, unknown>
+
 export interface LiveComponentProxy<
-  TState extends Record<string, any>,
-  TRoomState = any,
-  TRoomEvents extends Record<string, any> = Record<string, any>
+  TState extends object,
+  TRoomState = DefaultRoomState,
+  TRoomEvents extends object = DefaultEventMap
 > {
   readonly $state: TState
   readonly $connected: boolean
@@ -116,30 +155,34 @@ export interface LiveComponentProxy<
   readonly $authenticated: boolean
   readonly $auth: { authenticated: boolean; session: Record<string, unknown> | null }
 
-  $call: (action: string, payload?: any) => Promise<void>
-  $callAndWait: <R = any>(action: string, payload?: any, timeout?: number) => Promise<R>
-  $fire: (action: string, payload?: any) => void
+  $call: (action: string, payload?: unknown) => Promise<void>
+  /**
+   * Chama a action e devolve a RESPOSTA do servidor (`WebSocketResponse`, com
+   * `success`/`result`/`error`) — não só o `result`. Passe `R` para estreitar.
+   */
+  $callAndWait: <R = WebSocketResponse>(action: string, payload?: unknown, timeout?: number) => Promise<R>
+  $fire: (action: string, payload?: unknown) => void
   $mount: () => Promise<void>
   $unmount: () => Promise<void>
   $refresh: () => Promise<void>
   $set: <K extends keyof TState>(key: K, value: TState[K]) => Promise<void>
   $field: <K extends keyof TState>(key: K, options?: FieldOptions) => FieldBinding
   $sync: () => Promise<void>
-  $onBroadcast: (handler: (type: string, data: any) => void) => void
+  $onBroadcast: (handler: (event: LiveBroadcastEvent) => void) => void
   $updateLocal: (updates: Partial<TState>) => void
   readonly $room: RoomProxy<TRoomState, TRoomEvents>
   readonly $rooms: string[]
 }
 
-type BroadcastEvent<T extends Record<string, any>> = {
+type BroadcastEvent<T extends object> = {
   [K in keyof T]: { type: K; data: T[K] }
 }[keyof T]
 
 export interface LiveComponentProxyWithBroadcasts<
-  TState extends Record<string, any>,
-  TBroadcasts extends Record<string, any> = Record<string, any>,
-  TRoomState = any,
-  TRoomEvents extends Record<string, any> = Record<string, any>
+  TState extends object,
+  TBroadcasts extends object = DefaultEventMap,
+  TRoomState = DefaultRoomState,
+  TRoomEvents extends object = DefaultEventMap
 > extends Omit<LiveComponentProxy<TState, TRoomState, TRoomEvents>, '$onBroadcast'> {
   $onBroadcast: <T extends TBroadcasts = TBroadcasts>(
     handler: (event: BroadcastEvent<T>) => void
@@ -147,21 +190,21 @@ export interface LiveComponentProxyWithBroadcasts<
 }
 
 export type LiveProxy<
-  TState extends Record<string, any>,
+  TState extends object,
   TActions = {},
-  TRoomState = any,
-  TRoomEvents extends Record<string, any> = Record<string, any>
+  TRoomState = DefaultRoomState,
+  TRoomEvents extends object = DefaultEventMap
 > = TState & LiveComponentProxy<TState, TRoomState, TRoomEvents> & TActions
 
 export type LiveProxyWithBroadcasts<
-  TState extends Record<string, any>,
+  TState extends object,
   TActions = {},
-  TBroadcasts extends Record<string, any> = Record<string, any>,
-  TRoomState = any,
-  TRoomEvents extends Record<string, any> = Record<string, any>
+  TBroadcasts extends object = DefaultEventMap,
+  TRoomState = DefaultRoomState,
+  TRoomEvents extends object = DefaultEventMap
 > = TState & LiveComponentProxyWithBroadcasts<TState, TBroadcasts, TRoomState, TRoomEvents> & TActions
 
-export interface HybridComponentOptions {
+export interface HybridComponentOptions<TState = Record<string, unknown>> {
   room?: string
   userId?: string
   autoMount?: boolean
@@ -172,17 +215,18 @@ export interface HybridComponentOptions {
   onDisconnect?: () => void
   onRehydrate?: () => void
   onError?: (error: string) => void
-  onStateChange?: (state: any, prevState: any) => void
+  /** Sintaxe de método: aceita callbacks com o estado já tipado. */
+  onStateChange?(state: TState, prevState: TState): void
 }
 
-export interface UseLiveComponentOptions extends HybridComponentOptions {
+export interface UseLiveComponentOptions<TState = Record<string, unknown>> extends HybridComponentOptions<TState> {
   debounce?: number
   optimistic?: boolean
   syncMode?: 'immediate' | 'debounced' | 'manual'
   persistState?: boolean
   debugLabel?: string
   /** Binary decoder for high-frequency binary state deltas. When set, the component will accept binary WebSocket frames and decode them into state deltas. */
-  binaryDecoder?: (buffer: Uint8Array) => Record<string, any>
+  binaryDecoder?: (buffer: Uint8Array) => Partial<TState> | Record<string, unknown>
 }
 
 // ===== Reserved Props =====
@@ -219,15 +263,15 @@ function createStore<T>(initialState: T) {
 // ===== Main Hook =====
 
 export function useLiveComponent<
-  TState extends Record<string, any>,
+  TState extends object,
   TActions = {},
-  TBroadcasts extends Record<string, any> = Record<string, any>,
-  TRoomState = any,
-  TRoomEvents extends Record<string, any> = Record<string, any>
+  TBroadcasts extends object = DefaultEventMap,
+  TRoomState = DefaultRoomState,
+  TRoomEvents extends object = DefaultEventMap
 >(
   componentName: string,
   initialState: TState,
-  options: UseLiveComponentOptions = {},
+  options: UseLiveComponentOptions<TState> = {},
 ): LiveProxyWithBroadcasts<TState, TActions, TBroadcasts, TRoomState, TRoomEvents> {
   const {
     debounce = 150,
@@ -266,18 +310,18 @@ export function useLiveComponent<
   if (!storeRef.current) storeRef.current = createStore(initialState)
   const store = storeRef.current
 
-  const pendingChanges = useRef<Map<keyof TState, { value: any; synced: boolean }>>(new Map())
+  const pendingChanges = useRef<Map<keyof TState, { value: unknown; synced: boolean }>>(new Map())
   const debounceTimers = useRef<Map<keyof TState, ReturnType<typeof setTimeout>>>(new Map())
-  const localFieldValues = useRef<Map<keyof TState, any>>(new Map())
+  const localFieldValues = useRef<Map<keyof TState, unknown>>(new Map())
   const fieldOptionsRef = useRef<Map<keyof TState, FieldOptions>>(new Map())
   const [localVersion, setLocalVersion] = useState(0)
   const mountedRef = useRef(false)
   const mountingRef = useRef(false)
   const rehydratingRef = useRef(false)
   const lastComponentIdRef = useRef<string | null>(null)
-  const broadcastHandlerRef = useRef<((event: { type: string; data: any }) => void) | null>(null)
+  const broadcastHandlerRef = useRef<((event: LiveBroadcastEvent) => void) | null>(null)
   const roomMessageHandlers = useRef<Set<(msg: RoomServerMessage) => void>>(new Set())
-  const roomManagerRef = useRef<RoomManager | null>(null)
+  const roomManagerRef = useRef<RoomManager<TRoomState, TRoomEvents> | null>(null)
   const mountFnRef = useRef<(() => Promise<void>) | null>(null)
   // Handler refs — keep registration effect stable across state updates
   const handlersRef = useRef({ onStateChange, onRehydrate, onError })
@@ -297,12 +341,12 @@ export function useLiveComponent<
   const [mountFailed, setMountFailed] = useState(false)
   const [authDenied, setAuthDenied] = useState(false)
 
-  const log = useCallback((msg: string, data?: any) => {
+  const log = useCallback((msg: string, data?: unknown) => {
     if (debug) console.log(`[${componentName}] ${msg}`, data || '')
   }, [debug, componentName])
 
   // ===== Set Property =====
-  const setProperty = useCallback(async <K extends keyof TState>(key: K, value: TState[K]) => {
+  const setProperty = useCallback(async <K extends keyof TState>(key: K, value: unknown) => {
     const timer = debounceTimers.current.get(key)
     if (timer) clearTimeout(timer)
 
@@ -313,17 +357,13 @@ export function useLiveComponent<
         const id = componentId || lastComponentIdRef.current
         if (!id || !connected) return
 
-        await sendMessageAndWait({
-          type: 'CALL_ACTION',
-          componentId: id,
-          action: 'setValue',
-          payload: { key, value },
-        }, 5000)
+        await sendMessageAndWait(clientMessages.callAction(id, 'setValue', { key, value }), 5000)
 
-        pendingChanges.current.get(key)!.synced = true
-      } catch (err: any) {
+        const pending = pendingChanges.current.get(key)
+        if (pending) pending.synced = true
+      } catch (err) {
         pendingChanges.current.delete(key)
-        setError(err.message)
+        setError(errorMessage(err))
       }
     }
 
@@ -343,23 +383,30 @@ export function useLiveComponent<
     setError(null)
 
     try {
-      const response = await sendMessageAndWait({
-        type: 'COMPONENT_MOUNT',
-        componentId: instanceId.current,
-        payload: { component: componentName, props: initialState, room, userId, debugLabel: options.debugLabel },
-      }, 5000)
+      const response = await sendMessageAndWait(
+        clientMessages.mount(instanceId.current, {
+          component: componentName,
+          props: toRecord(initialState),
+          room,
+          userId,
+          debugLabel: options.debugLabel,
+        }),
+        5000,
+      )
 
-      if (response?.success && response?.result?.componentId) {
-        const newId = response.result.componentId
+      const result = response?.success ? readMountResult(response) : null
+      if (result) {
+        const newId = result.componentId
         setComponentId(newId)
         lastComponentIdRef.current = newId
         mountedRef.current = true
 
-        if (response.result.signedState) {
-          persistState(persistEnabled, componentName, response.result.signedState, room, userId)
+        if (result.signedState) {
+          persistState(persistEnabled, componentName, result.signedState, room, userId)
         }
-        if (response.result.initialState) {
-          updateState(response.result.initialState)
+        if (result.initialState) {
+          // Estado inicial vindo do servidor: chaves do estado deste componente.
+          updateState(result.initialState as TState)
         }
 
         log('Mounted', newId)
@@ -367,11 +414,12 @@ export function useLiveComponent<
       } else {
         throw new Error(response?.error || 'Mount failed')
       }
-    } catch (err: any) {
-      setError(err.message)
-      if (err.message?.includes('AUTH_DENIED')) setAuthDenied(true)
+    } catch (err) {
+      const message = errorMessage(err)
+      setError(message)
+      if (message.includes('AUTH_DENIED')) setAuthDenied(true)
       setMountFailed(true)
-      onError?.(err.message)
+      onError?.(message)
       if (!fallbackToLocal) throw err
     } finally {
       setLoading(false)
@@ -385,7 +433,7 @@ export function useLiveComponent<
   const unmount = useCallback(async () => {
     if (!componentId || !connected) return
     try {
-      await sendMessage({ type: 'COMPONENT_UNMOUNT', componentId })
+      await sendMessage(clientMessages.unmount(componentId))
       setComponentId(null)
       mountedRef.current = false
     } catch {}
@@ -398,7 +446,7 @@ export function useLiveComponent<
     const persisted = getPersistedState(persistEnabled, componentName)
     if (!persisted) return false
 
-    if (Date.now() - persisted.lastUpdate > 60 * 60 * 1000) {
+    if (Date.now() - persisted.lastUpdate > 60 * 60 * 1000 || !isSignedState(persisted.signedState)) {
       clearPersistedState(persistEnabled, componentName)
       return false
     }
@@ -406,20 +454,22 @@ export function useLiveComponent<
     rehydratingRef.current = true
     setRehydrating(true)
     try {
-      const response = await sendMessageAndWait({
-        type: 'COMPONENT_REHYDRATE',
-        componentId: lastComponentIdRef.current || instanceId.current,
-        payload: {
-          componentName,
+      // O servidor lê `payload.component` (antes ia `componentName` → sempre recusado).
+      const response = await sendMessageAndWait(
+        clientMessages.rehydrate(lastComponentIdRef.current || instanceId.current, {
+          component: componentName,
           signedState: persisted.signedState,
           room: persisted.room,
           userId: persisted.userId,
-        },
-      }, 2000)
+        }),
+        2000,
+      )
 
-      if (response?.success && response?.result?.newComponentId) {
-        setComponentId(response.result.newComponentId)
-        lastComponentIdRef.current = response.result.newComponentId
+      const result = response?.success ? readRehydrateResult(response) : null
+      if (result) {
+        // O estado re-hidratado chega em STATE_REHYDRATED (entregue ao registrar o novo id).
+        setComponentId(result.newComponentId)
+        lastComponentIdRef.current = result.newComponentId
         mountedRef.current = true
         setTimeout(() => onRehydrate?.(), 0)
         return true
@@ -433,7 +483,7 @@ export function useLiveComponent<
       rehydratingRef.current = false
       setRehydrating(false)
     }
-  }, [connected, componentName, sendMessageAndWait, onRehydrate])
+  }, [connected, componentName, persistEnabled, sendMessageAndWait, onRehydrate])
 
   // Build a precise error explaining WHY an action can't run right now.
   // Differentiates "WebSocket down" from "component not mounted yet" (#35).
@@ -441,46 +491,31 @@ export function useLiveComponent<
     makeNotReadyError(action, componentName, { connected, rehydrating, loading, error, componentId })
 
   // ===== Call Action =====
-  const call = useCallback(async (action: string, payload?: any) => {
+  const call = useCallback(async (action: string, payload?: unknown) => {
     const id = componentId || lastComponentIdRef.current
     if (!id || !connected) throw notReadyError(action)
 
-    const response = await sendMessageAndWait({
-      type: 'CALL_ACTION',
-      componentId: id,
-      action,
-      payload,
-    }, 5000)
+    const response = await sendMessageAndWait(clientMessages.callAction(id, action, payload), 5000)
 
     if (!response.success) throw new Error(response.error || 'Action failed')
   }, [componentId, connected, sendMessageAndWait])
 
-  const callAndWait = useCallback(async <R = any>(action: string, payload?: any, timeout = 10000): Promise<R> => {
+  const callAndWait = useCallback(async <R = WebSocketResponse>(action: string, payload?: unknown, timeout = 10000): Promise<R> => {
     const id = componentId || lastComponentIdRef.current
     if (!id || !connected) throw notReadyError(action)
 
-    const response = await sendMessageAndWait({
-      type: 'CALL_ACTION',
-      componentId: id,
-      action,
-      payload,
-    }, timeout)
+    const response = await sendMessageAndWait(clientMessages.callAction(id, action, payload), timeout)
 
+    // Contrato histórico: devolve a resposta inteira; o chamador escolhe R.
     return response as R
   }, [componentId, connected, sendMessageAndWait])
 
   // ===== Fire (fire-and-forget, no response) =====
-  const fire = useCallback((action: string, payload?: any) => {
+  const fire = useCallback((action: string, payload?: unknown) => {
     const id = componentId || lastComponentIdRef.current
     if (!id || !connected) return
 
-    sendMessage({
-      type: 'CALL_ACTION',
-      componentId: id,
-      action,
-      payload,
-      expectResponse: false,
-    } as any)
+    sendMessage(clientMessages.callAction(id, action, payload, false)).catch(() => {})
   }, [componentId, connected, sendMessage])
 
   // ===== Refresh =====
@@ -515,10 +550,10 @@ export function useLiveComponent<
 
     return {
       name: String(key),
-      value: currentValue ?? '',
+      value: toInputValue(currentValue),
 
-      onChange: (e: any) => {
-        let value: any = e.target.value
+      onChange: (e: FieldChangeEvent) => {
+        let value: unknown = e.target.value
         if (e.target.type === 'checkbox') value = e.target.checked
         if (transform) value = transform(value)
 
@@ -561,51 +596,74 @@ export function useLiveComponent<
       // unmount and unregister(). Dropping it avoids poisoning zustand with
       // state that will resurface on the next mount.
       if (!hookAliveRef.current) return
+      const persistSigned = (signedState: unknown) => {
+        const { persistEnabled: pe, componentName: cn, room: r, userId: u } = persistMetaRef.current
+        persistState(pe, cn, signedState, r, u)
+      }
       switch (message.type) {
-        case 'STATE_UPDATE':
-          if (message.payload?.state) {
-            const oldState = storeRef.current?.getState().state as TState
-            updateState(message.payload.state)
-            handlersRef.current.onStateChange?.(message.payload.state, oldState)
-            if (message.payload?.signedState) {
-              const { persistEnabled: pe, componentName: cn, room: r, userId: u } = persistMetaRef.current
-              persistState(pe, cn, message.payload.signedState, r, u)
-            }
+        case 'STATE_UPDATE': {
+          const update = readStateUpdate(message)
+          if (update) {
+            const oldState = store.getState().state
+            // Estado completo vindo do servidor: chaves do estado deste componente.
+            const newState = update.state as TState
+            updateState(newState)
+            handlersRef.current.onStateChange?.(newState, oldState)
+            if (update.signedState) persistSigned(update.signedState)
           }
           break
-        case 'STATE_DELTA':
-          if (message.payload?.delta) {
-            const oldState = storeRef.current?.getState().state as TState
-            const mergedState = deepMerge(oldState, message.payload.delta) as TState
+        }
+        case 'STATE_DELTA': {
+          const delta = readStateDelta(message)
+          if (delta) {
+            const oldState = store.getState().state
+            const mergedState = deepMerge(oldState, delta)
             updateState(mergedState)
             handlersRef.current.onStateChange?.(mergedState, oldState)
           }
           break
-        case 'STATE_REHYDRATED':
-          if (message.payload?.state && message.payload?.newComponentId) {
-            setComponentId(message.payload.newComponentId)
-            lastComponentIdRef.current = message.payload.newComponentId
-            updateState(message.payload.state)
+        }
+        case 'STATE_SIGNATURE': {
+          // Renovação throttled da assinatura (depois de deltas). Persistir a mais
+          // recente: a re-hidratação reenvia o que estiver salvo — com a do mount o
+          // componente voltaria ao estado inicial.
+          const signed = readStateSignature(message)
+          if (signed) persistSigned(signed)
+          break
+        }
+        case 'STATE_REHYDRATED': {
+          const rehydrated = readStateRehydrated(message)
+          if (rehydrated) {
+            setComponentId(rehydrated.newComponentId)
+            lastComponentIdRef.current = rehydrated.newComponentId
+            updateState(rehydrated.state as TState)
+            // Nova assinatura (versão+1): a próxima re-hidratação parte dela.
+            if (rehydrated.signedState) persistSigned(rehydrated.signedState)
             setRehydrating(false)
             handlersRef.current.onRehydrate?.()
           }
           break
-        case 'BROADCAST':
-          if (message.payload?.type) {
-            broadcastHandlerRef.current?.({ type: message.payload.type, data: message.payload.data })
-          }
+        }
+        case 'BROADCAST': {
+          const broadcast = readBroadcast(message)
+          if (broadcast) broadcastHandlerRef.current?.(broadcast)
           break
-        case 'ERROR':
-          setError(message.payload?.error || 'Unknown error')
-          handlersRef.current.onError?.(message.payload?.error)
+        }
+        case 'ERROR': {
+          // O servidor põe `error` no topo; eventos emit('ERROR') trazem em payload.error.
+          const errorText = readErrorMessage(message) || 'Unknown error'
+          setError(errorText)
+          handlersRef.current.onError?.(errorText)
           break
+        }
         case 'ROOM_EVENT':
         case 'ROOM_STATE':
         case 'ROOM_SYSTEM':
         case 'ROOM_JOINED':
         case 'ROOM_LEFT':
+          // Frames de sala (JSON) chegam com roomId/event/data no topo.
           for (const handler of roomMessageHandlers.current) {
-            handler(message as unknown as RoomServerMessage)
+            handler(message as WebSocketResponse & RoomServerMessage)
           }
           break
       }
@@ -619,9 +677,9 @@ export function useLiveComponent<
         try {
           const decoder = binaryDecoderRef.current
           if (!decoder) return
-          const delta = decoder(payload) as Partial<TState>
-          const oldState = storeRef.current?.getState().state as TState
-          const mergedState = deepMerge(oldState, delta) as TState
+          const delta = decoder(payload)
+          const oldState = store.getState().state
+          const mergedState = deepMerge(oldState, delta)
           updateState(mergedState)
           handlersRef.current.onStateChange?.(mergedState, oldState)
         } catch (e) {
@@ -691,8 +749,12 @@ export function useLiveComponent<
           reconnectTimer = null
           if (!hookAliveRef.current) return
           const persisted = getPersistedState(persistEnabled, componentName)
-          if (persisted?.signedState) rehydrate()
-          else mount()
+          if (persisted?.signedState) {
+            // Re-hidratação recusada (assinatura vencida, componente mudou...) → mount normal.
+            rehydrate().then(ok => {
+              if (!ok && hookAliveRef.current && !mountedRef.current) mount()
+            })
+          } else mount()
         }, 100)
       }
     }
@@ -709,7 +771,7 @@ export function useLiveComponent<
       return roomManagerRef.current
     }
 
-    const manager = new RoomManager({
+    const manager = new RoomManager<TRoomState, TRoomEvents>({
       componentId,
       defaultRoom: room,
       sendMessage,
@@ -802,7 +864,7 @@ export function useLiveComponent<
           case '$set': return setProperty
           case '$field': return createFieldBinding
           case '$sync': return sync
-          case '$onBroadcast': return (handler: (event: { type: string; data: any }) => void) => {
+          case '$onBroadcast': return (handler: (event: LiveBroadcastEvent) => void) => {
             broadcastHandlerRef.current = handler
           }
           case '$updateLocal': return (updates: Partial<TState>) => {
@@ -826,7 +888,7 @@ export function useLiveComponent<
         }
 
         // Action (anything not in state or reserved)
-        return async (...args: any[]) => {
+        return async (...args: unknown[]) => {
           // Footgun guard (issue #49): actions forward a SINGLE payload object.
           // Calling `list.spawn(a, b)` silently drops `b` (becomes undefined on
           // the server). TS can't catch it because the method signature on the
@@ -842,12 +904,7 @@ export function useLiveComponent<
           const id = componentId || lastComponentIdRef.current
           if (!id || !connected) throw notReadyError(prop)
 
-          const response = await sendMessageAndWait({
-            type: 'CALL_ACTION',
-            componentId: id,
-            action: prop,
-            payload,
-          }, 10000)
+          const response = await sendMessageAndWait(clientMessages.callAction(id, prop, payload), 10000)
 
           if (!response.success) throw new Error(response.error || 'Action failed')
           return response.result
@@ -879,21 +936,29 @@ export function useLiveComponent<
   return proxy
 }
 
+/** Converte o valor do estado para o que `<input value>` aceita (o React stringifica o resto). */
+function toInputValue(value: unknown): FieldInputValue {
+  if (typeof value === 'string' || typeof value === 'number') return value
+  if (Array.isArray(value) && value.every((v): v is string => typeof v === 'string')) return value
+  if (value === null || value === undefined) return ''
+  return String(value)
+}
+
 // ===== Factory =====
 
 export function createLiveComponent<
-  TState extends Record<string, any>,
+  TState extends object,
   TActions = {},
-  TBroadcasts extends Record<string, any> = Record<string, any>,
-  TRoomState = any,
-  TRoomEvents extends Record<string, any> = Record<string, any>
+  TBroadcasts extends object = DefaultEventMap,
+  TRoomState = DefaultRoomState,
+  TRoomEvents extends object = DefaultEventMap
 >(
   componentName: string,
-  defaultOptions: Omit<UseLiveComponentOptions, keyof HybridComponentOptions> = {},
+  defaultOptions: Omit<UseLiveComponentOptions<TState>, keyof HybridComponentOptions<TState>> = {},
 ) {
   return function useComponent(
     initialState: TState,
-    options: UseLiveComponentOptions = {},
+    options: UseLiveComponentOptions<TState> = {},
   ): LiveProxyWithBroadcasts<TState, TActions, TBroadcasts, TRoomState, TRoomEvents> {
     return useLiveComponent<TState, TActions, TBroadcasts, TRoomState, TRoomEvents>(componentName, initialState, { ...defaultOptions, ...options })
   }

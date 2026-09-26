@@ -5,6 +5,8 @@ export default defineConfig({
   resolve: {
     alias: {
       '@fluxstack/live': resolve(__dirname, '../core/src/index.ts'),
+      // testes SSE/HTTP usam o LiveConnection real a partir do fonte
+      '@fluxstack/live-client': resolve(__dirname, '../client/src/index.ts'),
     },
   },
   test: {

@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/spatial-room",
-  "version": "0.9.0",
+  "version": "0.11.0",
   "description": "Spatial LiveRoom with grid-based interest management. Reduces broadcast cost from O(N) to O(visible cells) for games where players only need updates from nearby peers.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -23,7 +23,7 @@
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@fluxstack/live": "^0.9.0"
+    "@fluxstack/live": "^0.11.0"
   },
   "devDependencies": {
     "tsup": "^8.0.0",

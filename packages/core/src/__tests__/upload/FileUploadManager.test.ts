@@ -410,3 +410,68 @@ describe('FileUploadManager — known limitations (regression guards)', () => {
     expect(mgr.getUserUploadUsage('alice').used).toBe(500)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────
+// Posse e limites (auditoria 2026-09-26)
+// ─────────────────────────────────────────────────────────────────────────
+
+describe('FileUploadManager — posse e limites', () => {
+  const start = (m: FileUploadManager, extra: Record<string, unknown> = {}, userId?: string, conn?: string) =>
+    m.startUpload({ uploadId: 'u1', componentId: 'c1', filename: 'a.txt', fileType: 'text/plain', fileSize: 100, chunkSize: 50, ...extra } as any, userId, conn)
+  const chunk = (idx: number, bytes: number, totalChunks = 2) =>
+    ({ uploadId: 'u1', chunkIndex: idx, totalChunks, data: Buffer.alloc(bytes).toString('base64') } as any)
+
+  it('outra conexão não envia chunks nem completa upload alheio', async () => {
+    mgr = makeMgr({ allowedTypes: [] }).mgr
+    expect((await start(mgr, {}, undefined, 'conn-A')).success).toBe(true)
+    await expect(mgr.receiveChunk(chunk(0, 50), null, 'conn-B')).rejects.toThrow(/not found/)
+    const done = await mgr.completeUpload({ uploadId: 'u1' } as any, 'conn-B')
+    expect(done.success).toBe(false)
+    // o dono segue normalmente
+    await mgr.receiveChunk(chunk(0, 50), null, 'conn-A')
+    await mgr.receiveChunk(chunk(1, 50), null, 'conn-A')
+    expect((await mgr.completeUpload({ uploadId: 'u1' } as any, 'conn-A')).success).toBe(true)
+  })
+
+  it('ignora o totalChunks do cliente (usa o calculado no start)', async () => {
+    mgr = makeMgr({ allowedTypes: [] }).mgr
+    await start(mgr)
+    // cliente mente totalChunks=9999 para gravar índice fora do arquivo
+    await expect(mgr.receiveChunk(chunk(500, 10, 9999))).rejects.toThrow(/invalid chunk index/i)
+  })
+
+  it('rejeita chunk maior que o chunkSize acordado', async () => {
+    mgr = makeMgr({ allowedTypes: [] }).mgr
+    await start(mgr)
+    await expect(mgr.receiveChunk(chunk(0, 80))).rejects.toThrow(/too large/i)
+  })
+
+  it('não aceita mais bytes que o fileSize declarado', async () => {
+    mgr = makeMgr({ allowedTypes: [] }).mgr
+    await start(mgr, { fileSize: 60, chunkSize: 50 })
+    await mgr.receiveChunk(chunk(0, 50))
+    await expect(mgr.receiveChunk(chunk(1, 50))).rejects.toThrow(/exceeds declared fileSize/)
+  })
+
+  it('valida fileSize e chunkSize', async () => {
+    mgr = makeMgr({ allowedTypes: [] }).mgr
+    expect((await start(mgr, { fileSize: -1 })).success).toBe(false)
+    expect((await start(mgr, { uploadId: 'u2', fileSize: 1.5 })).success).toBe(false)
+    expect((await start(mgr, { uploadId: 'u3', chunkSize: 10 * 1024 * 1024 })).success).toBe(false)
+  })
+
+  it('sem userId, a quota é aplicada por conexão', async () => {
+    mgr = makeMgr({ allowedTypes: [], maxBytesPerUser: 150 }).mgr
+    expect((await start(mgr, {}, undefined, 'conn-A')).success).toBe(true)
+    const second = await start(mgr, { uploadId: 'u2' }, undefined, 'conn-A')
+    expect(second.success).toBe(false)
+    expect(second.error).toMatch(/quota/i)
+  })
+
+  it('cancelConnectionUploads libera os uploads da conexão', async () => {
+    mgr = makeMgr({ allowedTypes: [] }).mgr
+    await start(mgr, {}, undefined, 'conn-A')
+    expect(mgr.cancelConnectionUploads('conn-A')).toBe(1)
+    expect(mgr.getUploadStatus('u1')).toBeNull()
+  })
+})

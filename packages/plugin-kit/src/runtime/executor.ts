@@ -7,13 +7,13 @@
  */
 
 import type {
-  FluxStack,
   PluginHook,
   PluginHookResult,
   PluginPriority,
   HookExecutionOptions,
 } from '../types'
 import type { Logger } from '../types/logger'
+import type { ErasedPlugin } from './erased-plugin'
 import { PluginError } from './errors'
 
 export interface PluginExecutionPlan {
@@ -31,10 +31,8 @@ export interface PluginExecutionStep {
   canExecuteInParallel: boolean
 }
 
-// See registry.ts for the rationale. The executor sorts/invokes plugins
-// but doesn't inspect their config, so erasing TConfig to `any` is safe.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Plugin = FluxStack.Plugin<any>
+// TConfig apagado — ver erased-plugin.ts
+type Plugin = ErasedPlugin
 
 export class PluginExecutor {
   private logger: Logger
@@ -241,6 +239,10 @@ export class PluginExecutor {
     const groups: PluginExecutionStep[][] = []
     const processed = new Set<string>()
 
+    // Dependências fora do plano (plugin sem este hook / não registrado) não
+    // bloqueiam — mesma regra do sortExecutionSteps.
+    const inPlan = new Set(steps.map(s => s.plugin.name))
+
     while (processed.size < steps.length) {
       const currentGroup: PluginExecutionStep[] = []
 
@@ -249,12 +251,18 @@ export class PluginExecutor {
           continue
         }
 
-        const canExecute = step.dependencies.every(dep => processed.has(dep))
+        // Só conta o que terminou em rodadas ANTERIORES: marcar `processed`
+        // dentro da mesma rodada punha o dependente no mesmo grupo paralelo
+        // das suas dependências (rodavam ao mesmo tempo).
+        const canExecute = step.dependencies.every(dep => !inPlan.has(dep) || processed.has(dep))
 
         if (canExecute) {
           currentGroup.push(step)
-          processed.add(step.plugin.name)
         }
+      }
+
+      for (const step of currentGroup) {
+        processed.add(step.plugin.name)
       }
 
       if (currentGroup.length === 0) {

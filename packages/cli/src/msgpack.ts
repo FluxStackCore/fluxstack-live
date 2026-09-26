@@ -97,7 +97,18 @@ function readMap(buf: Uint8Array, offset: number, count: number, depth: number, 
   return { value: obj, offset }
 }
 
-/** Decode a FluxStack binary room frame */
+/** Frame 0x01 (BINARY_STATE_DELTA): `[0x01][idLen:u8][id][payload]` — payload no formato do encoder do componente. */
+export const BINARY_STATE_DELTA = 0x01
+
+/**
+ * Decode a FluxStack binary frame.
+ *
+ * - `0x02`/`0x03` (salas): `[type][compIdLen:u8][compId][roomIdLen:u8][roomId][eventLen:u16BE][event][msgpack]`
+ * - `0x01` (delta binário de componente, `sendBinaryDelta`): `[0x01][idLen:u8][id][payload]` —
+ *   sem roomId/event; o payload vem do encoder custom do componente, então
+ *   `data` são os bytes crus (Uint8Array). Antes era lido como frame de sala
+ *   e virava lixo/null.
+ */
 export function decodeBinaryFrame(buf: Uint8Array): {
   frameType: number
   componentId: string
@@ -106,7 +117,7 @@ export function decodeBinaryFrame(buf: Uint8Array): {
   data: unknown
 } | null {
   try {
-    if (buf.length < 6) return null
+    if (buf.length < 2) return null
     let pos = 0
 
     const frameType = buf[pos++]
@@ -114,6 +125,11 @@ export function decodeBinaryFrame(buf: Uint8Array): {
     if (pos + compIdLen > buf.length) return null
     const componentId = decoder.decode(buf.subarray(pos, pos + compIdLen))
     pos += compIdLen
+
+    if (frameType === BINARY_STATE_DELTA) {
+      return { frameType, componentId, roomId: '', event: '', data: buf.slice(pos) }
+    }
+    if (buf.length < 6) return null
 
     const roomIdLen = buf[pos++]
     if (pos + roomIdLen > buf.length) return null

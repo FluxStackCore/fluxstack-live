@@ -13,16 +13,15 @@
  *                        with `fluxstack-plugin-`
  */
 
-import type { FluxStack, PluginManifest, PluginLoadResult, PluginDiscoveryOptions } from '../types'
+import type { PluginManifest, PluginLoadResult, PluginDiscoveryOptions } from '../types'
 import type { Logger } from '../types/logger'
+import type { ErasedPlugin } from './erased-plugin'
 import { readdir, readFile } from 'fs/promises'
 import { join, resolve } from 'path'
 import { existsSync } from 'fs'
 
-// See registry.ts for the rationale. Discovery operates on plugins
-// without inspecting their config, so erasing TConfig to `any` is safe.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Plugin = FluxStack.Plugin<any>
+// TConfig apagado — ver erased-plugin.ts
+type Plugin = ErasedPlugin
 
 export interface PluginDiscoveryConfig {
   logger?: Logger
@@ -333,8 +332,11 @@ export class PluginDiscovery {
       )
     }
 
-    if (plugin.dependencies && manifest.fluxstack.hooks) {
-      const declaredHooks = manifest.fluxstack.hooks
+    // O bloco `fluxstack` pode faltar num plugin.json escrito à mão; antes isso
+    // lançava TypeError (e só era checado quando o plugin tinha `dependencies`,
+    // condição sem relação com hooks), derrubando o carregamento do plugin.
+    const declaredHooks = manifest.fluxstack?.hooks
+    if (Array.isArray(declaredHooks)) {
       const implementedHooks = Object.keys(plugin).filter(
         key => key.startsWith('on') || key === 'setup',
       )

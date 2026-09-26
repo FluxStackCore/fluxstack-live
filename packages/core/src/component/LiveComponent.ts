@@ -14,17 +14,50 @@ import { generateId as defaultGenerateId } from '../utils/generateId'
 import type { GenericWebSocket } from '../transport/types'
 import type { LiveAuthContext, LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
-import type { BroadcastMessage, ComponentState, ServerRoomProxy, RoomEmitOptions } from '../protocol/messages'
-import type { LiveRoom, LiveRoomClass } from '../rooms/LiveRoom'
+import type { BroadcastMessage, ComponentState } from '../protocol/messages'
 
 // Managers
 import { ComponentStateManager } from './managers/ComponentStateManager'
-import { ComponentMessaging, EMIT_OVERRIDE_KEY } from './managers/ComponentMessaging'
-import { ActionSecurityManager } from './managers/ActionSecurityManager'
-import { ComponentRoomProxy } from './managers/ComponentRoomProxy'
+import { ComponentMessaging, EMIT_OVERRIDE_KEY, STATE_DELTA_HOOK_KEY } from './managers/ComponentMessaging'
+import { ActionSecurityManager, type ActionCaller, type ActionPayloadSchema } from './managers/ActionSecurityManager'
+import { ComponentRoomProxy, type LiveComponentRoomAccessor } from './managers/ComponentRoomProxy'
+import { errorMessage } from '../utils/errors'
 
 // Re-export EMIT_OVERRIDE_KEY for external consumers
 export { EMIT_OVERRIDE_KEY }
+export type { LiveComponentRoomAccessor, TypedRoomHandle } from './managers/ComponentRoomProxy'
+
+/**
+ * Qualquer LiveComponent, com os genéricos apagados. Use em coleções
+ * heterogêneas (registry, `ws.data.components`). `object` aceita tanto
+ * interfaces quanto type aliases como TState/TPrivate.
+ */
+export type AnyLiveComponent = LiveComponent<object, object>
+
+/** Estáticos que o framework lê de uma classe de componente. */
+export interface LiveComponentStatics {
+  componentName?: string
+  defaultState?: object
+  updatableFields?: readonly string[]
+  publicActions?: readonly string[]
+  auth?: LiveComponentAuth
+  actionAuth?: LiveActionAuthMap
+  actionSchemas?: Record<string, LiveActionSchema>
+  actionRateLimit?: { maxCalls: number; windowMs: number; perAction?: boolean }
+  persistent?: Record<string, unknown>
+  singleton?: boolean
+  logging?: boolean | readonly LiveComponentLogCategory[]
+  $options?: ComponentOptions
+}
+
+/**
+ * Construtor de um LiveComponent + seus estáticos. É o tipo aceito por
+ * `LiveServer({ components })` e `ComponentRegistry.registerComponentClass`.
+ */
+export type LiveComponentClass<T extends AnyLiveComponent = AnyLiveComponent> = LiveComponentStatics & {
+  readonly name: string
+  new (initialState: Record<string, unknown>, ws: GenericWebSocket, options?: LiveComponentConstructorOptions): T
+}
 
 export interface ComponentOptions {
   /** Enable deep diff for plain objects in setState(). Default: true
@@ -45,14 +78,32 @@ export interface ComponentOptions {
   recursiveProxy?: boolean
 }
 
+/** Opções do construtor de um LiveComponent (passadas pelo registry). */
+export interface LiveComponentConstructorOptions {
+  room?: string
+  userId?: string
+}
+
+/** Categorias aceitas em `static logging`. */
+export type LiveComponentLogCategory = 'lifecycle' | 'messages' | 'state' | 'performance' | 'rooms' | 'websocket'
+
+/** Schema no formato Zod (só `safeParse` é usado). */
+export type LiveActionSchema = ActionPayloadSchema
+
 export abstract class LiveComponent<
   TState = ComponentState,
-  TPrivate extends Record<string, any> = Record<string, any>
+  TPrivate extends object = Record<string, unknown>
 > {
   /** Component name for registry lookup - must be defined in subclasses */
   static componentName: string
   /** Default state - must be defined in subclasses */
-  static defaultState: any
+  static defaultState: object
+
+  /**
+   * Campos que o cliente pode escrever via PROPERTY_UPDATE.
+   * Quando ausente, vale a lista de chaves de `defaultState`.
+   */
+  static updatableFields?: readonly string[]
 
   /**
    * Per-component logging control. Silent by default.
@@ -61,7 +112,7 @@ export abstract class LiveComponent<
    * static logging = true                           // all categories
    * static logging = ['lifecycle', 'messages']      // specific categories
    */
-  static logging?: boolean | readonly ('lifecycle' | 'messages' | 'state' | 'performance' | 'rooms' | 'websocket')[]
+  static logging?: boolean | readonly LiveComponentLogCategory[]
 
   /**
    * Component-level auth configuration.
@@ -83,7 +134,7 @@ export abstract class LiveComponent<
    *   updatePosition: z.object({ x: z.number(), y: z.number() }),
    * }
    */
-  static actionSchemas?: Record<string, { safeParse: (data: unknown) => { success: boolean; error?: any; data?: any } }>
+  static actionSchemas?: Record<string, LiveActionSchema>
 
   /**
    * Rate limit for action execution.
@@ -101,7 +152,7 @@ export abstract class LiveComponent<
   /**
    * Data that survives HMR reloads.
    */
-  static persistent?: Record<string, any>
+  static persistent?: Record<string, unknown>
 
   /**
    * When true, only ONE server-side instance exists for this component.
@@ -135,7 +186,10 @@ export abstract class LiveComponent<
   protected roomType: string = 'default'
 
   // Singleton emit override
-  public [EMIT_OVERRIDE_KEY]: ((type: string, payload: any) => void) | null = null
+  public [EMIT_OVERRIDE_KEY]: ((type: string, payload: unknown) => void) | null = null
+
+  /** @internal Gancho pós-delta instalado pelo registry (renovação do signedState). */
+  public [STATE_DELTA_HOOK_KEY]: (() => void) | null = null
 
   // ===== Internal Managers (composition) =====
   private _stateManager: ComponentStateManager<TState>
@@ -145,7 +199,7 @@ export abstract class LiveComponent<
 
   static publicActions?: readonly string[]
 
-  constructor(initialState: Partial<TState>, ws: GenericWebSocket, options?: { room?: string; userId?: string }) {
+  constructor(initialState: Partial<TState>, ws: GenericWebSocket, options?: LiveComponentConstructorOptions) {
     this.id = this.generateId()
     const ctor = this.constructor as typeof LiveComponent
     this.ws = ws
@@ -169,9 +223,10 @@ export abstract class LiveComponent<
       ws: this.ws,
       emitFn: (type, payload) => this._messaging.emit(type, payload),
       onStateChangeFn: (changes) => this.onStateChange(changes),
-      deepDiff: (ctor as any).$options?.deepDiff ?? true,
-      deepDiffDepth: (ctor as any).$options?.deepDiffDepth,
-      recursiveProxy: (ctor as any).$options?.recursiveProxy ?? false,
+      onDeltaFn: () => this[STATE_DELTA_HOOK_KEY]?.(),
+      deepDiff: ctor.$options?.deepDiff ?? true,
+      deepDiffDepth: ctor.$options?.deepDiffDepth,
+      recursiveProxy: ctor.$options?.recursiveProxy ?? false,
     })
 
     // Expose proxy state as `this.state`
@@ -186,14 +241,14 @@ export abstract class LiveComponent<
       ws: this.ws,
       defaultRoom: this.room,
       getCtx: () => getLiveComponentContext(),
-      setStateFn: (updates: any) => this.setState(updates),
-      deepDiff: (ctor as any).$options?.roomDeepDiff,
-      deepDiffDepth: (ctor as any).$options?.deepDiffDepth,
-      serverOnlyState: (ctor as any).$options?.serverOnlyRoomState,
+      setStateFn: (updates) => this.setState(updates as Partial<TState>),
+      deepDiff: ctor.$options?.roomDeepDiff,
+      deepDiffDepth: ctor.$options?.deepDiffDepth,
+      serverOnlyState: ctor.$options?.serverOnlyRoomState,
     })
 
     // Create direct property accessors (this.count instead of this.state.count)
-    this._stateManager.applyDirectAccessors(this, this.constructor as Function)
+    this._stateManager.applyDirectAccessors(this, this.constructor)
   }
 
   // ========================================
@@ -216,24 +271,8 @@ export abstract class LiveComponent<
    * - `this.$room('roomId')` — untyped room handle (legacy)
    * - `this.$room(ChatRoom, 'lobby')` — typed handle with custom methods
    */
-  public get $room(): ServerRoomProxy & {
-    <R extends LiveRoom<any, any, any>>(roomClass: LiveRoomClass<R>, instanceId: string): R & {
-      readonly id: string
-      join: (payload?: any) => { rejected?: false } | { rejected: true; reason: string }
-      leave: () => void
-      // Issue #15: extract the room's TEvents map so the proxy emit keeps
-      // the typed event/data pair, then add the optional RoomEmitOptions
-      // third argument. Falling back to LiveRoom<any, any, any> keeps the
-      // generic path permissive for untyped room classes.
-      emit: R extends LiveRoom<any, any, infer E>
-        ? <K extends keyof E & string>(event: K, data: E[K], options?: RoomEmitOptions) => number
-        : (event: string, data: any, options?: RoomEmitOptions) => number
-      on: <K extends string>(event: K, handler: (data: any) => void) => () => void
-      setState: (updates: Partial<R['state']>) => void
-      readonly memberCount: number
-    }
-  } {
-    return this._roomProxyManager.$room as any
+  public get $room(): LiveComponentRoomAccessor {
+    return this._roomProxyManager.$room
   }
 
   /**
@@ -274,16 +313,18 @@ export abstract class LiveComponent<
   // $persistent - HMR-Safe State
   // ========================================
 
-  public get $persistent(): Record<string, any> {
+  public get $persistent(): Record<string, unknown> {
     const ctor = this.constructor as typeof LiveComponent
     const name = ctor.componentName || ctor.name
     const key = `__fluxstack_persistent_${name}`
+    // globalThis sobrevive ao HMR; guardamos os dados numa chave por componente.
+    const store = globalThis as unknown as Record<string, Record<string, unknown> | undefined>
 
-    if (!(globalThis as any)[key]) {
-      (globalThis as any)[key] = { ...(ctor as any).persistent || {} }
+    if (!store[key]) {
+      store[key] = { ...(ctor.persistent || {}) }
     }
 
-    return (globalThis as any)[key]
+    return store[key]!
   }
 
   // ========================================
@@ -298,7 +339,7 @@ export abstract class LiveComponent<
   protected onRoomJoin(roomId: string): void {}
   protected onRoomLeave(roomId: string): void {}
   protected onRehydrate(previousState: TState): void {}
-  protected onAction(action: string, payload: any): void | false | Promise<void | false> {}
+  protected onAction(action: string, payload: unknown): void | false | Promise<void | false> {}
   protected onClientJoin(connectionId: string, connectionCount: number): void {}
   protected onClientLeave(connectionId: string, connectionCount: number): void {}
 
@@ -331,12 +372,13 @@ export abstract class LiveComponent<
   // Action Execution (delegates to _actionSecurity)
   // ========================================
 
-  public async executeAction(action: string, payload: any): Promise<any> {
+  public async executeAction(action: string, payload: unknown, caller?: ActionCaller): Promise<unknown> {
     return this._actionSecurity.validateAndExecute(action, payload, {
       component: this,
-      componentClass: this.constructor as any,
+      componentClass: this.constructor as typeof LiveComponent,
       componentId: this.id,
       emitFn: (type, p) => this.emit(type, p),
+      caller,
     })
   }
 
@@ -344,11 +386,11 @@ export abstract class LiveComponent<
   // Messaging (delegates to _messaging)
   // ========================================
 
-  protected emit(type: string, payload: any) {
+  protected emit(type: string, payload: unknown) {
     this._messaging.emit(type, payload)
   }
 
-  protected broadcast(type: string, payload: any, excludeCurrentUser = false) {
+  protected broadcast(type: string, payload: unknown, excludeCurrentUser = false) {
     this._messaging.broadcast(type, payload, excludeCurrentUser)
   }
 
@@ -356,15 +398,15 @@ export abstract class LiveComponent<
   // Room Events (delegates to _roomProxyManager)
   // ========================================
 
-  protected emitRoomEvent(event: string, data: any, notifySelf = false): number {
+  protected emitRoomEvent(event: string, data: unknown, notifySelf = false): number {
     return this._roomProxyManager.emitRoomEvent(event, data, notifySelf)
   }
 
-  protected onRoomEvent<T = any>(event: string, handler: (data: T) => void): void {
+  protected onRoomEvent<T = unknown>(event: string, handler: (data: T) => void): void {
     this._roomProxyManager.onRoomEvent(event, handler)
   }
 
-  protected emitRoomEventWithState(event: string, data: any, stateUpdates: Partial<TState>): number {
+  protected emitRoomEventWithState(event: string, data: unknown, stateUpdates: Partial<TState>): number {
     return this._roomProxyManager.emitRoomEventWithState(event, data, stateUpdates)
   }
 
@@ -393,8 +435,8 @@ export abstract class LiveComponent<
   public destroy() {
     try {
       this.onDestroy()
-    } catch (err: any) {
-      console.error(`[${this.id}] onDestroy error:`, err?.message || err)
+    } catch (err) {
+      console.error(`[${this.id}] onDestroy error:`, errorMessage(err))
     }
 
     // Cleanup room proxy (unsubscribers, leave rooms, clear handles)

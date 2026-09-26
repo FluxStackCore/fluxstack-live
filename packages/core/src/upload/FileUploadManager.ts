@@ -3,14 +3,17 @@
 // Handles chunked file uploads over WebSocket with security validations.
 
 import { liveLog, liveWarn } from '../debug/LiveLogger'
+import { MIN_UPLOAD_CHUNK_SIZE, MAX_UPLOAD_CHUNK_SIZE } from '../protocol/constants'
 import type {
   ActiveUpload,
   FileUploadStartMessage,
   FileUploadChunkMessage,
   FileUploadCompleteMessage,
   FileUploadProgressResponse,
-  FileUploadCompleteResponse
+  FileUploadCompleteResponse,
+  UntrustedFields,
 } from '../protocol/messages'
+import { errorMessage } from '../utils/errors'
 
 // Magic bytes mapping for content validation
 const MAGIC_BYTES: Record<string, { bytes: number[]; offset?: number }[]> = {
@@ -82,9 +85,34 @@ export class FileUploadManager {
     this.quotaTimer = setInterval(() => this.resetUploadQuotas(), this.quotaResetInterval)
   }
 
-  async startUpload(message: FileUploadStartMessage, userId?: string): Promise<{ success: boolean; error?: string }> {
+  /**
+   * @param userId       id AUTENTICADO do usuário (quota). Nunca o enviado pelo cliente.
+   * @param connectionId conexão dona do upload; sem userId, a quota é por conexão.
+   */
+  async startUpload(message: UntrustedFields<FileUploadStartMessage>, userId?: string, connectionId?: string): Promise<{ success: boolean; error?: string }> {
     try {
+      // Campos vêm do cliente: cada um é validado antes do uso.
       const { uploadId, componentId, filename, fileType, fileSize, chunkSize = 64 * 1024 } = message
+
+      if (typeof uploadId !== 'string' || uploadId.length === 0 || uploadId.length > 128) {
+        throw new Error('Invalid uploadId')
+      }
+      if (componentId !== undefined && typeof componentId !== 'string') {
+        throw new Error('Invalid componentId')
+      }
+      if (typeof filename !== 'string' || typeof fileType !== 'string') {
+        throw new Error('Invalid filename or fileType')
+      }
+      if (typeof fileSize !== 'number' || !Number.isSafeInteger(fileSize) || fileSize <= 0) {
+        throw new Error(`Invalid fileSize: ${fileSize}`)
+      }
+      if (typeof chunkSize !== 'number' || !Number.isSafeInteger(chunkSize) || chunkSize < MIN_UPLOAD_CHUNK_SIZE || chunkSize > MAX_UPLOAD_CHUNK_SIZE) {
+        throw new Error(`Invalid chunkSize: ${chunkSize} (allowed ${MIN_UPLOAD_CHUNK_SIZE}-${MAX_UPLOAD_CHUNK_SIZE})`)
+      }
+
+      // Quota: usuário autenticado; senão, por conexão (anônimos não ficam sem limite).
+      const quotaKey = userId ?? (connectionId ? `conn:${connectionId}` : undefined)
+      userId = quotaKey
 
       if (fileSize > this.maxUploadSize) {
         throw new Error(`File too large: ${fileSize} bytes. Max: ${this.maxUploadSize} bytes`)
@@ -131,7 +159,8 @@ export class FileUploadManager {
       const totalChunks = Math.ceil(fileSize / chunkSize)
       const upload: ActiveUpload = {
         uploadId,
-        componentId,
+        // Sem componentId o upload fica "solto" (comportamento antigo: campo vazio).
+        componentId: componentId ?? '',
         filename,
         fileType,
         fileSize,
@@ -139,7 +168,9 @@ export class FileUploadManager {
         receivedChunks: new Map(),
         bytesReceived: 0,
         startTime: Date.now(),
-        lastChunkTime: Date.now()
+        lastChunkTime: Date.now(),
+        ownerConnectionId: connectionId,
+        chunkSize,
       }
 
       this.activeUploads.set(uploadId, upload)
@@ -149,33 +180,44 @@ export class FileUploadManager {
         this.userUploadBytes.set(userId, currentUsage + fileSize)
       }
 
-      liveLog('messages', componentId, `Upload started: ${uploadId} (${filename}, ${fileSize} bytes)`)
+      liveLog('messages', componentId ?? null, `Upload started: ${uploadId} (${filename}, ${fileSize} bytes)`)
 
       return { success: true }
-    } catch (error: any) {
-      return { success: false, error: error.message }
+    } catch (error) {
+      return { success: false, error: errorMessage(error) }
     }
   }
 
-  async receiveChunk(message: FileUploadChunkMessage, binaryData: Buffer | null = null): Promise<FileUploadProgressResponse | null> {
-    const { uploadId, chunkIndex, totalChunks, data } = message
+  async receiveChunk(message: UntrustedFields<FileUploadChunkMessage>, binaryData: Buffer | null = null, connectionId?: string): Promise<FileUploadProgressResponse | null> {
+    const { uploadId, chunkIndex, data } = message
 
-    const upload = this.activeUploads.get(uploadId)
-    if (!upload) throw new Error(`Upload ${uploadId} not found`)
+    const upload = this.getOwnedUpload(uploadId, connectionId)
+    // totalChunks SEMPRE o calculado no start — o valor do cliente é ignorado.
+    const totalChunks = upload.totalChunks
 
-    if (chunkIndex < 0 || chunkIndex >= totalChunks) {
+    if (typeof chunkIndex !== 'number' || !Number.isInteger(chunkIndex) || chunkIndex < 0 || chunkIndex >= totalChunks) {
       throw new Error(`Invalid chunk index: ${chunkIndex}`)
     }
 
     if (!upload.receivedChunks.has(chunkIndex)) {
+      let chunk: string | Buffer
       let chunkBytes: number
       if (binaryData) {
-        upload.receivedChunks.set(chunkIndex, binaryData)
+        chunk = binaryData
         chunkBytes = binaryData.length
       } else {
-        upload.receivedChunks.set(chunkIndex, data as string)
-        chunkBytes = Buffer.from(data as string, 'base64').length
+        if (typeof data !== 'string') throw new Error('Invalid chunk data')
+        chunk = data
+        chunkBytes = Buffer.from(data, 'base64').length
       }
+      const maxChunk = upload.chunkSize ?? Infinity
+      if (chunkBytes > maxChunk) {
+        throw new Error(`Chunk too large: ${chunkBytes} > ${maxChunk}`)
+      }
+      if (upload.bytesReceived + chunkBytes > upload.fileSize) {
+        throw new Error(`Upload exceeds declared fileSize (${upload.fileSize} bytes)`)
+      }
+      upload.receivedChunks.set(chunkIndex, chunk)
       upload.lastChunkTime = Date.now()
       upload.bytesReceived += chunkBytes
     }
@@ -195,12 +237,11 @@ export class FileUploadManager {
     }
   }
 
-  async completeUpload(message: FileUploadCompleteMessage): Promise<FileUploadCompleteResponse> {
+  async completeUpload(message: UntrustedFields<FileUploadCompleteMessage>, connectionId?: string): Promise<FileUploadCompleteResponse> {
     try {
       const { uploadId } = message
 
-      const upload = this.activeUploads.get(uploadId)
-      if (!upload) throw new Error(`Upload ${uploadId} not found`)
+      const upload = this.getOwnedUpload(uploadId, connectionId)
 
       if (upload.bytesReceived !== upload.fileSize) {
         throw new Error(`Incomplete upload: received ${upload.bytesReceived}/${upload.fileSize} bytes`)
@@ -212,7 +253,7 @@ export class FileUploadManager {
         ? await this.customAssembleFile(upload)
         : await this.defaultAssembleFile(upload)
 
-      this.activeUploads.delete(uploadId)
+      this.activeUploads.delete(upload.uploadId)
 
       return {
         type: 'FILE_UPLOAD_COMPLETE',
@@ -223,16 +264,41 @@ export class FileUploadManager {
         fileUrl,
         timestamp: Date.now()
       }
-    } catch (error: any) {
+    } catch (error) {
       return {
         type: 'FILE_UPLOAD_COMPLETE',
         componentId: '',
-        uploadId: message.uploadId,
+        uploadId: typeof message.uploadId === 'string' ? message.uploadId : '',
         success: false,
-        error: error.message,
+        error: errorMessage(error),
         timestamp: Date.now()
       }
     }
+  }
+
+  /**
+   * Busca um upload garantindo que pertence à conexão. Mesma mensagem de
+   * "não encontrado" para não revelar uploadIds de terceiros.
+   */
+  private getOwnedUpload(uploadId: unknown, connectionId?: string): ActiveUpload {
+    const upload = typeof uploadId === 'string' ? this.activeUploads.get(uploadId) : undefined
+    if (!upload) throw new Error(`Upload ${uploadId} not found`)
+    if (upload.ownerConnectionId && upload.ownerConnectionId !== connectionId) {
+      throw new Error(`Upload ${uploadId} not found`)
+    }
+    return upload
+  }
+
+  /** Cancela todos os uploads iniciados por uma conexão (chamado no close). */
+  cancelConnectionUploads(connectionId: string): number {
+    let cancelled = 0
+    for (const [uploadId, upload] of this.activeUploads) {
+      if (upload.ownerConnectionId === connectionId) {
+        this.activeUploads.delete(uploadId)
+        cancelled++
+      }
+    }
+    return cancelled
   }
 
   private async defaultAssembleFile(upload: ActiveUpload): Promise<string> {

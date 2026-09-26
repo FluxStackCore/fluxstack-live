@@ -3,6 +3,8 @@
 // Handles action validation, blocked actions, publicActions, rate limiting, Zod schemas.
 // Extracted from LiveComponent for single-responsibility.
 
+import { errorMessage } from '../../utils/errors'
+
 const BLOCKED_ACTIONS: ReadonlySet<string> = new Set([
   'constructor', 'destroy', 'executeAction', 'getSerializableState',
   'onMount', 'onDestroy', 'onConnect', 'onDisconnect',
@@ -19,21 +21,53 @@ const BLOCKED_ACTIONS: ReadonlySet<string> = new Set([
   'emitRoomEvent', 'onRoomEvent', 'emitRoomEventWithState',
 ])
 
+/**
+ * Visão do componente usada aqui: um dicionário de membros (a action é
+ * procurada por nome) com o hook `onAction`. O nome da action é validado
+ * (allowlist + bloqueios) antes de qualquer acesso.
+ */
+export interface ActionTarget {
+  [member: string]: unknown
+}
+
+/** Schema no formato Zod (só `safeParse` é usado). */
+export interface ActionPayloadSchema {
+  safeParse: (data: unknown) => {
+    success: boolean
+    error?: { message?: string; issues?: ReadonlyArray<{ message: string }> }
+    data?: unknown
+  }
+}
+
 export interface ActionSecurityContext {
   /** The component instance to execute the action on */
-  component: any
+  component: object
   /** Component class (constructor) for reading static properties */
   componentClass: {
     componentName?: string
     name: string
     publicActions?: readonly string[]
-    actionSchemas?: Record<string, { safeParse: (data: unknown) => { success: boolean; error?: any; data?: any } }>
+    actionSchemas?: Record<string, ActionPayloadSchema>
     actionRateLimit?: { maxCalls: number; windowMs: number; perAction?: boolean }
   }
   /** Component id for debugging */
   componentId: string
   /** Emit function for sending ERROR messages */
-  emitFn: (type: string, payload: any) => void
+  emitFn: (type: string, payload: unknown) => void
+  /**
+   * Quem está chamando a action (conexão de origem). Em singletons o `$auth`
+   * do componente é o de quem montou primeiro — a identidade REAL do chamador
+   * chega aqui e é repassada como 2º argumento da action.
+   */
+  caller?: ActionCaller
+}
+
+/** Identidade do chamador de uma action (repassada como 2º argumento). */
+export interface ActionCaller {
+  /** connectionId da conexão que disparou a action (ausente em chamadas internas) */
+  connectionId?: string
+  /** contexto de auth da conexão chamadora */
+  auth: import('../../auth/types').LiveAuthContext
 }
 
 export class ActionSecurityManager {
@@ -41,10 +75,12 @@ export class ActionSecurityManager {
 
   async validateAndExecute(
     action: string,
-    payload: any,
+    payload: unknown,
     ctx: ActionSecurityContext
-  ): Promise<any> {
-    const { component, componentClass, componentId } = ctx
+  ): Promise<unknown> {
+    const { componentClass, componentId } = ctx
+    // Acesso por nome (a action é uma string vinda do cliente, validada abaixo).
+    const component = ctx.component as ActionTarget
 
     try {
       // Blocked actions check
@@ -90,7 +126,10 @@ export class ActionSecurityManager {
       const rateLimit = componentClass.actionRateLimit
       if (rateLimit) {
         const now = Date.now()
-        const key = rateLimit.perAction ? action : '*'
+        // Chave inclui a conexão chamadora: em singletons um cliente abusivo
+        // não pode esgotar o limite de todos os outros.
+        const base = rateLimit.perAction ? action : '*'
+        const key = ctx.caller?.connectionId ? `${ctx.caller.connectionId}:${base}` : base
         let entry = this._actionCalls.get(key)
         if (!entry || now - entry.windowStart >= rateLimit.windowMs) {
           entry = { count: 0, windowStart: now }
@@ -107,17 +146,18 @@ export class ActionSecurityManager {
       if (schemas && schemas[action]) {
         const result = schemas[action].safeParse(payload)
         if (!result.success) {
-          const errorMsg = result.error?.message || result.error?.issues?.map((i: any) => i.message).join(', ') || 'Invalid payload'
+          const errorMsg = result.error?.message || result.error?.issues?.map((i) => i.message).join(', ') || 'Invalid payload'
           throw new Error(`Action '${action}' payload validation failed: ${errorMsg}`)
         }
         payload = result.data ?? payload
       }
 
       // onAction hook
-      let hookResult: void | false | Promise<void | false>
+      let hookResult: unknown
       try {
-        hookResult = await component.onAction(action, payload)
-      } catch (hookError: any) {
+        const onAction = component.onAction
+        hookResult = typeof onAction === 'function' ? await onAction.call(component, action, payload) : undefined
+      } catch (hookError) {
         ctx.emitFn('ERROR', {
           action,
           error: `Action '${action}' failed pre-validation`
@@ -129,14 +169,16 @@ export class ActionSecurityManager {
       }
 
       // Execute action
-      const result = await method.call(component, payload)
+      const result = ctx.caller
+        ? await method.call(component, payload, ctx.caller)
+        : await method.call(component, payload)
 
       return result
-    } catch (error: any) {
-      if (!error.message?.includes('was cancelled') && !error.message?.includes('pre-validation')) {
+    } catch (error) {
+      if (!errorMessage(error).includes('was cancelled') && !errorMessage(error).includes('pre-validation')) {
         ctx.emitFn('ERROR', {
           action,
-          error: error.message
+          error: errorMessage(error)
         })
       }
       throw error

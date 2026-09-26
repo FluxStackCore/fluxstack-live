@@ -343,3 +343,54 @@ describe('ComponentStateManager deepDiff', () => {
     })
   })
 })
+
+// ===== Atribuição direta de objeto pelo proxy (auditoria 2026-09-26) =====
+// `this.state.tags = { b: 2 }` mandava o objeto inteiro; o cliente faz merge
+// profundo do delta, então a chave antiga `a` sobrevivia no cliente.
+
+type TagState = { tags: Record<string, number>; label: string }
+
+class TagComponent extends LiveComponent<TagState> {
+  static componentName = 'TagComponent'
+  static defaultState: TagState = { tags: { a: 1 }, label: 'x' }
+  static publicActions = [] as const
+}
+
+describe('proxy set com objeto inteiro', () => {
+  it('emite as remoções (null) para chaves que sumiram', async () => {
+    const ws = createMockWs()
+    const c = new TagComponent({}, ws)
+    await flush()
+    ;(ws.send as any).mockClear()
+
+    c.state.tags = { b: 2 }
+    await flush()
+
+    const deltas = extractDeltas(ws)
+    expect(deltas).toHaveLength(1)
+    expect(deltas[0]).toEqual({ tags: { a: null, b: 2 } })
+    expect(c.state.tags).toEqual({ b: 2 })
+  })
+
+  it('objeto igual em valor não emite delta', async () => {
+    const ws = createMockWs()
+    const c = new TagComponent({}, ws)
+    await flush()
+    ;(ws.send as any).mockClear()
+
+    c.state.tags = { a: 1 }
+    await flush()
+    expect(extractDeltas(ws)).toHaveLength(0)
+  })
+
+  it('primitivos continuam emitindo o valor direto', async () => {
+    const ws = createMockWs()
+    const c = new TagComponent({}, ws)
+    await flush()
+    ;(ws.send as any).mockClear()
+
+    c.state.label = 'y'
+    await flush()
+    expect(extractDeltas(ws)).toEqual([{ label: 'y' }])
+  })
+})

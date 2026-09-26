@@ -103,12 +103,12 @@
     },
     "packages/cli": {
       "name": "@fluxstack/live-cli",
-      "version": "0.9.0",
+      "version": "0.11.0",
       "bin": {
         "fluxstack-inspect": "./dist/inspector.js",
       },
       "dependencies": {
-        "@fluxstack/live": "^0.7.0",
+        "@fluxstack/live": "^0.11.0",
       },
       "devDependencies": {
         "tsup": "^8.4.0",
@@ -117,9 +117,9 @@
     },
     "packages/client": {
       "name": "@fluxstack/live-client",
-      "version": "0.9.0",
+      "version": "0.11.0",
       "dependencies": {
-        "@fluxstack/live": "^0.8.0",
+        "@fluxstack/live": "^0.11.0",
       },
       "devDependencies": {
         "tsup": "^8.4.0",
@@ -128,7 +128,7 @@
     },
     "packages/core": {
       "name": "@fluxstack/live",
-      "version": "0.9.0",
+      "version": "0.11.0",
       "devDependencies": {
         "@types/node": "^25.3.3",
         "ioredis": "^5.10.0",
@@ -142,11 +142,12 @@
     },
     "packages/elysia": {
       "name": "@fluxstack/live-elysia",
-      "version": "0.9.0",
+      "version": "0.11.0",
       "dependencies": {
-        "@fluxstack/live": "^0.9.0",
+        "@fluxstack/live": "^0.11.0",
       },
       "devDependencies": {
+        "@fluxstack/live-client": "^0.11.0",
         "elysia": "^1.4.6",
         "tsup": "^8.4.0",
         "typescript": "^5.8.3",
@@ -157,10 +158,10 @@
     },
     "packages/express": {
       "name": "@fluxstack/live-express",
-      "version": "0.9.0",
+      "version": "0.11.0",
       "dependencies": {
-        "@fluxstack/live": "^0.7.0",
-        "@fluxstack/live-client": "^0.7.0",
+        "@fluxstack/live": "^0.11.0",
+        "@fluxstack/live-client": "^0.11.0",
       },
       "devDependencies": {
         "@types/express": "^5.0.0",
@@ -177,10 +178,10 @@
     },
     "packages/fastify": {
       "name": "@fluxstack/live-fastify",
-      "version": "0.9.0",
+      "version": "0.11.0",
       "dependencies": {
-        "@fluxstack/live": "^0.7.0",
-        "@fluxstack/live-client": "^0.7.0",
+        "@fluxstack/live": "^0.11.0",
+        "@fluxstack/live-client": "^0.11.0",
         "fastify-plugin": "^5.0.0",
       },
       "devDependencies": {
@@ -203,7 +204,7 @@
     },
     "packages/react": {
       "name": "@fluxstack/live-react",
-      "version": "0.9.0",
+      "version": "0.11.0",
       "dependencies": {
         "@fluxstack/live": "^0.8.0",
         "@fluxstack/live-client": "^0.8.0",
@@ -222,9 +223,9 @@
     },
     "packages/redis": {
       "name": "@fluxstack/live-redis",
-      "version": "0.9.0",
+      "version": "0.11.0",
       "dependencies": {
-        "@fluxstack/live": "^0.7.0",
+        "@fluxstack/live": "^0.11.0",
       },
       "devDependencies": {
         "ioredis": "^5.6.1",
@@ -237,22 +238,22 @@
     },
     "packages/spatial-room": {
       "name": "@fluxstack/spatial-room",
-      "version": "0.9.0",
+      "version": "0.11.0",
       "devDependencies": {
         "tsup": "^8.0.0",
         "typescript": "^5.3.3",
         "vitest": "^3.2.4",
       },
       "peerDependencies": {
-        "@fluxstack/live": "^0.9.0",
+        "@fluxstack/live": "^0.11.0",
       },
     },
     "packages/vue": {
       "name": "@fluxstack/live-vue",
-      "version": "0.9.0",
+      "version": "0.11.0",
       "dependencies": {
-        "@fluxstack/live": "^0.7.0",
-        "@fluxstack/live-client": "^0.7.0",
+        "@fluxstack/live": "^0.11.0",
+        "@fluxstack/live-client": "^0.11.0",
       },
       "devDependencies": {
         "tsup": "^8.4.0",

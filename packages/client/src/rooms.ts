@@ -3,9 +3,12 @@
 // Framework-agnostic room system for managing multi-room WebSocket communication.
 // Used by framework-specific adapters (React, Vue, etc.).
 
+import type { WebSocketResponse } from '@fluxstack/live'
+import { clientMessages, isRecord, readRoomJoinResponse, type LiveOutgoingMessage, type OutgoingMessageOf } from './protocol'
+
 // ===== Deep Merge (always-on, retrocompatible) =====
 
-function isPlainObject(v: unknown): v is Record<string, any> {
+function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
     && Object.getPrototypeOf(v) === Object.prototype
 }
@@ -18,22 +21,28 @@ function isPlainObject(v: unknown): v is Record<string, any> {
  * - Nested `null` is the deletion sentinel from `computeDeepDiff`.
  * - `undefined` is skipped — it never crosses the wire.
  */
-function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>, seen?: Set<object>): T {
-  return deepMergeImpl(target, source, 0, seen)
+function deepMerge<T>(target: T, source: unknown, seen?: Set<object>): T {
+  // O estado da sala é sempre um objeto; o resultado mantém o tipo declarado do alvo.
+  return deepMergeImpl(isRecord(target) ? target : {}, isRecord(source) ? source : {}, 0, seen) as T
 }
 
-function deepMergeImpl<T extends Record<string, any>>(target: T, source: Partial<T>, depth: number, seen?: Set<object>): T {
+function deepMergeImpl(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  depth: number,
+  seen?: Set<object>,
+): Record<string, unknown> {
   if (!seen) seen = new Set()
-  if (seen.has(source as object)) return target
-  seen.add(source as object)
+  if (seen.has(source)) return target
+  seen.add(source)
 
-  const result = { ...target }
-  for (const key of Object.keys(source) as Array<keyof T>) {
+  const result: Record<string, unknown> = { ...target }
+  for (const key of Object.keys(source)) {
     const newVal = source[key]
     if (newVal === undefined) continue
     if (newVal === null) {
       if (depth === 0) {
-        result[key] = null as T[keyof T]
+        result[key] = null
       } else {
         delete result[key]
       }
@@ -41,15 +50,20 @@ function deepMergeImpl<T extends Record<string, any>>(target: T, source: Partial
     }
     const oldVal = result[key]
     if (isPlainObject(oldVal) && isPlainObject(newVal)) {
-      result[key] = deepMergeImpl(oldVal as any, newVal as any, depth + 1, seen) as T[keyof T]
+      result[key] = deepMergeImpl(oldVal, newVal, depth + 1, seen)
     } else {
-      result[key] = newVal as T[keyof T]
+      result[key] = newVal
     }
   }
   return result
 }
 
-type EventHandler<T = any> = (data: T) => void
+/**
+ * Handler de evento de sala. Parâmetro bivariante (truque do método) para que
+ * handlers já tipados — `(d: { n: number }) => void` — caibam em
+ * `EventHandler<unknown>` (ex.: `onSystem`) sem precisar de `any`.
+ */
+type EventHandler<T = unknown> = { bivarianceHack(data: T): void }['bivarianceHack']
 type Unsubscribe = () => void
 
 // ===== Binary Room Frame Constants =====
@@ -155,8 +169,8 @@ const ROOM_RESERVED_KEYS = new Set<string | symbol>([
 /** Wrap a handle/proxy so unknown property access falls through to state */
 function wrapWithStateProxy<T extends object>(
   target: T,
-  getState: () => any,
-  setStateFn: (updates: any) => void,
+  getState: () => unknown,
+  setStateFn: (updates: Record<string, unknown>) => void,
 ): T {
   return new Proxy(target, {
     get(obj, prop, receiver) {
@@ -167,7 +181,7 @@ function wrapWithStateProxy<T extends object>(
       if (desc) return Reflect.get(obj, prop, receiver)
       if (prop in obj) return Reflect.get(obj, prop, receiver)
       const st = getState()
-      return st?.[prop]
+      return isRecord(st) ? st[prop] : undefined
     },
     set(_obj, prop, value) {
       if (typeof prop === 'symbol') return false
@@ -181,19 +195,17 @@ function wrapWithStateProxy<T extends object>(
 type RoomReservedKeys = 'id' | 'joined' | 'state' | 'join' | 'leave' | 'emit' | 'on' | 'onSystem' | 'setState' | 'removeAllListeners'
 
 /** State fields accessible directly on handle/proxy (excludes reserved method names) */
-type RoomStateFields<TState> = TState extends Record<string, any>
+type RoomStateFields<TState> = TState extends object
   ? { readonly [K in Exclude<keyof TState, RoomReservedKeys>]: TState[K] }
   : unknown
 
-/** Message from client to server */
-export interface RoomClientMessage {
-  type: 'ROOM_JOIN' | 'ROOM_LEAVE' | 'ROOM_EMIT' | 'ROOM_STATE_GET' | 'ROOM_STATE_SET'
-  componentId: string
-  roomId: string
-  event?: string
-  data?: any
-  timestamp: number
-}
+/**
+ * Mensagens de sala cliente → servidor, na forma que o servidor valida:
+ * `roomId` no topo, dados em `payload` (`payload.event`/`payload.data`,
+ * `payload.state`, `payload.initialState`). Gere com `clientMessages.room*`.
+ */
+export type RoomClientMessage =
+  OutgoingMessageOf<'ROOM_JOIN' | 'ROOM_LEAVE' | 'ROOM_EMIT' | 'ROOM_STATE_GET' | 'ROOM_STATE_SET'>
 
 /** Message from server to client */
 export interface RoomServerMessage {
@@ -201,12 +213,15 @@ export interface RoomServerMessage {
   componentId: string
   roomId: string
   event: string
-  data: any
+  data: unknown
   timestamp: number
 }
 
+/** Mapa de eventos genérico (nome → payload). */
+type AnyEventMap = Record<string, unknown>
+
 /** Interface of an individual room handle */
-export type RoomHandle<TState = any, TEvents extends Record<string, any> = Record<string, any>> = {
+export type RoomHandle<TState = Record<string, unknown>, TEvents extends object = AnyEventMap> = {
   readonly id: string
   readonly joined: boolean
   readonly state: TState
@@ -222,15 +237,19 @@ export type RoomHandle<TState = any, TEvents extends Record<string, any> = Recor
 
 /** Infer TEvents from a LiveRoom class (via $events brand) or use T directly as events map */
 export type InferRoomEvents<T> =
-  T extends { $events: infer E extends Record<string, any> } ? E :
-  T extends Record<string, any> ? T :
-  Record<string, any>
+  T extends { $events: infer E extends object } ? E :
+  T extends object ? T :
+  AnyEventMap
+
+/** Infer room state from a LiveRoom class (via `state`); otherwise a generic record. */
+export type InferRoomState<T> =
+  T extends { $events: object; state: infer S } ? S : Record<string, unknown>
 
 /** Proxy interface for $room - callable as function or object */
-export type RoomProxy<TState = any, TEvents extends Record<string, any> = Record<string, any>> = {
+export type RoomProxy<TState = Record<string, unknown>, TEvents extends object = AnyEventMap> = {
   /** Get a typed room handle. Pass the Room class or events interface as generic:
    * `$room<CounterRoom>('counter:global').on('counter:updated', data => ...)` */
-  <T = TEvents>(roomId: string): RoomHandle<any, InferRoomEvents<T>>
+  <T = TEvents>(roomId: string): RoomHandle<InferRoomState<T>, InferRoomEvents<T>>
   readonly id: string | null
   readonly joined: boolean
   readonly state: TState
@@ -250,15 +269,16 @@ export type RoomProxy<TState = any, TEvents extends Record<string, any> = Record
 export interface RoomManagerOptions {
   componentId: string | null
   defaultRoom?: string
-  sendMessage: (msg: any) => void
-  sendMessageAndWait: (msg: any, timeout?: number) => Promise<any>
+  /** Fire-and-forget (pode devolver Promise; a rejeição é descartada aqui). */
+  sendMessage: (msg: LiveOutgoingMessage) => void | Promise<void>
+  sendMessageAndWait: (msg: LiveOutgoingMessage, timeout?: number) => Promise<WebSocketResponse>
   onMessage: (handler: (msg: RoomServerMessage) => void) => Unsubscribe
   /** Optional: register for binary room frames (0x02 ROOM_EVENT, 0x03 ROOM_STATE) */
   onBinaryMessage?: (handler: (frame: Uint8Array) => void) => Unsubscribe
 }
 
 /** Client-side room manager. Framework-agnostic. */
-export class RoomManager<TState = any, TEvents extends Record<string, any> = Record<string, any>> {
+export class RoomManager<TState = Record<string, unknown>, TEvents extends object = AnyEventMap> {
   private componentId: string | null
   private defaultRoom: string | null
   // Room lifecycle state (driven by the server). Can be cleared/recreated
@@ -272,8 +292,8 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
   // via the returned Unsubscribe, removeAllListeners(), or disposeRoom().
   private roomHandlers = new Map<string, Map<string, Set<EventHandler>>>()
   private handles = new Map<string, RoomHandle<TState, TEvents>>()
-  private sendMessage: (msg: any) => void
-  private sendMessageAndWait: (msg: any, timeout?: number) => Promise<any>
+  private sendMessage: (msg: LiveOutgoingMessage) => void | Promise<void>
+  private sendMessageAndWait: (msg: LiveOutgoingMessage, timeout?: number) => Promise<WebSocketResponse>
   private globalUnsubscribe: Unsubscribe | null = null
   private binaryUnsubscribe: Unsubscribe | null = null
   private onBinaryMessage: ((handler: (frame: Uint8Array) => void) => Unsubscribe) | null = null
@@ -316,9 +336,9 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
 
       case 'ROOM_STATE': {
         // Server sends data: { state: actualChanges } — extract the actual changes
-        const stateChanges = msg.data?.state ?? msg.data
+        const stateChanges = extractStateChanges(msg.data)
         const room = this.getOrCreateRoom(msg.roomId)
-        room.state = deepMerge(room.state as Record<string, any>, stateChanges) as TState
+        room.state = deepMerge(room.state, stateChanges)
         this.dispatchToHandlers(msg.roomId, '$state:change', stateChanges)
         break
       }
@@ -326,7 +346,8 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       case 'ROOM_JOINED': {
         const room = this.getOrCreateRoom(msg.roomId)
         room.joined = true
-        if (msg.data?.state) room.state = msg.data.state
+        // Estado vindo do servidor; a forma é a declarada pelo consumidor (TState).
+        if (isRecord(msg.data) && isRecord(msg.data.state)) room.state = msg.data.state as TState
         break
       }
 
@@ -365,9 +386,9 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       this.dispatchToHandlers(parsed.roomId, parsed.event, data)
     } else if (parsed.frameType === BINARY_ROOM_STATE) {
       // State update: data is { state: changes } or just changes
-      const stateChanges = (data as any)?.state ?? data
+      const stateChanges = extractStateChanges(data)
       const room = this.getOrCreateRoom(parsed.roomId)
-      room.state = deepMerge(room.state as Record<string, any>, stateChanges as Record<string, any>) as TState
+      room.state = deepMerge(room.state, stateChanges)
       this.dispatchToHandlers(parsed.roomId, '$state:change', stateChanges)
     }
   }
@@ -428,19 +449,20 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
 
         if (initialState) room.state = initialState
 
-        const response = await this.sendMessageAndWait({
-          type: 'ROOM_JOIN',
-          componentId: this.componentId,
-          roomId,
-          data: { initialState: room.state },
-          timestamp: Date.now(),
-        }, 5000)
+        // initialState vai em payload.initialState (antes ia em `data` e era ignorado).
+        const response = await this.sendMessageAndWait(
+          clientMessages.roomJoin(this.componentId, roomId, initialState),
+          5000,
+        )
 
-        if (response?.success) {
+        // O servidor responde ROOM_JOINED com payload { roomId, state } (sem `success`).
+        const joinResult = readRoomJoinResponse(response)
+        if (joinResult.joined) {
           // Re-resolve: the room could have been recreated while we awaited.
           const current = getRoom()
           current.joined = true
-          if (response.state) current.state = response.state
+          // Estado vindo do servidor; a forma é a declarada pelo consumidor (TState).
+          if (joinResult.state) current.state = joinResult.state as TState
         }
       },
 
@@ -448,12 +470,7 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
         const room = getRoom()
         if (!this.componentId || !room.joined) return
 
-        await this.sendMessageAndWait({
-          type: 'ROOM_LEAVE',
-          componentId: this.componentId,
-          roomId,
-          timestamp: Date.now(),
-        }, 5000)
+        await this.sendMessageAndWait(clientMessages.roomLeave(this.componentId, roomId), 5000)
 
         // Only flip joined state. Handlers live in this.roomHandlers and must
         // survive leave/rejoin cycles — the consumer controls their lifetime
@@ -463,14 +480,8 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
 
       emit: <K extends keyof TEvents>(event: K, data: TEvents[K]) => {
         if (!this.componentId) return
-        this.sendMessage({
-          type: 'ROOM_EMIT',
-          componentId: this.componentId,
-          roomId,
-          event: event as string,
-          data,
-          timestamp: Date.now(),
-        })
+        // O servidor lê payload.event / payload.data (antes iam no topo e eram recusados).
+        fireAndForget(this.sendMessage(clientMessages.roomEmit(this.componentId, roomId, String(event), data)))
       },
 
       on: <K extends keyof TEvents>(event: K, handler: EventHandler<TEvents[K]>): Unsubscribe => {
@@ -494,14 +505,10 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       setState: (updates: Partial<TState>) => {
         if (!this.componentId) return
         const room = getRoom()
-        room.state = deepMerge(room.state as Record<string, any>, updates as Record<string, any>) as TState
-        this.sendMessage({
-          type: 'ROOM_STATE_SET',
-          componentId: this.componentId,
-          roomId,
-          data: updates,
-          timestamp: Date.now(),
-        })
+        room.state = deepMerge(room.state, updates)
+        // O servidor lê payload.state (antes ia em `data` no topo e era recusado).
+        const state: Record<string, unknown> = isRecord(updates) ? updates : {}
+        fireAndForget(this.sendMessage(clientMessages.roomStateSet(this.componentId, roomId, state)))
       },
 
       removeAllListeners: (event?: keyof TEvents | string) => {
@@ -522,7 +529,8 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
     const proxied = wrapWithStateProxy(
       handle,
       () => getRoom().state,
-      (updates: Partial<TState>) => handle.setState(updates),
+      // Escrita via proxy (`room.campo = x`): as chaves são campos do estado da sala.
+      (updates) => handle.setState(updates as Partial<TState>),
     )
     this.handles.set(roomId, proxied as RoomHandle<TState, TEvents>)
     return proxied as RoomHandle<TState, TEvents>
@@ -594,8 +602,8 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
       return wrapWithStateProxy(
         proxyFn,
         () => this.getOrCreateRoom(defaultRoomId).state,
-        (updates: Partial<TState>) => defaultHandle.setState(updates),
-      ) as RoomProxy<TState, TEvents>
+        (updates) => defaultHandle.setState(updates as Partial<TState>),
+      )
     }
 
     return proxyFn
@@ -658,6 +666,17 @@ export class RoomManager<TState = any, TEvents extends Record<string, any> = Rec
     this.destroy()
     this.roomHandlers.clear()
   }
+}
+
+/** Frames de estado chegam como `{ state: mudanças }` ou só `mudanças`. */
+function extractStateChanges(data: unknown): Record<string, unknown> {
+  if (isRecord(data)) return isRecord(data.state) ? data.state : data
+  return {}
+}
+
+/** Envio sem espera: falha de rede aqui não deve virar unhandled rejection. */
+function fireAndForget(result: void | Promise<void>): void {
+  if (result instanceof Promise) result.catch(() => {})
 }
 
 export type { EventHandler, Unsubscribe }

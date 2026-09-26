@@ -7,6 +7,7 @@ export { LiveServer, type LiveServerOptions } from './server/LiveServer'
 
 // ===== LiveComponent Base Class =====
 export { LiveComponent, EMIT_OVERRIDE_KEY } from './component/LiveComponent'
+export type { ActionCaller } from './component/managers/ActionSecurityManager'
 
 // ===== Transport Types (for adapter authors) =====
 export type {
@@ -19,7 +20,15 @@ export type {
   HttpRouteDefinition,
   HttpRequest,
   HttpResponse,
+  RawHttpRoute,
 } from './transport/types'
+export { SseConnectionHub, SSE_SESSION_HEADER, DEFAULT_SSE_PATH, formatSseEvent } from './transport/sse'
+export { HttpPollingHub, DEFAULT_HTTP_POLLING_PATH } from './transport/http-polling'
+export type { HttpPollingTransportOptions, HttpPollFrame, HttpPollResponse } from './transport/http-polling'
+export { LIVE_SESSION_HEADER } from './transport/http-common'
+export type { SseTransportOptions } from './transport/sse'
+export { nodeToFetchRequest, writeFetchResponse, handleNodeWithFetch } from './transport/node-bridge'
+export type { NodeRequestLike, NodeResponseLike } from './transport/node-bridge'
 export { queueWsMessage, sendImmediate, sendBinaryImmediate, getBatcherStats, setResyncHandler } from './transport/WsSendBatcher'
 
 // ===== Protocol Messages =====
@@ -44,8 +53,16 @@ export type {
   HybridState,
   HybridComponentOptions,
   WebSocketMessage,
+  LiveMessageType,
+  ClientMessage,
+  ClientMessageOf,
+  ClientMessageType,
+  ClientMessagePayloads,
+  ClientMessageEnvelope,
+  UntrustedFields,
 } from './protocol/messages'
 export { encodeBinaryChunk, decodeBinaryChunk } from './protocol/binary'
+export { parseClientMessage } from './protocol/validation'
 export { PROTOCOL_VERSION, DEFAULT_WS_PATH, DEFAULT_CHUNK_SIZE } from './protocol/constants'
 
 // ===== Auth System =====

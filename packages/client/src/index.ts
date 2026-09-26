@@ -11,6 +11,27 @@
 
 // Connection
 export { LiveConnection } from './connection'
+export {
+  WebSocketClientTransport,
+  SseClientTransport,
+  SseParser,
+  HttpPollingClientTransport,
+  SSE_SESSION_HEADER,
+  createClientTransport,
+  resolveTransportEndpoints,
+  resolveTransportChain,
+} from './transports'
+export type {
+  ClientTransport,
+  ClientTransportHandlers,
+  ClientTransportKind,
+  ClientTransportFactory,
+  ClientTransportOption,
+  ClientTransportMode,
+  ClientTransportEndpoints,
+  SseClientTransportOptions,
+  HttpPollingClientTransportOptions,
+} from './transports'
 export type {
   LiveAuthOptions,
   LiveClientAuth,
@@ -20,6 +41,35 @@ export type {
 
 // ID Generation
 export { generateId } from './generateId'
+
+// Protocolo tipado (mensagens cliente → servidor + leitura de respostas)
+export {
+  clientMessages,
+  isRecord,
+  isSignedState,
+  toRecord,
+  readMountResult,
+  readRehydrateResult,
+  readStateUpdate,
+  readStateDelta,
+  readStateRehydrated,
+  readStateSignature,
+  readBroadcast,
+  readErrorMessage,
+  readAuthPayload,
+  readRoomJoinResponse,
+} from './protocol'
+export type {
+  OutgoingClientMessage,
+  OutgoingMessageOf,
+  OutgoingMessageType,
+  OutgoingEnvelope,
+  LiveOutgoingMessage,
+  HeartbeatMessage,
+  MountPayload,
+  RehydratePayload,
+  MountResult,
+} from './protocol'
 
 // Component Handle (vanilla JS equivalent of Live.use)
 export { LiveComponentHandle } from './component'
@@ -32,6 +82,8 @@ export type {
   RoomServerMessage,
   RoomHandle,
   RoomProxy,
+  InferRoomEvents,
+  InferRoomState,
   RoomManagerOptions,
   EventHandler,
   Unsubscribe,
@@ -55,6 +107,8 @@ export {
   persistState,
   getPersistedState,
   clearPersistedState,
+  getRehydratableState,
+  REHYDRATE_MAX_AGE,
 } from './persistence'
 export type { PersistedState } from './persistence'
 
@@ -119,9 +173,9 @@ export interface UseLiveOptions {
   debug?: boolean
 }
 
-export interface UseLiveHandle<TState extends Record<string, any> = Record<string, any>> {
+export interface UseLiveHandle<TState extends object = Record<string, unknown>> {
   /** Call a server action */
-  call: <R = any>(action: string, payload?: Record<string, any>) => Promise<R>
+  call: <R = unknown>(action: string, payload?: unknown) => Promise<R>
   /** Subscribe to state changes. Returns unsubscribe function. */
   on: (callback: (state: TState, delta: Partial<TState> | null) => void) => () => void
   /** Subscribe to errors. Returns unsubscribe function. */
@@ -164,7 +218,7 @@ export interface UseLiveHandle<TState extends Record<string, any> = Record<strin
  * counter.call('increment')
  * ```
  */
-export function useLive<TState extends Record<string, any> = Record<string, any>>(
+export function useLive<TState extends object = Record<string, unknown>>(
   componentName: string,
   initialState: TState,
   options: UseLiveOptions = {},

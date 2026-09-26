@@ -7,7 +7,8 @@ export default defineConfig([
     target: 'es2022',
     dts: true,
     clean: true,
-    banner: { js: '#!/usr/bin/env node' },
+    // o shebang vem do próprio src/inspector.ts (esbuild preserva); um banner
+    // aqui duplicava a linha e o bin quebrava com SyntaxError.
     splitting: false,
   },
   {

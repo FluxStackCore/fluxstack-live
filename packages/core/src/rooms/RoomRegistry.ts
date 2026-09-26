@@ -60,7 +60,7 @@ export class RoomRegistry {
    */
   static isLiveRoomClass(cls: unknown): cls is LiveRoomClass {
     if (typeof cls !== 'function' || !cls.prototype) return false
-    if (typeof (cls as any).roomName !== 'string') return false
+    if (typeof (cls as { roomName?: unknown }).roomName !== 'string') return false
     let proto = Object.getPrototypeOf(cls.prototype)
     while (proto) {
       if (proto.constructor === LiveRoom) return true

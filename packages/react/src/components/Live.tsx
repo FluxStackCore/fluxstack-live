@@ -7,28 +7,32 @@
 //   const form = Live.use(LiveForm)
 //   const form = Live.use(LiveForm, { initialState: { name: 'John' } })
 
+import type { ServerRoomProxy } from '@fluxstack/live'
 import { useLiveComponent } from '../hooks/useLiveComponent'
 import type { UseLiveComponentOptions, LiveProxyWithBroadcasts } from '../hooks/useLiveComponent'
 
 // ===== Type Inference from Server Class =====
 
-type ExtractDefaultState<T> = T extends { defaultState: infer S }
-  ? S extends Record<string, any> ? S : Record<string, any>
-  : Record<string, any>
+/** Construtor de qualquer aridade (`never[]` aceita qualquer lista de parâmetros). */
+type Ctor<I = object> = new (...args: never[]) => I
 
-type ExtractState<T> = T extends { new(...args: any[]): { state: infer S } }
-  ? S extends Record<string, any> ? S : Record<string, any>
+type ExtractDefaultState<T> = T extends { defaultState: infer S }
+  ? S extends object ? S : Record<string, unknown>
+  : Record<string, unknown>
+
+type ExtractState<T> = T extends Ctor<{ state: infer S }>
+  ? S extends object ? S : Record<string, unknown>
   : ExtractDefaultState<T>
 
 type ExtractPublicActionNames<T> = T extends { publicActions: readonly (infer A)[] }
   ? A extends string ? A : never
   : never
 
-type ExtractActions<T> = T extends { new(...args: any[]): infer Instance }
+type ExtractActions<T> = T extends Ctor<infer Instance>
   ? T extends { publicActions: readonly string[] }
     ? {
         [K in keyof Instance as K extends ExtractPublicActionNames<T>
-          ? Instance[K] extends (...args: any[]) => Promise<any> ? K : never
+          ? Instance[K] extends (...args: never[]) => Promise<unknown> ? K : never
           : never
         ]: Instance[K]
       }
@@ -36,31 +40,39 @@ type ExtractActions<T> = T extends { new(...args: any[]): infer Instance }
   : Record<string, never>
 
 /** Extract TRoom from LiveComponent<TState, TPrivate, TRoom> via the $room getter */
-type ExtractRoomState<T> = T extends { new(...args: any[]): { $room: { state: infer S } } }
-  ? S : any
+type ExtractRoomState<T> = T extends Ctor<{ $room: { state: infer S } }>
+  ? S : Record<string, unknown>
 
-type ExtractRoomEvents<T> = T extends { new(...args: any[]): { $room: { emit: <K extends keyof infer E>(event: K, data: any) => any } } }
-  ? E extends Record<string, any> ? E : Record<string, any>
-  : Record<string, any>
+type ExtractRoomEvents<T> = T extends Ctor<{ $room: ServerRoomProxy<infer _S, infer E> }>
+  ? E
+  : Record<string, unknown>
 
 // ===== Options =====
 
-interface LiveUseOptions<TState> extends UseLiveComponentOptions {
+interface LiveUseOptions<TState> extends UseLiveComponentOptions<TState> {
   initialState?: Partial<TState>
+}
+
+/** O que `Live.use()` aceita: a classe do componente do servidor. */
+type LiveComponentClassLike = Ctor & {
+  defaultState?: object
+  componentName: string
+  publicActions?: readonly string[]
 }
 
 // ===== Hook =====
 
 function useLive<
-  T extends { new(...args: any[]): any; defaultState?: Record<string, any>; componentName: string; publicActions?: readonly string[] },
-  TBroadcasts extends Record<string, any> = Record<string, any>
+  T extends LiveComponentClassLike,
+  TBroadcasts extends object = Record<string, unknown>
 >(
   ComponentClass: T,
   options?: LiveUseOptions<ExtractState<T>>,
 ): LiveProxyWithBroadcasts<ExtractState<T>, ExtractActions<T>, TBroadcasts, ExtractRoomState<T>, ExtractRoomEvents<T>> {
   const componentName = ComponentClass.componentName
-  const defaultState = (ComponentClass as any).defaultState || {}
+  const defaultState = ComponentClass.defaultState ?? {}
   const { initialState, ...restOptions } = options || {}
+  // defaultState da classe + overrides: forma de ExtractState<T>.
   const mergedState = { ...defaultState, ...initialState } as ExtractState<T>
 
   return useLiveComponent<ExtractState<T>, ExtractActions<T>, TBroadcasts, ExtractRoomState<T>, ExtractRoomEvents<T>>(

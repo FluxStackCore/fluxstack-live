@@ -251,7 +251,12 @@ function needBytes(buf: Uint8Array, offset: number, need: number, type: string):
   }
 }
 
-function decodeAt(buf: Uint8Array, offset: number): { value: unknown; offset: number } {
+/** Profundidade máxima de aninhamento aceita (frames maliciosos estouram a pilha). */
+export const MSGPACK_MAX_DEPTH = 64
+/** Chaves que nunca viram propriedade (prototype pollution). */
+const FORBIDDEN_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+function decodeAt(buf: Uint8Array, offset: number, depth = 0): { value: unknown; offset: number } {
   needBytes(buf, offset, 1, 'type byte')
 
   const byte = buf[offset]
@@ -261,10 +266,10 @@ function decodeAt(buf: Uint8Array, offset: number): { value: unknown; offset: nu
   if (byte < 0x80) return { value: byte, offset: offset + 1 }
 
   // Fixmap (0x80 - 0x8f)
-  if (byte >= 0x80 && byte <= 0x8f) return decodeMap(buf, offset + 1, byte & 0x0f)
+  if (byte >= 0x80 && byte <= 0x8f) return decodeMap(buf, offset + 1, byte & 0x0f, depth + 1)
 
   // Fixarray (0x90 - 0x9f)
-  if (byte >= 0x90 && byte <= 0x9f) return decodeArray(buf, offset + 1, byte & 0x0f)
+  if (byte >= 0x90 && byte <= 0x9f) return decodeArray(buf, offset + 1, byte & 0x0f, depth + 1)
 
   // Fixstr (0xa0 - 0xbf)
   if (byte >= 0xa0 && byte <= 0xbf) {
@@ -363,44 +368,59 @@ function decodeAt(buf: Uint8Array, offset: number): { value: unknown; offset: nu
     // array 16
     case 0xdc:
       needBytes(buf, offset + 1, 2, 'array16 count')
-      return decodeArray(buf, offset + 3, view.getUint16(offset + 1, false))
+      return decodeArray(buf, offset + 3, view.getUint16(offset + 1, false), depth + 1)
     // array 32
     case 0xdd:
       needBytes(buf, offset + 1, 4, 'array32 count')
-      return decodeArray(buf, offset + 5, view.getUint32(offset + 1, false))
+      return decodeArray(buf, offset + 5, view.getUint32(offset + 1, false), depth + 1)
 
     // map 16
     case 0xde:
       needBytes(buf, offset + 1, 2, 'map16 count')
-      return decodeMap(buf, offset + 3, view.getUint16(offset + 1, false))
+      return decodeMap(buf, offset + 3, view.getUint16(offset + 1, false), depth + 1)
     // map 32
     case 0xdf:
       needBytes(buf, offset + 1, 4, 'map32 count')
-      return decodeMap(buf, offset + 5, view.getUint32(offset + 1, false))
+      return decodeMap(buf, offset + 5, view.getUint32(offset + 1, false), depth + 1)
   }
 
   // Unknown type — fail loudly instead of silently returning null
   throw new TypeError(`[msgpackDecode] Unknown type byte 0x${byte.toString(16).padStart(2, '0')} at offset ${offset}`)
 }
 
-function decodeArray(buf: Uint8Array, offset: number, count: number): { value: unknown[]; offset: number } {
+function checkContainer(buf: Uint8Array, offset: number, count: number, perItem: number, depth: number, type: string): void {
+  if (depth > MSGPACK_MAX_DEPTH) {
+    throw new RangeError(`[msgpackDecode] Nesting too deep (max ${MSGPACK_MAX_DEPTH})`)
+  }
+  // Cada item ocupa pelo menos 1 byte: uma contagem maior que o restante do
+  // buffer é mentira — evita alocar `new Array(4e9)` a partir de 5 bytes.
+  if (count * perItem > buf.length - offset) {
+    throw new RangeError(`[msgpackDecode] ${type} count ${count} exceeds remaining ${buf.length - offset} bytes`)
+  }
+}
+
+function decodeArray(buf: Uint8Array, offset: number, count: number, depth = 1): { value: unknown[]; offset: number } {
+  checkContainer(buf, offset, count, 1, depth, 'array')
   const arr: unknown[] = new Array(count)
   for (let i = 0; i < count; i++) {
-    const result = decodeAt(buf, offset)
+    const result = decodeAt(buf, offset, depth)
     arr[i] = result.value
     offset = result.offset
   }
   return { value: arr, offset }
 }
 
-function decodeMap(buf: Uint8Array, offset: number, count: number): { value: Record<string, unknown>; offset: number } {
+function decodeMap(buf: Uint8Array, offset: number, count: number, depth = 1): { value: Record<string, unknown>; offset: number } {
+  checkContainer(buf, offset, count, 2, depth, 'map')
   const obj: Record<string, unknown> = {}
   for (let i = 0; i < count; i++) {
-    const keyResult = decodeAt(buf, offset)
+    const keyResult = decodeAt(buf, offset, depth)
     offset = keyResult.offset
-    const valResult = decodeAt(buf, offset)
+    const valResult = decodeAt(buf, offset, depth)
     offset = valResult.offset
-    obj[String(keyResult.value)] = valResult.value
+    const key = String(keyResult.value)
+    if (FORBIDDEN_KEYS.has(key)) continue
+    obj[key] = valResult.value
   }
   return { value: obj, offset }
 }

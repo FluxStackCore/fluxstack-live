@@ -98,6 +98,8 @@ const {
   state,       // DeepReadonly<TState> - reactive, use in templates
   mounted,     // Ref<boolean> - component mounted on server
   mounting,    // Ref<boolean> - currently mounting
+  rehydrating, // Ref<boolean> - COMPONENT_REHYDRATE in flight
+  signedState, // Ref<SignedState | null> - latest server-signed state
   connected,   // Ref<boolean> - WebSocket connected
   error,       // Ref<string | null> - last error
   componentId, // Ref<string | null> - server-assigned ID
@@ -109,8 +111,16 @@ const {
   userId: 'user-123',
   autoMount: true,    // Mount when connected (default: true)
   debug: false,       // Log to console (default: false)
+  persistState: true, // Rehydrate after reconnect/reload (default: true)
+  onRehydrate: () => {},
 })
 ```
+
+After a reconnection the composable sends `COMPONENT_REHYDRATE` with the latest
+`signedState` (from mount, `STATE_REHYDRATED` or the throttled `STATE_SIGNATURE`
+renewal) and continues from the current state; if the server refuses it, it falls back
+to a normal mount. With `persistState` (default) the token is also kept in
+`localStorage` (same key/TTL as the React hook) to survive a page reload.
 
 `useLiveComponent` is an alias for `useLive`.
 

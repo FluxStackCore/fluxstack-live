@@ -7,6 +7,10 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest'
 import Redis from 'ioredis'
 import { RedisClusterAdapter } from '../RedisClusterAdapter'
+import { redisAvailable } from './redis-available'
+
+/** Sem Redis local: pula. Na CI: falha (ver redis-available.ts). */
+const REDIS_UP = await redisAvailable()
 
 const REDIS_PORT = 16379
 const REDIS_HOST = '127.0.0.1'
@@ -15,7 +19,7 @@ function wait(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-describe('RedisClusterAdapter', () => {
+describe.skipIf(!REDIS_UP)('RedisClusterAdapter', () => {
   let redis: Redis
   let adapter: RedisClusterAdapter
 

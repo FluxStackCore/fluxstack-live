@@ -7,6 +7,8 @@
 //   1. Auto-infer: created from initialState (types inferred via typeof)
 //   2. Explicit schema: field→type map for optimized wire sizes
 
+import { toRecord } from './protocol'
+
 const _dec = new TextDecoder()
 
 const TYPE_UINT8    = 0
@@ -58,13 +60,13 @@ interface FieldDef {
  * )
  * ```
  */
-export class BinaryStateCodec<TState = Record<string, any>> {
+export class BinaryStateCodec<TState extends object = Record<string, unknown>> {
   private readonly _fields: FieldDef[]
   private readonly _bitmaskBytes: number
 
   constructor(defaultState: TState, schema?: Record<string, BinaryFieldType>) {
     this._fields = []
-    const state = defaultState as Record<string, any>
+    const state = toRecord(defaultState)
 
     for (const key of Object.keys(state)) {
       if (schema && key in schema) {
@@ -88,7 +90,7 @@ export class BinaryStateCodec<TState = Record<string, any>> {
 
   decodeDelta(buf: Uint8Array): Partial<TState> {
     const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
-    const result: Record<string, any> = {}
+    const result: Record<string, unknown> = {}
     let offset = this._bitmaskBytes
 
     for (let i = 0; i < this._fields.length; i++) {
@@ -122,6 +124,7 @@ export class BinaryStateCodec<TState = Record<string, any>> {
       }
     }
 
+    // Campos decodificados pelo schema derivado de TState (mesmas chaves e tipos primitivos).
     return result as Partial<TState>
   }
 }

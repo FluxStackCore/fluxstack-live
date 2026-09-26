@@ -16,7 +16,16 @@ export const DEFAULT_RATE_LIMIT_MAX_TOKENS = 100
 export const DEFAULT_RATE_LIMIT_REFILL_RATE = 50
 
 /** Maximum incoming WebSocket message size (100MB) */
-export const MAX_MESSAGE_SIZE = 100 * 1024 * 1024
+/**
+ * Tamanho máximo (bytes/caracteres) de um frame recebido. Era 100MB — suficiente
+ * para um único cliente consumir muita memória com poucos frames. Uploads são
+ * fatiados em chunks de 64KB, então 4MB sobra. Configurável via
+ * `LiveServerOptions.maxMessageSize`.
+ */
+export const MAX_MESSAGE_SIZE = 4 * 1024 * 1024
+/** Limites aceitos para o chunkSize de upload declarado pelo cliente. */
+export const MIN_UPLOAD_CHUNK_SIZE = 1
+export const MAX_UPLOAD_CHUNK_SIZE = 1024 * 1024
 
 /** Maximum room state size (10MB) */
 export const MAX_ROOM_STATE_SIZE = 10 * 1024 * 1024

@@ -6,7 +6,7 @@
 // (`@fluxstack/live*`) and project plugins (free names) are always trusted.
 import { describe, it, expect } from 'vitest'
 import { PluginRegistry } from '../runtime/registry'
-import type { FluxStackPlugin } from '../types'
+import type { Plugin as FluxStackPlugin } from '../types/plugin'
 
 function plugin(name: string, extra: Partial<FluxStackPlugin> = {}): FluxStackPlugin {
   return { name, ...extra } as FluxStackPlugin

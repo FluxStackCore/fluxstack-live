@@ -20,7 +20,7 @@ export interface IClusterAdapter {
   // ── State Mirror ──────────────────────────────────────
 
   /** Save component state to the shared store. */
-  saveState(componentId: string, componentName: string, state: any): Promise<void>
+  saveState(componentId: string, componentName: string, state: unknown): Promise<void>
 
   /** Load component state from the shared store. */
   loadState(componentId: string): Promise<ClusterComponentState | null>
@@ -31,7 +31,7 @@ export interface IClusterAdapter {
   // ── State Delta Pub/Sub ───────────────────────────────
 
   /** Publish a state delta to all server instances. */
-  publishDelta(componentId: string, componentName: string, delta: any): Promise<void>
+  publishDelta(componentId: string, componentName: string, delta: unknown): Promise<void>
 
   /** Register handler for incoming state deltas from other instances. */
   onDelta(handler: ClusterDeltaHandler): void
@@ -56,10 +56,10 @@ export interface IClusterAdapter {
   onOwnershipLost(handler: (componentName: string) => void): void
 
   /** Save singleton state keyed by componentName (survives owner crash + claim expiry). */
-  saveSingletonState(componentName: string, state: any): Promise<void>
+  saveSingletonState(componentName: string, state: unknown): Promise<void>
 
   /** Load the last known singleton state by componentName (for failover recovery). */
-  loadSingletonState(componentName: string): Promise<any | null>
+  loadSingletonState(componentName: string): Promise<unknown>
 
   // ── Action Forwarding ─────────────────────────────────
 
@@ -81,7 +81,8 @@ export interface IClusterAdapter {
 /** State stored in the shared store for a component. */
 export interface ClusterComponentState {
   componentName: string
-  state: any
+  /** State serializado do componente (JSON). Quem lê valida a forma. */
+  state: unknown
   instanceId: string
   updatedAt: number
 }
@@ -99,8 +100,17 @@ export interface ClusterActionRequest {
   componentId: string
   componentName: string
   action: string
-  payload: any
+  /** Payload da action vindo do cliente original (não validado — o componente valida). */
+  payload: unknown
   requestId: string
+  /** connectionId de quem chamou (para rate limit por conexão no owner). */
+  callerConnectionId?: string
+  /**
+   * Sessão autenticada de quem chamou. O owner autoriza a action com ela —
+   * sem isso a chamada é tratada como anônima. Instâncias do cluster confiam
+   * umas nas outras (canal Redis privado).
+   */
+  callerSession?: import('../auth/types').LiveAuthSession
 }
 
 /** Result of a singleton claim attempt. */
@@ -108,13 +118,13 @@ export interface ClusterSingletonClaim {
   /** Whether the claim was successful. */
   claimed: boolean
   /** If claimed and previous state exists (failover recovery), the recovered state. */
-  recoveredState?: any
+  recoveredState?: unknown
 }
 
 /** Response from a forwarded action. */
 export interface ClusterActionResponse {
   success: boolean
-  result?: any
+  result?: unknown
   error?: string
   requestId: string
 }
@@ -123,6 +133,6 @@ export interface ClusterActionResponse {
 export type ClusterDeltaHandler = (
   componentId: string,
   componentName: string,
-  delta: any,
+  delta: unknown,
   sourceInstanceId: string
 ) => void

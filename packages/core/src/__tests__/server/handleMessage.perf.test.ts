@@ -143,7 +143,7 @@ function bench(name: string, fn: () => any, iterations = N) {
   return performance.now() - start
 }
 
-describe('handleMessage — performance: old vs new', () => {
+describe('handleMessage — performance: old vs new', { timeout: 30_000 }, () => {
 
   it('simple action (empty payload)', () => {
     const old = bench('old', () => oldHandleMessage(simpleAction))

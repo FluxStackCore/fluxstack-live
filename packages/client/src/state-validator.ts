@@ -1,5 +1,7 @@
 // @fluxstack/live-client - State Validation Utilities
 
+import { isRecord } from './protocol'
+
 export interface StateValidation {
   checksum: string
   version: number
@@ -9,8 +11,8 @@ export interface StateValidation {
 
 export interface StateConflict {
   property: string
-  clientValue: any
-  serverValue: any
+  clientValue: unknown
+  serverValue: unknown
   timestamp: number
   resolved: boolean
 }
@@ -22,8 +24,9 @@ export interface HybridState<T> {
 }
 
 export class StateValidator {
-  static generateChecksum(state: any): string {
-    const json = JSON.stringify(state, Object.keys(state).sort())
+  static generateChecksum(state: unknown): string {
+    const keys = isRecord(state) ? Object.keys(state).sort() : undefined
+    const json = JSON.stringify(state, keys) ?? ''
     let hash = 0
     for (let i = 0; i < json.length; i++) {
       const char = json.charCodeAt(i)
@@ -34,7 +37,7 @@ export class StateValidator {
   }
 
   static createValidation(
-    state: any,
+    state: unknown,
     source: 'client' | 'server' | 'mount' = 'client',
   ): StateValidation {
     return {
@@ -53,14 +56,14 @@ export class StateValidator {
     const conflicts: StateConflict[] = []
     // Guard against null/undefined — Object.keys throws on those, and the
     // hybrid-state path can hand us either side as null (mount-before-sync).
-    const clientKeys = (clientState && typeof clientState === 'object') ? Object.keys(clientState as any) : []
-    const serverKeys = (serverState && typeof serverState === 'object') ? Object.keys(serverState as any) : []
-    const allKeys = Array.from(new Set([...clientKeys, ...serverKeys]))
+    const client: Record<string, unknown> = isRecord(clientState) ? clientState : {}
+    const server: Record<string, unknown> = isRecord(serverState) ? serverState : {}
+    const allKeys = Array.from(new Set([...Object.keys(client), ...Object.keys(server)]))
 
     for (const key of allKeys) {
       if (excludeFields.includes(key)) continue
-      const clientValue = (clientState as any)?.[key]
-      const serverValue = (serverState as any)?.[key]
+      const clientValue = client[key]
+      const serverValue = server[key]
       if (JSON.stringify(clientValue) !== JSON.stringify(serverValue)) {
         conflicts.push({
           property: key,
@@ -81,28 +84,29 @@ export class StateValidator {
     conflicts: StateConflict[],
     strategy: 'client' | 'server' | 'smart' = 'smart',
   ): T {
-    const merged = { ...clientState }
+    const merged: Record<string, unknown> = isRecord(clientState) ? { ...clientState } : {}
 
     for (const conflict of conflicts) {
       switch (strategy) {
         case 'client':
           break
         case 'server':
-          (merged as any)[conflict.property] = conflict.serverValue
+          merged[conflict.property] = conflict.serverValue
           break
         case 'smart':
           if (conflict.property === 'lastUpdated') {
-            (merged as any)[conflict.property] = conflict.serverValue
+            merged[conflict.property] = conflict.serverValue
           } else if (typeof conflict.serverValue === 'number' && typeof conflict.clientValue === 'number') {
-            (merged as any)[conflict.property] = Math.max(conflict.serverValue, conflict.clientValue)
+            merged[conflict.property] = Math.max(conflict.serverValue, conflict.clientValue)
           } else {
-            (merged as any)[conflict.property] = conflict.serverValue
+            merged[conflict.property] = conflict.serverValue
           }
           break
       }
     }
 
-    return merged
+    // Mesmas chaves de T (conflitos vêm das chaves dos dois estados).
+    return merged as T
   }
 
   static validateState<T>(hybridState: HybridState<T>): boolean {

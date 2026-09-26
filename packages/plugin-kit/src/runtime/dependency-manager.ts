@@ -423,7 +423,10 @@ export class PluginDependencyManager {
   }
 
   private getPluginNameFromPath(pluginPath: string): string {
-    return pluginPath.split('/').pop() || 'unknown'
+    // Aceita '/' e '\' (caminhos Windows) e ignora barra final: antes, no
+    // Windows, o caminho inteiro virava o "nome" e a detecção de conflito
+    // entre plugins comparava chaves erradas.
+    return pluginPath.split(/[\\/]+/).filter(Boolean).pop() || 'unknown'
   }
 
   getStats() {

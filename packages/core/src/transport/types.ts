@@ -4,6 +4,7 @@
 // Each adapter (Elysia, Express, Fastify, etc.) implements LiveTransport.
 
 import type { LiveAuthContext } from '../auth/types'
+import type { AnyLiveComponent } from '../component/LiveComponent'
 
 // ===== Generic WebSocket (replaces FluxStackWebSocket) =====
 
@@ -30,7 +31,8 @@ export interface GenericWebSocket {
  */
 export interface LiveWSData {
   connectionId: string
-  components: Map<string, any> // Map<string, LiveComponent>
+  /** Componentes montados por esta conexão (inclui singletons compartilhados). */
+  components: Map<string, AnyLiveComponent>
   subscriptions: Set<string>
   connectedAt: Date
   userId?: string
@@ -61,6 +63,12 @@ export interface LiveTransport {
   registerWebSocket(config: WebSocketConfig): void | Promise<void>
   /** Register HTTP monitoring/debug routes */
   registerHttpRoutes(routes: HttpRouteDefinition[]): void | Promise<void>
+  /**
+   * Registra rotas HTTP "cruas" com Request/Response padrão da web (Fetch API).
+   * Necessário para transportes baseados em HTTP, como SSE (`LiveServer({ sse })`).
+   * O corpo da request NÃO pode ter sido consumido pelo framework.
+   */
+  registerRawRoutes?(routes: RawHttpRoute[]): void | Promise<void>
   /** Optional startup hook */
   start?(): void | Promise<void>
   /** Optional shutdown hook */
@@ -82,6 +90,15 @@ export interface WebSocketConfig {
   onClose(ws: GenericWebSocket, code: number, reason: string): void | Promise<void>
   /** Called on WebSocket error */
   onError?(ws: GenericWebSocket, error: Error): void
+}
+
+// ===== Raw HTTP (Fetch API) =====
+
+/** Rota HTTP com Request/Response padrão — usada por transportes HTTP (SSE). */
+export interface RawHttpRoute {
+  method: 'GET' | 'POST'
+  path: string
+  handler: (request: Request) => Response | Promise<Response>
 }
 
 // ===== HTTP Route Abstraction =====

@@ -10,8 +10,8 @@
 // "createContext is not a function".
 
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react'
-import type { LiveAuthOptions, LiveConnectionOptions, LiveClientAuth } from '@fluxstack/live-client'
-import type { WebSocketMessage, WebSocketResponse } from '@fluxstack/live'
+import type { LiveAuthOptions, LiveConnectionOptions, LiveClientAuth, LiveOutgoingMessage } from '@fluxstack/live-client'
+import type { WebSocketResponse } from '@fluxstack/live'
 import { acquire as poolAcquire, release as poolRelease, poolKey } from './connectionPool'
 
 export interface LiveComponentsContextValue {
@@ -20,10 +20,12 @@ export interface LiveComponentsContextValue {
   error: string | null
   connectionId: string | null
   authenticated: boolean
+  /** Transporte em uso ('websocket' | 'sse' | custom) — null quando desconectado */
+  transport: string | null
   /** Auth context with session data from the server */
   $auth: LiveClientAuth
-  sendMessage: (message: WebSocketMessage) => Promise<void>
-  sendMessageAndWait: (message: WebSocketMessage, timeout?: number) => Promise<WebSocketResponse>
+  sendMessage: (message: LiveOutgoingMessage) => Promise<void>
+  sendMessageAndWait: (message: LiveOutgoingMessage, timeout?: number) => Promise<WebSocketResponse>
   sendBinaryAndWait: (data: ArrayBuffer, requestId: string, timeout?: number) => Promise<WebSocketResponse>
   registerComponent: (componentId: string, callback: (message: WebSocketResponse) => void) => () => void
   registerBinaryHandler: (componentId: string, callback: (payload: Uint8Array) => void) => () => void
@@ -50,9 +52,14 @@ export function LiveComponentsProvider({
   children,
   url,
   auth,
+  transport = 'websocket',
+  sseUrl,
+  httpUrl,
   autoConnect = true,
   reconnectInterval = 1000,
-  maxReconnectAttempts = 5,
+  // undefined = infinito (padrão do LiveConnection). Antes era 5 aqui, o que
+  // contrariava o comportamento documentado de reconexão infinita.
+  maxReconnectAttempts,
   heartbeatInterval = 30000,
   debug = false,
 }: LiveComponentsProviderProps) {
@@ -70,6 +77,7 @@ export function LiveComponentsProvider({
   const [error, setError] = useState<string | null>(null)
   const [connectionId, setConnectionId] = useState<string | null>(null)
   const [authenticated, setAuthenticated] = useState(false)
+  const [activeTransport, setActiveTransport] = useState<string | null>(null)
   const [$auth, set$auth] = useState<LiveClientAuth>({ authenticated: false, session: null })
 
   // Create connection in useEffect — SSR-safe (useEffect is skipped on the server)
@@ -83,7 +91,7 @@ export function LiveComponentsProvider({
     let localUnsub: (() => void) | null = null
     let localLoadCleanup: (() => void) | null = null
 
-    const key = poolKey({ url, auth })
+    const key = poolKey({ url, auth, transport, sseUrl, httpUrl })
     let acquired = false
 
     import('@fluxstack/live-client').then(({ LiveConnection }) => {
@@ -97,6 +105,9 @@ export function LiveComponentsProvider({
       const conn = poolAcquire(key, () => new LiveConnection({
         url,
         auth,
+        transport,
+        sseUrl,
+        httpUrl,
         autoConnect: false,
         reconnectInterval,
         maxReconnectAttempts,
@@ -122,6 +133,7 @@ export function LiveComponentsProvider({
         setError(state.error)
         setConnectionId(state.connectionId)
         setAuthenticated(state.authenticated)
+        setActiveTransport(state.connected ? state.transport : null)
         set$auth(state.auth)
       }
       localUnsub = conn.onStateChange(applyState)
@@ -164,13 +176,13 @@ export function LiveComponentsProvider({
   // Helper to get current connection (may be null during SSR or before useEffect runs)
   const getConn = () => connectionRef.current
 
-  const sendMessage = useCallback(async (message: WebSocketMessage) => {
+  const sendMessage = useCallback(async (message: LiveOutgoingMessage) => {
     const conn = getConn()
     if (!conn) throw new Error('Not connected')
     return conn.sendMessage(message)
   }, [])
 
-  const sendMessageAndWait = useCallback(async (message: WebSocketMessage, timeout?: number) => {
+  const sendMessageAndWait = useCallback(async (message: LiveOutgoingMessage, timeout?: number) => {
     const conn = getConn()
     if (!conn) throw new Error('Not connected')
     return conn.sendMessageAndWait(message, timeout)
@@ -248,6 +260,7 @@ export function LiveComponentsProvider({
     error,
     connectionId,
     authenticated,
+    transport: activeTransport,
     $auth,
     sendMessage,
     sendMessageAndWait,
@@ -283,6 +296,7 @@ const SSR_NOOP_CONTEXT: LiveComponentsContextValue = {
   error: null,
   connectionId: null,
   authenticated: false,
+  transport: null,
   $auth: { authenticated: false, session: null },
   sendMessage: async () => {},
   sendMessageAndWait: async () => ({ success: false }) as WebSocketResponse,

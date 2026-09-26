@@ -28,10 +28,12 @@ export function worldToChunk(pos: Vec3, chunkSize: number): Vec3 {
   return [Math.floor(pos[0] / chunkSize), Math.floor(pos[1] / chunkSize), Math.floor(pos[2] / chunkSize)]
 }
 
+// Restrições `object` (e não `Record<string, unknown>`) para aceitar interfaces
+// sem index signature — `object` satisfaz a restrição do LiveRoom do core.
 export abstract class ChunkRoom<
-  TState extends Record<string, any> = Record<string, any>,
-  TMeta extends Record<string, any> = Record<string, any>,
-  TEvents extends Record<string, any> = Record<string, any>,
+  TState extends object = Record<string, unknown>,
+  TMeta extends object = Record<string, unknown>,
+  TEvents extends object = Record<string, unknown>,
 > extends SpatialLiveRoom<TState, TMeta, TEvents> {
   /**
    * Default chunk config. Subclasses can override `spatial` to change

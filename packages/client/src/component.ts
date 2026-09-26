@@ -10,12 +10,21 @@
 //   await counter.mount()
 //   await counter.call('increment')
 
-import type { WebSocketResponse } from '@fluxstack/live'
+import type { SignedState, WebSocketResponse } from '@fluxstack/live'
 import type { LiveConnection } from './connection'
+import {
+  clientMessages,
+  readErrorMessage,
+  readMountResult,
+  readStateDelta,
+  readStateSignature,
+  readStateUpdate,
+  toRecord,
+} from './protocol'
 
 // ===== Deep Merge (always-on, retrocompatible) =====
 
-function isPlainObject(v: unknown): v is Record<string, any> {
+function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
     && Object.getPrototypeOf(v) === Object.prototype
 }
@@ -28,22 +37,28 @@ function isPlainObject(v: unknown): v is Record<string, any> {
  * - Nested `null` is the deletion sentinel from `computeDeepDiff`.
  * - `undefined` is skipped — it never crosses the wire.
  */
-function deepMerge<T extends Record<string, any>>(target: T, source: Partial<T>, seen?: Set<object>): T {
-  return deepMergeImpl(target, source, 0, seen)
+function deepMerge<T extends object>(target: T, source: object, seen?: Set<object>): T {
+  // Deltas do servidor trazem chaves do próprio estado: o resultado mantém o tipo do alvo.
+  return deepMergeImpl(toRecord(target), toRecord(source), 0, seen) as T
 }
 
-function deepMergeImpl<T extends Record<string, any>>(target: T, source: Partial<T>, depth: number, seen?: Set<object>): T {
+function deepMergeImpl(
+  target: Record<string, unknown>,
+  source: Record<string, unknown>,
+  depth: number,
+  seen?: Set<object>,
+): Record<string, unknown> {
   if (!seen) seen = new Set()
-  if (seen.has(source as object)) return target
-  seen.add(source as object)
+  if (seen.has(source)) return target
+  seen.add(source)
 
-  const result = { ...target }
-  for (const key of Object.keys(source) as Array<keyof T>) {
+  const result: Record<string, unknown> = { ...target }
+  for (const key of Object.keys(source)) {
     const newVal = source[key]
     if (newVal === undefined) continue
     if (newVal === null) {
       if (depth === 0) {
-        result[key] = null as T[keyof T]
+        result[key] = null
       } else {
         delete result[key]
       }
@@ -51,15 +66,15 @@ function deepMergeImpl<T extends Record<string, any>>(target: T, source: Partial
     }
     const oldVal = result[key]
     if (isPlainObject(oldVal) && isPlainObject(newVal)) {
-      result[key] = deepMergeImpl(oldVal as any, newVal as any, depth + 1, seen) as T[keyof T]
+      result[key] = deepMergeImpl(oldVal, newVal, depth + 1, seen)
     } else {
-      result[key] = newVal as T[keyof T]
+      result[key] = newVal
     }
   }
   return result
 }
 
-export interface LiveComponentOptions<TState = Record<string, any>> {
+export interface LiveComponentOptions<TState extends object = Record<string, unknown>> {
   /** Initial state to merge with server defaults */
   initialState?: Partial<TState>
   /** Room to join on mount */
@@ -80,7 +95,7 @@ type ErrorCallback = (error: string) => void
  * Manages mount lifecycle, state sync, and action calling.
  * Framework-agnostic — works with vanilla JS, Vue, Svelte, etc.
  */
-export class LiveComponentHandle<TState extends Record<string, any> = Record<string, any>> {
+export class LiveComponentHandle<TState extends object = Record<string, unknown>> {
   private connection: LiveConnection
   private componentName: string
   private options: Required<Omit<LiveComponentOptions<TState>, 'initialState' | 'room' | 'userId'>> & {
@@ -94,6 +109,7 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
   private _mounted = false
   private _mounting = false
   private _error: string | null = null
+  private _signedState: SignedState | null = null
 
   private stateListeners = new Set<StateChangeCallback<TState>>()
   private errorListeners = new Set<ErrorCallback>()
@@ -147,6 +163,13 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
   /** Last error message */
   get error(): string | null { return this._error }
 
+  /**
+   * signedState mais recente emitido pelo servidor (mount, STATE_UPDATE ou a
+   * renovação throttled `STATE_SIGNATURE`). É o que se deve persistir e reenviar
+   * num `clientMessages.rehydrate(...)` para retomar do estado atual.
+   */
+  get signedState(): SignedState | null { return this._signedState }
+
   // ── Lifecycle ──
 
   /** Mount the component on the server */
@@ -161,33 +184,33 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
     this.log('Mounting...')
 
     try {
-      const response = await this.connection.sendMessageAndWait({
-        type: 'COMPONENT_MOUNT',
-        componentId: `mount-${this.componentName}`,
-        payload: {
+      const response = await this.connection.sendMessageAndWait(
+        clientMessages.mount(`mount-${this.componentName}`, {
           component: this.componentName,
-          props: this.options.initialState,
+          props: toRecord(this.options.initialState),
           room: this.options.room,
           userId: this.options.userId,
-        },
-      })
+        }),
+      )
 
       if (!response.success) {
         throw new Error(response.error || 'Mount failed')
       }
 
-      const result = (response as any).result
-      this._componentId = result.componentId
+      const result = readMountResult(response)
+      if (!result) throw new Error('Mount failed: malformed server response')
+      const componentId = result.componentId
+      this._componentId = componentId
       this._mounted = true
       this._mounting = false
 
-      // Merge initial state from server
-      const serverState = result.initialState || {}
-      this._state = { ...this._state, ...serverState }
+      // Merge initial state from server (as chaves são do estado do componente)
+      if (result.initialState) this._state = { ...this._state, ...result.initialState } as TState
+      if (result.signedState) this._signedState = result.signedState
 
       // Register for component messages (state updates, deltas, errors)
       this.unregisterComponent = this.connection.registerComponent(
-        this._componentId!,
+        componentId,
         (msg) => this.handleServerMessage(msg),
       )
 
@@ -209,10 +232,7 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
     this.log('Unmounting...')
 
     try {
-      await this.connection.sendMessage({
-        type: 'COMPONENT_UNMOUNT',
-        componentId: this._componentId,
-      })
+      await this.connection.sendMessage(clientMessages.unmount(this._componentId))
     } catch {
       // Ignore unmount errors (connection may already be closed)
     }
@@ -237,19 +257,16 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
    * Call an action on the server component.
    * Returns the action's return value.
    */
-  async call<R = any>(action: string, payload: Record<string, any> = {}): Promise<R> {
+  async call<R = unknown>(action: string, payload: unknown = {}): Promise<R> {
     if (!this._mounted || !this._componentId) {
       throw new Error(`Cannot call '${action}': component not mounted`)
     }
 
     this.log(`Calling action: ${action}`, payload)
 
-    const response = await this.connection.sendMessageAndWait({
-      type: 'CALL_ACTION',
-      componentId: this._componentId,
-      action,
-      payload,
-    })
+    const response = await this.connection.sendMessageAndWait(
+      clientMessages.callAction(this._componentId, action, payload),
+    )
 
     if (!response.success) {
       const errorMsg = response.error || `Action '${action}' failed`
@@ -258,7 +275,8 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
       throw new Error(errorMsg)
     }
 
-    return (response as any).result
+    // O retorno da action é definido pelo componente do servidor; o chamador escolhe R.
+    return response.result as R
   }
 
   /**
@@ -266,16 +284,12 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
    * Useful for high-frequency operations like game input where the
    * server doesn't need to send back a result.
    */
-  fire(action: string, payload: Record<string, any> = {}): void {
+  fire(action: string, payload: unknown = {}): void {
     if (!this._mounted || !this._componentId) return
 
-    this.connection.sendMessage({
-      type: 'CALL_ACTION',
-      componentId: this._componentId,
-      action,
-      payload,
-      expectResponse: false,
-    } as any)
+    this.connection
+      .sendMessage(clientMessages.callAction(this._componentId, action, payload, false))
+      .catch(() => {})
   }
 
   // ── State ──
@@ -296,16 +310,16 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
    * the decoder converts the raw payload into a delta object which is merged into state.
    * Returns an unsubscribe function.
    */
-  setBinaryDecoder(decoder: (buffer: Uint8Array) => Record<string, any>): () => void {
+  setBinaryDecoder(decoder: (buffer: Uint8Array) => Partial<TState>): () => void {
     if (!this._componentId) {
       throw new Error('Component must be mounted before setting binary decoder')
     }
 
     return this.connection.registerBinaryHandler(this._componentId, (payload: Uint8Array) => {
       try {
-        const delta = decoder(payload) as Partial<TState>
-        this._state = deepMerge(this._state, delta) as TState
-        this.notifyStateChange(this._state, delta as Partial<TState>)
+        const delta = decoder(payload)
+        this._state = deepMerge(this._state, delta)
+        this.notifyStateChange(this._state, delta)
       } catch (e) {
         console.error('Binary decode error:', e)
       }
@@ -326,25 +340,33 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
   private handleServerMessage(msg: WebSocketResponse): void {
     switch (msg.type) {
       case 'STATE_UPDATE': {
-        const newState = (msg as any).payload?.state
-        if (newState) {
-          this._state = deepMerge(this._state, newState)
+        const update = readStateUpdate(msg)
+        if (update) {
+          this._state = deepMerge(this._state, update.state)
+          if (update.signedState) this._signedState = update.signedState
           this.notifyStateChange(this._state, null)
         }
         break
       }
 
+      case 'STATE_SIGNATURE': {
+        const signed = readStateSignature(msg)
+        if (signed) this._signedState = signed
+        break
+      }
+
       case 'STATE_DELTA': {
-        const delta = (msg as any).payload?.delta
+        const delta = readStateDelta(msg)
         if (delta) {
           this._state = deepMerge(this._state, delta)
-          this.notifyStateChange(this._state, delta)
+          // Delta do servidor: chaves do estado deste componente.
+          this.notifyStateChange(this._state, delta as Partial<TState>)
         }
         break
       }
 
       case 'ERROR': {
-        const error = (msg as any).error || 'Unknown error'
+        const error = readErrorMessage(msg) || 'Unknown error'
         this._error = error
         this.notifyError(error)
         break
@@ -377,7 +399,7 @@ export class LiveComponentHandle<TState extends Record<string, any> = Record<str
     this._mounting = false
   }
 
-  private log(message: string, data?: any): void {
+  private log(message: string, data?: unknown): void {
     if (this.options.debug) {
       console.log(`[Live:${this.componentName}] ${message}`, data ?? '')
     }

@@ -5,24 +5,46 @@
 // via setLiveComponentContext(), called by LiveServer.start().
 
 import type { RoomEventBus } from '../rooms/RoomEventBus'
+import type { AnyLiveRoom } from '../rooms/LiveRoom'
+import type { GenericWebSocket } from '../transport/types'
+import type { LiveAuthSession } from '../auth/types'
 
 // ===== Room Manager Interface =====
 // Extracted to avoid circular dependency with LiveRoomManager
 
+/** Opções de sala definidas por quem entra primeiro (salas legadas). */
+export interface RoomJoinOptions {
+  deepDiff?: boolean
+  deepDiffDepth?: number
+  serverOnlyState?: boolean
+}
+
+/** Contexto repassado ao `onJoin` de uma LiveRoom. */
+export interface RoomJoinExtra {
+  userId?: string
+  session?: LiveAuthSession
+  /** Payload de `$room(Classe, id).join(payload)` — a sala valida. */
+  payload?: unknown
+}
+
+/** Resultado de `joinRoom`: state atual da sala ou recusa do `onJoin`. */
+export type RoomJoinOutcome<TState> = { state: TState; rejected?: false } | { rejected: true; reason: string }
+
 export interface LiveRoomManagerInterface {
-  joinRoom<TState = any>(componentId: string, roomId: string, ws: any, initialState?: TState, options?: { deepDiff?: boolean; deepDiffDepth?: number; serverOnlyState?: boolean }, joinContext?: { userId?: string; payload?: any }): Promise<{ state: TState; rejected?: false } | { rejected: true; reason: string }>
+  joinRoom<TState = Record<string, unknown>>(componentId: string, roomId: string, ws: GenericWebSocket, initialState?: TState, options?: RoomJoinOptions, joinContext?: RoomJoinExtra): Promise<RoomJoinOutcome<TState>>
   leaveRoom(componentId: string, roomId: string, leaveReason?: 'leave' | 'disconnect' | 'cleanup'): void | Promise<void>
   cleanupComponent(componentId: string): void | Promise<void>
-  emitToRoom(roomId: string, event: string, data: any, excludeComponentId?: string): number
+  emitToRoom(roomId: string, event: string, data: unknown, excludeComponentId?: string): number
   /** Emit to a specific subset of room members. Used by interest-management plugins. */
-  emitToRoomMembers?(roomId: string, members: Iterable<string>, event: string, data: any): number
-  setRoomState(roomId: string, updates: any, excludeComponentId?: string): void
-  getRoomState<TState = any>(roomId: string): TState
+  emitToRoomMembers?(roomId: string, members: Iterable<string>, event: string, data: unknown): number
+  setRoomState(roomId: string, updates: object, excludeComponentId?: string): void
+  /** O chamador escolhe TState (salas legadas não carregam tipo em runtime). */
+  getRoomState<TState = Record<string, unknown>>(roomId: string): TState
   isInRoom(componentId: string, roomId: string): boolean
   getComponentRooms(componentId: string): string[]
   getMemberCount?(roomId: string): number
-  getRoomInstance?(roomId: string): import('../rooms/LiveRoom').LiveRoom<any, any, any> | undefined
-  getStats(): any
+  getRoomInstance?(roomId: string): AnyLiveRoom | undefined
+  getStats(): unknown
 }
 
 // ===== Logger Interface =====

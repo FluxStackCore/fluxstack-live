@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build, tipos e testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      # Redis real para os testes de cluster/room (packages/redis e __tests__/integration)
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 16379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Instalar dependências
+        run: bun install --frozen-lockfile
+
+      # Adapters, redis, vue etc. consomem o core pelo dist/ — build antes dos tipos/testes
+      - name: Build de todos os pacotes
+        run: bun run build
+
+      - name: Type-check por pacote
+        run: |
+          set -e
+          for p in core client react vue elysia express fastify redis cli spatial-room plugin-kit; do
+            echo "::group::tsc $p"
+            bunx tsc -p packages/$p/tsconfig.json --noEmit
+            echo "::endgroup::"
+          done
+
+      - name: Catraca de tipagem (nenhum any novo)
+        run: bun run check:any
+
+      - name: Testes (vitest — todos os pacotes + integração)
+        run: bunx vitest run
+
+      - name: Testes Bun do adapter Elysia (HTTP real)
+        working-directory: packages/elysia
+        run: bun test

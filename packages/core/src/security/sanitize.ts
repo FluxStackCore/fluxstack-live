@@ -28,7 +28,7 @@ export function sanitizePayload<T>(value: T, depth = 0): T {
 
   if (Array.isArray(value)) {
     let cloned = false
-    let result = value as any[]
+    let result: unknown[] = value
     for (let i = 0; i < value.length; i++) {
       const sanitized = sanitizePayload(value[i], depth + 1)
       if (sanitized !== value[i]) {
@@ -42,7 +42,8 @@ export function sanitizePayload<T>(value: T, depth = 0): T {
   if (typeof value === 'function') return undefined as T
 
   if (value !== null && typeof value === 'object') {
-    const keys = Object.keys(value as object)
+    const record = value as Record<string, unknown>
+    const keys = Object.keys(record)
     let clean: Record<string, unknown> | null = null
 
     for (const key of keys) {
@@ -52,19 +53,19 @@ export function sanitizePayload<T>(value: T, depth = 0): T {
           clean = {}
           for (const k of keys) {
             if (k === key) break
-            clean[k] = sanitizePayload((value as any)[k], depth + 1)
+            clean[k] = sanitizePayload(record[k], depth + 1)
           }
         }
         continue
       }
 
-      const val = (value as Record<string, unknown>)[key]
+      const val = record[key]
       if (typeof val === 'function') {
         if (!clean) {
           clean = {}
           for (const k of keys) {
             if (k === key) break
-            clean[k] = sanitizePayload((value as any)[k], depth + 1)
+            clean[k] = sanitizePayload(record[k], depth + 1)
           }
         }
         continue
@@ -78,7 +79,7 @@ export function sanitizePayload<T>(value: T, depth = 0): T {
         clean = {}
         for (const k of keys) {
           if (k === key) break
-          clean[k] = (value as any)[k]
+          clean[k] = record[k]
         }
         clean[key] = sanitized
       }

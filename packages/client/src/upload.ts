@@ -6,11 +6,33 @@ import type {
   FileUploadStartMessage,
   FileUploadChunkMessage,
   FileUploadCompleteMessage,
-  FileUploadProgressResponse,
   FileUploadCompleteResponse,
   BinaryChunkHeader,
+  WebSocketResponse,
 } from '@fluxstack/live'
 import { generateId } from './generateId'
+import type { LiveOutgoingMessage } from './protocol'
+
+/** Progresso de um chunk (`FILE_UPLOAD_PROGRESS`), se a resposta tiver essa forma. */
+function readUploadProgress(response: WebSocketResponse | undefined): { progress: number; bytesUploaded: number } | null {
+  if (!response || typeof response.progress !== 'number' || typeof response.bytesUploaded !== 'number') return null
+  return { progress: response.progress, bytesUploaded: response.bytesUploaded }
+}
+
+/** Normaliza a resposta de `FILE_UPLOAD_COMPLETE` para o tipo público. */
+function toCompleteResponse(response: WebSocketResponse, componentId: string, uploadId: string): FileUploadCompleteResponse {
+  return {
+    type: 'FILE_UPLOAD_COMPLETE',
+    componentId: response.componentId ?? componentId,
+    uploadId: response.uploadId ?? uploadId,
+    success: response.success === true,
+    filename: response.filename,
+    fileUrl: response.fileUrl,
+    error: response.error,
+    requestId: response.requestId,
+    timestamp: response.timestamp ?? Date.now(),
+  }
+}
 
 // ===== Adaptive Chunk Sizer =====
 
@@ -151,8 +173,8 @@ export interface ChunkedUploadOptions {
   chunkSize?: number
   maxFileSize?: number
   allowedTypes?: string[]
-  sendMessageAndWait: (message: any, timeout?: number) => Promise<any>
-  sendBinaryAndWait?: (data: ArrayBuffer, requestId: string, timeout?: number) => Promise<any>
+  sendMessageAndWait: (message: LiveOutgoingMessage, timeout?: number) => Promise<WebSocketResponse>
+  sendBinaryAndWait?: (data: ArrayBuffer, requestId: string, timeout?: number) => Promise<WebSocketResponse>
   onProgress?: (progress: number, bytesUploaded: number, totalBytes: number) => void
   onComplete?: (response: FileUploadCompleteResponse) => void
   onError?: (error: string) => void
@@ -283,7 +305,7 @@ export class ChunkedUploader {
         const requestId = `chunk-${uploadId}-${chunkIndex}`
 
         try {
-          let progressResponse: FileUploadProgressResponse | undefined
+          let progressResponse: WebSocketResponse | undefined
 
           if (canUseBinary) {
             const header: BinaryChunkHeader = {
@@ -295,7 +317,7 @@ export class ChunkedUploader {
               requestId,
             }
             const binaryMessage = createBinaryChunkMessage(header, chunkBytes)
-            progressResponse = await sendBinaryAndWait!(binaryMessage, requestId, 10000) as FileUploadProgressResponse
+            progressResponse = await sendBinaryAndWait(binaryMessage, requestId, 10000)
           } else {
             let binary = ''
             for (let j = 0; j < chunkBytes.length; j++) binary += String.fromCharCode(chunkBytes[j])
@@ -309,12 +331,13 @@ export class ChunkedUploader {
               data: btoa(binary),
               requestId,
             }
-            progressResponse = await sendMessageAndWait!(chunkMessage, 10000) as FileUploadProgressResponse
+            progressResponse = await sendMessageAndWait(chunkMessage, 10000)
           }
 
-          if (progressResponse) {
-            this.setState({ progress: progressResponse.progress, bytesUploaded: progressResponse.bytesUploaded })
-            this.options.onProgress?.(progressResponse.progress, progressResponse.bytesUploaded, file.size)
+          const progress = readUploadProgress(progressResponse)
+          if (progress) {
+            this.setState({ progress: progress.progress, bytesUploaded: progress.bytesUploaded })
+            this.options.onProgress?.(progress.progress, progress.bytesUploaded, file.size)
           }
 
           this.adaptiveSizer?.recordChunkComplete(chunkIndex, chunkBytes.length, chunkStartTime, true)
@@ -339,17 +362,18 @@ export class ChunkedUploader {
         requestId: `complete-${uploadId}`,
       }
 
-      const completeResponse = await sendMessageAndWait(completeMessage, 10000) as FileUploadCompleteResponse
+      const completeResponse = await sendMessageAndWait(completeMessage, 10000)
 
       if (completeResponse?.success) {
         this.setState({ uploading: false, progress: 100, bytesUploaded: file.size })
-        this.options.onComplete?.(completeResponse)
+        this.options.onComplete?.(toCompleteResponse(completeResponse, this.componentId, uploadId))
       } else {
         throw new Error(completeResponse?.error || 'Upload completion failed')
       }
-    } catch (error: any) {
-      this.setState({ uploading: false, error: error.message })
-      this.options.onError?.(error.message)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.setState({ uploading: false, error: message })
+      this.options.onError?.(message)
     }
   }
 

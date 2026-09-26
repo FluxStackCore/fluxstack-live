@@ -6,10 +6,16 @@
 import type { GenericWebSocket } from '../../transport/types'
 import { queueWsMessage } from '../../transport/WsSendBatcher'
 import { liveLog, liveWarn } from '../../debug/LiveLogger'
-import type { LiveMessage, BroadcastMessage } from '../../protocol/messages'
+import type { LiveMessage, LiveMessageType, BroadcastMessage } from '../../protocol/messages'
 
 /** Symbol key for singleton emit override */
 export const EMIT_OVERRIDE_KEY = Symbol.for('fluxstack:emitOverride')
+
+/**
+ * @internal Symbol key do gancho "o estado mudou" (chamado após cada STATE_DELTA,
+ * JSON ou binário). O registry o instala para renovar o signedState (throttled).
+ */
+export const STATE_DELTA_HOOK_KEY = Symbol.for('fluxstack:stateDeltaHook')
 
 export interface ComponentMessagingContext {
   componentId: string
@@ -17,13 +23,13 @@ export interface ComponentMessagingContext {
   getUserId: () => string | undefined
   getRoom: () => string | undefined
   getBroadcastToRoom: () => (message: BroadcastMessage) => void
-  getEmitOverride: () => ((type: string, payload: any) => void) | null
+  getEmitOverride: () => ((type: string, payload: unknown) => void) | null
 }
 
 export class ComponentMessaging {
   constructor(private ctx: ComponentMessagingContext) {}
 
-  emit(type: string, payload: any): void {
+  emit(type: string, payload: unknown): void {
     const override = this.ctx.getEmitOverride()
     if (override) {
       override(type, payload)
@@ -31,7 +37,8 @@ export class ComponentMessaging {
     }
 
     const message: LiveMessage = {
-      type: type as any,
+      // emit() aceita tipos custom; o envelope só enumera os conhecidos.
+      type: type as LiveMessageType,
       componentId: this.ctx.componentId,
       payload,
       userId: this.ctx.getUserId(),
@@ -39,11 +46,11 @@ export class ComponentMessaging {
     }
 
     if (this.ctx.ws) {
-      queueWsMessage(this.ctx.ws, message as any)
+      queueWsMessage(this.ctx.ws, message)
     }
   }
 
-  broadcast(type: string, payload: any, excludeCurrentUser = false): void {
+  broadcast(type: string, payload: unknown, excludeCurrentUser = false): void {
     const room = this.ctx.getRoom()
     if (!room) {
       liveWarn('rooms', this.ctx.componentId, `[${this.ctx.componentId}] Cannot broadcast '${type}' - no room set`)

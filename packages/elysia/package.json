@@ -1,6 +1,6 @@
 {
   "name": "@fluxstack/live-elysia",
-  "version": "0.10.0",
+  "version": "0.11.0",
   "description": "Elysia.js WebSocket transport adapter for @fluxstack/live (Bun runtime)",
   "type": "module",
   "main": "./dist/index.js",
@@ -14,7 +14,10 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "src"],
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -22,7 +25,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@fluxstack/live": "^0.10.0"
+    "@fluxstack/live": "^0.11.0"
   },
   "peerDependencies": {
     "elysia": ">=1.0.0"
@@ -30,7 +33,8 @@
   "devDependencies": {
     "elysia": "^1.4.6",
     "tsup": "^8.4.0",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "@fluxstack/live-client": "^0.11.0"
   },
   "publishConfig": {
     "access": "public"
@@ -41,7 +45,14 @@
     "directory": "packages/elysia"
   },
   "license": "MIT",
-  "keywords": ["elysia", "bun", "websocket", "transport", "live-components", "fluxstack"],
+  "keywords": [
+    "elysia",
+    "bun",
+    "websocket",
+    "transport",
+    "live-components",
+    "fluxstack"
+  ],
   "engines": {
     "node": ">=18.0.0"
   }

@@ -21,6 +21,10 @@ import { RoomEventBus } from '../../packages/core/src/rooms/RoomEventBus'
 import { LiveRoomManager } from '../../packages/core/src/rooms/LiveRoomManager'
 import { RedisClusterAdapter } from '../../packages/redis/src/RedisClusterAdapter'
 import { createMockWS, spyOnConsole } from '../../packages/core/src/__tests__/helpers'
+import { redisAvailable } from '../../packages/redis/src/__tests__/redis-available'
+
+/** Sem Redis local: pula. Na CI: falha (ver redis-available.ts). */
+const REDIS_UP = await redisAvailable()
 
 // ===== Test Singleton Component =====
 
@@ -104,12 +108,26 @@ function wait(ms: number) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
+/**
+ * Espera uma condição (sync ou async) virar verdadeira. Substitui os sleeps
+ * fixos: sob carga (suíte inteira em paralelo) 200ms de propagação Redis não
+ * bastavam e os testes oscilavam.
+ */
+async function waitFor(cond: () => boolean | Promise<boolean>, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (await cond()) return
+    await wait(20)
+  }
+  throw new Error(`waitFor: condição não satisfeita em ${timeoutMs}ms`)
+}
+
 // ===== Tests =====
 
 const REDIS_PORT = 16379
 const REDIS_HOST = '127.0.0.1'
 
-describe('Cluster Sync - Integration (Real Redis)', () => {
+describe.skipIf(!REDIS_UP)('Cluster Sync - Integration (Real Redis)', () => {
   let redisA: Redis
   let redisB: Redis
   let clusterA: RedisClusterAdapter
@@ -263,7 +281,7 @@ describe('Cluster Sync - Integration (Real Redis)', () => {
     const wsA = createMockWS()
     const resultA = await registryA.mountComponent(wsA, 'CounterSingleton')
 
-    await wait(200)
+    await waitFor(async () => (await clusterB.getSingletonOwner('CounterSingleton')) !== null)
 
     // Server B mounts proxy
     const wsB = createMockWS()
@@ -296,7 +314,7 @@ describe('Cluster Sync - Integration (Real Redis)', () => {
     const wsA = createMockWS()
     const resultA = await registryA.mountComponent(wsA, 'CounterSingleton')
 
-    await wait(200)
+    await waitFor(async () => (await clusterB.getSingletonOwner('CounterSingleton')) !== null)
 
     // Server B mounts proxy
     const wsB = createMockWS()
@@ -308,8 +326,8 @@ describe('Cluster Sync - Integration (Real Redis)', () => {
     // Execute action on owner directly (state changes → delta published)
     await registryA.executeAction(resultA.componentId, 'increment', {})
 
-    // Wait for Redis pub/sub propagation
-    await wait(200)
+    // Espera a propagação via Redis pub/sub
+    await waitFor(() => wsB._messages.some(m => m.includes('"STATE_DELTA"')))
 
     // Server B's WS should have received the STATE_DELTA
     const deltaMessages = wsB._messages
@@ -328,7 +346,7 @@ describe('Cluster Sync - Integration (Real Redis)', () => {
     const wsA = createMockWS()
     const resultA = await registryA.mountComponent(wsA, 'CounterSingleton')
 
-    await wait(200)
+    await waitFor(async () => (await clusterB.getSingletonOwner('CounterSingleton')) !== null)
 
     const wsB = createMockWS()
     const resultB = await registryB.mountComponent(wsB, 'CounterSingleton')
@@ -364,11 +382,14 @@ describe('Cluster Sync - Integration (Real Redis)', () => {
     // Unmount (last connection)
     registryA.unmountComponent(resultA.componentId, wsA)
 
-    // Wait for async release
-    await wait(100)
-
-    // Claim should be released
-    owner = await clusterA.getSingletonOwner('CounterSingleton')
+    // Release é assíncrono (saveState → release → deleteState em sequência).
+    // Polling em vez de sleep fixo: sob carga 100ms não bastava (flaky).
+    const deadline = Date.now() + 3000
+    do {
+      owner = await clusterA.getSingletonOwner('CounterSingleton')
+      if (owner === null) break
+      await wait(25)
+    } while (Date.now() < deadline)
     expect(owner).toBeNull()
   })
 
@@ -380,11 +401,15 @@ describe('Cluster Sync - Integration (Real Redis)', () => {
     const resultA = await registryA.mountComponent(wsA, 'CounterSingleton')
     await registryA.executeAction(resultA.componentId, 'set', { count: 42 })
 
-    await wait(200)
+    await waitFor(async () => (await clusterA.loadSingletonState('CounterSingleton'))?.count === 42)
 
-    // Server A releases (graceful shutdown)
+    // Server A releases (graceful shutdown) — espera o claim sumir de fato
+    // (polling; sleep fixo de 100ms era flaky sob carga)
     registryA.unmountComponent(resultA.componentId, wsA)
-    await wait(100)
+    const deadline = Date.now() + 3000
+    while (Date.now() < deadline && (await clusterA.getSingletonOwner('CounterSingleton')) !== null) {
+      await wait(25)
+    }
 
     // Server B claims it — should recover state { count: 42 }
     const wsB = createMockWS()
@@ -413,7 +438,7 @@ describe('Cluster Sync - Integration (Real Redis)', () => {
     await registryA.executeAction(resultA.componentId, 'increment', {})
     await registryA.executeAction(resultA.componentId, 'increment', {})
 
-    await wait(200)
+    await waitFor(async () => (await clusterA.loadSingletonState('CounterSingleton'))?.count === 3)
 
     // Verify state is { count: 3 }
     const comp = registryA.getComponent(resultA.componentId)
@@ -426,7 +451,7 @@ describe('Cluster Sync - Integration (Real Redis)', () => {
     // Manually delete the singleton claim to simulate TTL expiry
     // (in production this happens after singletonTtl seconds)
     await clusterA.releaseSingleton('CounterSingleton')
-    await wait(200)
+    await waitFor(async () => (await clusterB.getSingletonOwner('CounterSingleton')) === null)
 
     // Server B comes along and mounts the singleton
     const wsB = createMockWS()
@@ -446,7 +471,7 @@ describe('Cluster Sync - Integration (Real Redis)', () => {
     const wsA = createMockWS()
     await registryA.mountComponent(wsA, 'CounterSingleton')
 
-    await wait(200)
+    await waitFor(async () => (await clusterB.getSingletonOwner('CounterSingleton')) !== null)
 
     const wsB = createMockWS()
     await registryB.mountComponent(wsB, 'CounterSingleton')
@@ -469,7 +494,7 @@ describe('Cluster Sync - Integration (Real Redis)', () => {
     const wsA = createMockWS()
     const resultA = await registryA.mountComponent(wsA, 'CounterSingleton')
 
-    await wait(200)
+    await waitFor(async () => (await clusterB.getSingletonOwner('CounterSingleton')) !== null)
 
     // Two clients on server B
     const wsB1 = createMockWS()

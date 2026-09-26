@@ -32,7 +32,7 @@ Por-action: `static actionAuth = { delete: { authorize: (auth, p) => auth.sessio
 
 ### 1.2 State signing + nonce híbrido — `security/StateSignature.ts`
 
-- **HMAC-SHA256** assina o state. Compressão (gzip) e cripto (AES-256-CBC) **opcionais**.
+- **HMAC-SHA256** assina o state. Compressão (gzip) e cripto (AES-256-GCM, autenticada) **opcionais**.
 - **Nonce híbrido**: formato `timestamp:random:HMAC(timestamp:random, secret)`.
   Validável **stateless** (HMAC + TTL, default 5min) **e** stateful (Map `usedNonces`).
 - **Eviction high-water mark** (fix #4): quando `usedNonces` passa de **100k**,
@@ -40,6 +40,55 @@ Por-action: `static actionAuth = { delete: { authorize: (auth, p) => auth.sessio
   **avança `evictionHighWaterMark`**; qualquer nonce com `ts <= mark` é rejeitado
   (**fail-closed**). `:75, 150-152, 386-410`.
 - Key rotation + state backups suportados.
+- **Renovação throttled do signedState** (2026-09-26): depois de deltas, o registry
+  re-assina o estado atual no máximo 1× por `stateSignature.renewInterval` (default
+  **1000 ms**, `0` desliga) por componente — leading adiado 1 tick + trailing — e
+  envia `STATE_SIGNATURE { signedState }`. Ver §1.2.1.
+
+#### 1.2.1 Renovação do signedState — modelo de ameaça
+
+Arquivos: `component/SignedStateRenewer.ts` (throttle), `ComponentRegistry.ts`
+(`signComponentState` / `installSignatureRenewal` / `renewSignedState` /
+`forgetSignedState`), gancho `STATE_DELTA_HOOK_KEY` chamado pelo
+`ComponentStateManager` após cada STATE_DELTA JSON **e** binário.
+
+- **O que o signedState é:** um token *bearer* que prova "o servidor produziu este
+  estado para esta classe (`__componentName`) em `timestamp`". HMAC cobre
+  `componentId:version:timestamp:data[:nonce]` — adulterar dados, versão, timestamp
+  ou ciphertext → `Invalid signature`. Trocar a classe → `Component class mismatch`.
+  Nada disso muda com a renovação (testes em
+  `__tests__/integration/signed-state-renewal.test.ts`).
+- **Nonce / skipNonce:** o rehydrate valida com `skipNonce: true` (já era assim), então
+  o nonce de um token re-assinado não é consumido como anti-replay na re-hidratação;
+  cada renovação gera nonce novo, e o `usedNonces`/high-water mark do caminho
+  não-rehydrate continua intacto. A renovação não chama `validateState`, então não
+  enche o Map de nonces.
+- **Replay de estado antigo (rollback):** qualquer token válido (dentro de
+  `maxStateAge`, default 30 min) pode ser reapresentado — inclusive um mais antigo
+  que o último emitido. **Isso já valia para o token do mount**; a renovação não abre
+  um vetor novo: ela só emite tokens de estados que o próprio servidor produziu para
+  aquele cliente. Rehydrate de componente **não-singleton cria instância nova** — não
+  sobrescreve estado vivo de ninguém. O "pior caso" é o cliente voltar a um estado
+  seu anterior, equivalente a um mount com aqueles valores. Por isso: **dado
+  autoritativo (saldo, permissões, contadores anti-abuso) não pode viver só em
+  `this.state`** (que o cliente já escreve via PROPERTY_UPDATE); use `$private`
+  (nunca assinado nem restaurado), banco, ou valide em `onRehydrate`.
+- **Por que não há anti-rollback por versão:** rejeitar `version < última emitida`
+  quebraria o caso legítimo "a conexão caiu entre o envio da renovação e a
+  recepção" (o cliente só tem a anterior → cairia num mount do zero), não sobrevive a
+  restart (mapa em memória) e não protege nada que o parágrafo acima já não exija.
+- **Singletons:** a re-hidratação entra na instância compartilhada (estado vivo
+  vence; o token só semeia se o servidor reiniciou). A renovação vale para eles do
+  mesmo jeito — uma assinatura por janela, enviada a todas as conexões pelo
+  EMIT_OVERRIDE — para que o token que semeia após restart seja recente. Singletons
+  remotos (cluster) não recebem signedState (já era `null` no mount).
+- **`maxStateAge` agora conta desde a última renovação**, não desde o mount: um
+  componente ativo tem sempre um token fresco; tokens antigos continuam expirando
+  pelo próprio `timestamp`.
+- **Custo:** 1 HMAC (+ gzip se > 1KB, + AES-GCM se cripto ligada) por janela por
+  componente **que mudou**; componente ocioso não assina. Renovações não entram nos
+  backups (`backup: false`), e `clearBackups` agora é chamado no cleanup (antes os
+  backups vazavam por componente destruído).
 
 ### 1.3 `LiveServer` — orquestrador — `server/LiveServer.ts`
 

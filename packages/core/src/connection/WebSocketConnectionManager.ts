@@ -43,7 +43,7 @@ export interface ConnectionHealth {
 
 export interface QueuedMessage {
   id: string
-  message: any
+  message: unknown
   timestamp: number
   priority: number
   retryCount: number
@@ -188,10 +188,11 @@ export class WebSocketConnectionManager extends EventEmitter {
       for (const [connectionId, ws] of this.connections) {
         if (ws.readyState === 1) {
           try {
-            const wsAny = ws as any
-            if (typeof wsAny.ping === 'function') {
-              wsAny._pingTime = Date.now()
-              wsAny.ping()
+            // ping() é opcional: nem todo transporte expõe (ws/uWS sim; SSE não).
+            const pingable = ws as GenericWebSocket & { ping?: () => void; _pingTime?: number }
+            if (typeof pingable.ping === 'function') {
+              pingable._pingTime = Date.now()
+              pingable.ping()
             }
           } catch {
             // Ignore heartbeat failures

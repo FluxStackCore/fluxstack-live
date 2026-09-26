@@ -9,7 +9,8 @@ import { liveLog, liveWarn } from '../debug/LiveLogger'
 import { MAX_ROOM_STATE_SIZE, ROOM_NAME_REGEX } from '../protocol/constants'
 import type { IRoomPubSubAdapter } from './adapters'
 import { computeDeepDiff, deepAssign } from '../utils/deepDiff'
-import type { LiveRoom } from './LiveRoom'
+import type { AnyLiveRoom, LiveRoom } from './LiveRoom'
+import type { LiveRoomManagerInterface, RoomJoinExtra, RoomJoinOptions, RoomJoinOutcome } from '../component/context'
 import type { RoomRegistry } from './RoomRegistry'
 import type { LiveAuthSession } from '../auth/types'
 import {
@@ -20,6 +21,7 @@ import {
   BINARY_ROOM_STATE,
   type RoomCodec,
 } from './RoomCodec'
+import { errorMessage } from '../utils/errors'
 
 /**
  * Cheap JSON byte-size estimate. Walks the value once without allocating
@@ -30,6 +32,11 @@ import {
  * — but room state is set by the server, not the client, so this is just
  * defense in depth.
  */
+/** Objeto plano (não null, não array). */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function estimateJsonSize(v: unknown, depth = 0): number {
   if (depth > 8) return 2 // worst-case placeholder
   if (v === null || v === undefined) return 4 // "null"
@@ -64,8 +71,18 @@ export interface RoomMessage {
   componentId: string
   roomId: string
   event?: string
-  data?: any
+  data?: unknown
   requestId?: string
+  timestamp: number
+}
+
+/** Frame de sala enviado aos membros (JSON ou binário, conforme o codec). */
+interface RoomBroadcastFrame {
+  type: 'ROOM_EVENT' | 'ROOM_STATE' | 'ROOM_SYSTEM'
+  componentId: string
+  roomId: string
+  event?: string
+  data?: unknown
   timestamp: number
 }
 
@@ -90,12 +107,13 @@ interface RoomMember {
    * passed back to `onLeave` so domain code can clean up `room.state`
    * entries keyed by app-specific ids (#36).
    */
-  membership: Record<string, any>
+  membership: Record<string, unknown>
 }
 
-interface Room<TState = any> {
+interface Room {
   id: string
-  state: TState
+  /** State público da sala (em salas tipadas, é o mesmo objeto de `instance.state`). */
+  state: Record<string, unknown>
   members: Map<string, RoomMember>
   createdAt: number
   lastActivity: number
@@ -110,12 +128,12 @@ interface Room<TState = any> {
   /** Update counter for periodic size recalculation */
   _updateCount?: number
   /** LiveRoom instance when backed by a typed room class */
-  instance?: LiveRoom<any, any, any>
+  instance?: AnyLiveRoom
   /** Resolved binary codec for this room. null = JSON text mode (legacy rooms). */
   codec: RoomCodec | null
 }
 
-export class LiveRoomManager {
+export class LiveRoomManager implements LiveRoomManagerInterface {
   private rooms = new Map<string, Room>()
   private componentRooms = new Map<string, Set<string>>() // componentId -> roomIds
 
@@ -138,14 +156,14 @@ export class LiveRoomManager {
    * @param options.deepDiff - Enable/disable deep diff for this room's state. Default: true
    * @param joinContext - Optional context for LiveRoom lifecycle hooks (userId, payload)
    */
-  async joinRoom<TState = any>(
+  async joinRoom<TState = Record<string, unknown>>(
     componentId: string,
     roomId: string,
     ws: GenericWebSocket,
     initialState?: TState,
-    options?: { deepDiff?: boolean; deepDiffDepth?: number; serverOnlyState?: boolean },
-    joinContext?: { userId?: string; session?: LiveAuthSession; payload?: any },
-  ): Promise<{ state: TState; rejected?: false } | { rejected: true; reason: string }> {
+    options?: RoomJoinOptions,
+    joinContext?: RoomJoinExtra,
+  ): Promise<RoomJoinOutcome<TState>> {
     // Validate room name format (uses pre-compiled regex from constants)
     if (!roomId || !ROOM_NAME_REGEX.test(roomId)) {
       throw new Error('Invalid room name. Must be 1-64 alphanumeric characters, hyphens, underscores, dots, or colons.')
@@ -164,12 +182,13 @@ export class LiveRoomManager {
       const roomClass = this.roomRegistry?.resolveFromId(roomId)
 
       if (roomClass) {
-        const instance = new roomClass(roomId, this as any)
+        const instance = new roomClass(roomId, this)
         const opts = roomClass.$options ?? {}
 
         room = {
           id: roomId,
-          state: instance.state,
+          // LiveRoom.state é um objeto plano (TState extends object)
+          state: instance.state as Record<string, unknown>,
           members: new Map(),
           createdAt: now,
           lastActivity: now,
@@ -183,7 +202,8 @@ export class LiveRoomManager {
         // Legacy untyped room — no binary codec (JSON text mode)
         room = {
           id: roomId,
-          state: (initialState || {}) as TState,
+          // initialState vem de ROOM_JOIN (payload do cliente) ou do servidor
+          state: isPlainRecord(initialState) ? initialState : {},
           members: new Map(),
           createdAt: now,
           lastActivity: now,
@@ -217,8 +237,8 @@ export class LiveRoomManager {
     if (isNewRoom && room.instance) {
       try {
         await room.instance.onCreate()
-      } catch (err: any) {
-        liveWarn('rooms', componentId, `Room '${roomId}' onCreate threw: ${err?.message || err}`)
+      } catch (err) {
+        liveWarn('rooms', componentId, `Room '${roomId}' onCreate threw: ${errorMessage(err)}`)
         this.rooms.delete(roomId)
         return { rejected: true, reason: 'Room initialization failed' }
       }
@@ -231,11 +251,11 @@ export class LiveRoomManager {
     // The `membership` bag is created here, threaded into the hook, and
     // attached to the RoomMember entry below — so onLeave gets it back even
     // on abrupt disconnects when only `componentId` is known (#36).
-    const membership: Record<string, any> = {}
+    const membership: Record<string, unknown> = {}
     // Resolve session: prefer explicit joinContext.session, fall back to
     // ws.data.authContext.session for callers that haven't been updated yet.
-    const session = joinContext?.session
-      ?? (ws as any)?.data?.authContext?.session
+    const session: LiveAuthSession | undefined = joinContext?.session
+      ?? ws?.data?.authContext?.session
     const resolvedUserId = joinContext?.userId ?? session?.id
     if (room.instance) {
       let joinResult: void | false
@@ -247,8 +267,8 @@ export class LiveRoomManager {
           payload: joinContext?.payload,
           membership,
         })
-      } catch (err: any) {
-        liveWarn('rooms', componentId, `Room '${roomId}' onJoin threw: ${err?.message || err}`)
+      } catch (err) {
+        liveWarn('rooms', componentId, `Room '${roomId}' onJoin threw: ${errorMessage(err)}`)
         if (isNewRoom) {
           this.rooms.delete(roomId)
         }
@@ -303,7 +323,8 @@ export class LiveRoomManager {
     // Propagate to other instances (fire-and-forget)
     this.pubsub?.publishMembership(roomId, 'join', componentId)?.catch(() => {})
 
-    return { state: room.state }
+    // O chamador escolhe TState (é o state que ele mesmo semeou/espera).
+    return { state: room.state as TState }
   }
 
   /**
@@ -327,8 +348,8 @@ export class LiveRoomManager {
           reason: leaveReason,
           membership: memberEntry?.membership ?? {},
         })
-      } catch (err: any) {
-        liveWarn('rooms', componentId, `Room '${roomId}' onLeave threw: ${err?.message || err}. Continuing with cleanup.`)
+      } catch (err) {
+        liveWarn('rooms', componentId, `Room '${roomId}' onLeave threw: ${errorMessage(err)}. Continuing with cleanup.`)
       }
     }
 
@@ -387,8 +408,8 @@ export class LiveRoomManager {
         try {
           const result = await currentRoom.instance.onDestroy()
           if (result === false) return // Room wants to stay alive
-        } catch (err: any) {
-          liveWarn('rooms', null, `Room '${roomId}' onDestroy threw: ${err?.message || err}. Destroying anyway.`)
+        } catch (err) {
+          liveWarn('rooms', null, `Room '${roomId}' onDestroy threw: ${errorMessage(err)}. Destroying anyway.`)
         }
       }
 
@@ -429,8 +450,8 @@ export class LiveRoomManager {
             reason: 'disconnect',
             membership: memberEntry?.membership ?? {},
           })
-        } catch (err: any) {
-          liveWarn('rooms', componentId, `Room '${roomId}' onLeave threw during cleanup: ${err?.message || err}. Continuing with remaining rooms.`)
+        } catch (err) {
+          liveWarn('rooms', componentId, `Room '${roomId}' onLeave threw during cleanup: ${errorMessage(err)}. Continuing with remaining rooms.`)
         }
       }
 
@@ -469,7 +490,7 @@ export class LiveRoomManager {
    * Emit event to all members in a room.
    * For LiveRoom-backed rooms, calls onEvent() hook before broadcasting.
    */
-  emitToRoom(roomId: string, event: string, data: any, excludeComponentId?: string): number {
+  emitToRoom(roomId: string, event: string, data: unknown, excludeComponentId?: string): number {
     const room = this.rooms.get(roomId)
     if (!room) return 0
 
@@ -491,13 +512,13 @@ export class LiveRoomManager {
         const res = room.instance.onEvent(event, data, {
           componentId: excludeComponentId ?? 'server',
         })
-        if (res && typeof (res as Promise<void>).catch === 'function') {
-          ;(res as Promise<void>).catch((err) => {
-            liveWarn('rooms', null, `Room '${roomId}' onEvent('${event}') async rejection: ${err?.message || err}`)
+        if (res instanceof Promise) {
+          res.catch((err: unknown) => {
+            liveWarn('rooms', null, `Room '${roomId}' onEvent('${event}') async rejection: ${errorMessage(err)}`)
           })
         }
-      } catch (err: any) {
-        liveWarn('rooms', null, `Room '${roomId}' onEvent('${event}') threw: ${err?.message || err}`)
+      } catch (err) {
+        liveWarn('rooms', null, `Room '${roomId}' onEvent('${event}') threw: ${errorMessage(err)}`)
       }
     }
 
@@ -534,7 +555,7 @@ export class LiveRoomManager {
     roomId: string,
     members: Iterable<string>,
     event: string,
-    data: any,
+    data: unknown,
   ): number {
     const room = this.rooms.get(roomId)
     if (!room) return 0
@@ -578,8 +599,8 @@ export class LiveRoomManager {
    * Returns a NEW shallow object so the original payload is untouched.
    * Server-side callers bypass this filter by calling setRoomState directly.
    */
-  private filterClientRoomStateKeys(updates: any): Record<string, unknown> {
-    if (updates === null || typeof updates !== 'object') return {}
+  private filterClientRoomStateKeys(updates: unknown): Record<string, unknown> {
+    if (!isPlainRecord(updates)) return {}
     const safe: Record<string, unknown> = {}
     for (const key of Object.keys(updates)) {
       if (key === '__proto__' || key === 'constructor' || key === 'prototype') continue
@@ -596,7 +617,7 @@ export class LiveRoomManager {
    * messages — server-internal callers should keep using setRoomState
    * directly so they retain full authority over the state shape.
    */
-  setRoomStateFromClient(roomId: string, updates: any, excludeComponentId?: string): void {
+  setRoomStateFromClient(roomId: string, updates: unknown, excludeComponentId?: string): void {
     const safe = this.filterClientRoomStateKeys(updates)
     this.setRoomState(roomId, safe, excludeComponentId)
   }
@@ -606,17 +627,18 @@ export class LiveRoomManager {
    * When deepDiff is enabled (default), deep-diffs plain objects to send only changed fields.
    * When disabled, uses shallow diff (reference equality) like classic behavior.
    */
-  setRoomState(roomId: string, updates: any, excludeComponentId?: string): void {
+  setRoomState(roomId: string, updates: object, excludeComponentId?: string): void {
     const room = this.rooms.get(roomId)
     if (!room) return
+    const patch = updates as Record<string, unknown>
 
     let actualChanges: Record<string, unknown>
 
     if (room.deepDiff) {
       // Deep diff: only send fields that actually changed
       const diff = computeDeepDiff(
-        room.state as Record<string, unknown>,
-        updates as Record<string, unknown>,
+        room.state,
+        patch,
         0,
         room.deepDiffDepth,
       )
@@ -629,9 +651,9 @@ export class LiveRoomManager {
       // Shallow diff: reference equality
       actualChanges = {}
       let hasChanges = false
-      for (const key of Object.keys(updates)) {
-        if (room.state[key] !== updates[key]) {
-          actualChanges[key] = updates[key]
+      for (const key of Object.keys(patch)) {
+        if (room.state[key] !== patch[key]) {
+          actualChanges[key] = patch[key]
           hasChanges = true
         }
       }
@@ -687,7 +709,8 @@ export class LiveRoomManager {
   /**
    * Get room state
    */
-  getRoomState<TState = any>(roomId: string): TState {
+  getRoomState<TState = Record<string, unknown>>(roomId: string): TState {
+    // O chamador escolhe TState (salas legadas não têm tipo em runtime).
     return (this.rooms.get(roomId)?.state || {}) as TState
   }
 
@@ -700,7 +723,7 @@ export class LiveRoomManager {
    * When no codec (legacy rooms), uses JSON with serialize-once optimization:
    * builds the JSON string template once, then inserts each member's componentId.
    */
-  private broadcastToRoom(roomId: string, message: any, excludeComponentId?: string): number {
+  private broadcastToRoom(roomId: string, message: RoomBroadcastFrame, excludeComponentId?: string): number {
     const room = this.rooms.get(roomId)
     if (!room || room.members.size === 0) return 0
 
@@ -775,7 +798,7 @@ export class LiveRoomManager {
    * Get the LiveRoom instance for a room (if backed by a typed room class).
    * Used by ComponentRoomProxy to expose custom methods.
    */
-  getRoomInstance(roomId: string): LiveRoom<any, any, any> | undefined {
+  getRoomInstance(roomId: string): AnyLiveRoom | undefined {
     return this.rooms.get(roomId)?.instance
   }
 

@@ -120,14 +120,17 @@ export function computeDeepDiff(
  *
  * Safe against circular references (tracked via `seen` Set).
  */
-export function deepAssign(target: any, source: any, seen?: Set<object>): void {
+export function deepAssign(target: object, source: unknown, seen?: Set<object>): void {
   // The public API accepts Set<object> for backward compatibility,
   // but internally we use Map<object, Set<object>> for proper pair tracking.
   deepAssignImpl(target, source, 0)
 }
 
-function deepAssignImpl(target: any, source: any, depth: number, seen?: Map<object, Set<object>>): void {
-  if (source == null || typeof source !== 'object') return
+function deepAssignImpl(targetObj: object, sourceValue: unknown, depth: number, seen?: Map<object, Set<object>>): void {
+  if (sourceValue == null || typeof sourceValue !== 'object') return
+  // Acesso por chave: ambos são objetos (checado acima / garantido pelo chamador).
+  const source = sourceValue as Record<string, unknown>
+  const target = targetObj as Record<string, unknown>
   // Circular reference guard: track which (source → target) pairs we've
   // already processed. This prevents infinite recursion from circular refs
   // while still allowing the same source object to be applied to different

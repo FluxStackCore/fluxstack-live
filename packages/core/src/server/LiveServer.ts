@@ -6,7 +6,11 @@
 //   await server.start()
 
 import type { LiveTransport, GenericWebSocket, WebSocketConfig, HttpRouteDefinition } from '../transport/types'
-import type { LiveMessage, WebSocketResponse } from '../protocol/messages'
+import type { ClientMessageOf, FileUploadChunkMessage, WebSocketResponse } from '../protocol/messages'
+import { isRecord, parseClientMessage } from '../protocol/validation'
+
+/** Mensagens de sala já validadas (roomId normalizado). */
+type RoomClientMessage = ClientMessageOf<'ROOM_JOIN' | 'ROOM_LEAVE' | 'ROOM_EMIT' | 'ROOM_STATE_SET' | 'ROOM_STATE_GET'>
 import { RoomEventBus } from '../rooms/RoomEventBus'
 import { LiveRoomManager } from '../rooms/LiveRoomManager'
 import { LiveAuthManager } from '../auth/LiveAuthManager'
@@ -16,12 +20,14 @@ import { FileUploadManager, type FileUploadConfig } from '../upload/FileUploadMa
 import { WebSocketConnectionManager, type ConnectionConfig } from '../connection/WebSocketConnectionManager'
 import { ComponentRegistry } from '../component/ComponentRegistry'
 import { setLiveComponentContext } from '../component/context'
-import type { LiveComponent } from '../component/LiveComponent'
+import type { LiveComponentClass } from '../component/LiveComponent'
 import { RateLimiterRegistry } from '../connection/RateLimiter'
 import { liveLog } from '../debug/LiveLogger'
 import { decodeBinaryChunk } from '../protocol/binary'
 import { DEFAULT_WS_PATH, MAX_MESSAGE_SIZE, MAX_ROOMS_PER_CONNECTION, MAX_JSON_DEPTH } from '../protocol/constants'
 import { sendImmediate, setResyncHandler } from '../transport/WsSendBatcher'
+import { SseConnectionHub, type SseTransportOptions } from '../transport/sse'
+import { HttpPollingHub, type HttpPollingTransportOptions } from '../transport/http-polling'
 import { sanitizePayload } from '../security/sanitize'
 import type { LiveAuthProvider } from '../auth/types'
 import type { IRoomPubSubAdapter } from '../rooms/adapters'
@@ -31,6 +37,7 @@ import { RoomRegistry } from '../rooms/RoomRegistry'
 import type { LiveRoomClass } from '../rooms/LiveRoom'
 import { generateLiveComponentsFile } from '../build/index'
 import { generateId as defaultGenerateId } from '../utils/generateId'
+import { errorMessage } from '../utils/errors'
 
 export interface LiveServerOptions {
   /** Transport adapter (Elysia, Express, etc.) */
@@ -60,6 +67,25 @@ export interface LiveServerOptions {
    * clients (e.g. internal tooling) and have an explicit reason.
    */
   maxJsonDepth?: number
+  /**
+   * Tamanho máximo de um frame recebido (JSON ou binário), em bytes.
+   * Default: MAX_MESSAGE_SIZE (4MB).
+   */
+  maxMessageSize?: number
+  /**
+   * Habilita o transporte SSE (Server-Sent Events + POST HTTP) em paralelo ao
+   * WebSocket. Clientes escolhem com `transport: 'sse' | 'auto'`.
+   * Exige um adapter com `registerRawRoutes` (Elysia, Express, Fastify).
+   * `true` usa os defaults (`/api/live/sse`).
+   */
+  sse?: boolean | SseTransportOptions
+  /**
+   * Habilita o transporte HTTP puro (long-polling + POST): o último recurso,
+   * para redes onde nem WebSocket nem SSE passam. Clientes usam com
+   * `transport: 'http' | 'auto'`. Exige `registerRawRoutes` no adapter.
+   * `true` usa os defaults (`/api/live/http`).
+   */
+  http?: boolean | HttpPollingTransportOptions
   /** Components path for auto-discovery */
   componentsPath?: string
   /** HTTP monitoring routes prefix. Set to false to disable. Defaults to '/api/live' */
@@ -81,7 +107,7 @@ export interface LiveServerOptions {
   rooms?: LiveRoomClass[]
   /** LiveComponent classes to register statically (e.g. from production bundles).
    *  Uses `static componentName` for the registry key, falling back to `class.name`. */
-  components?: Array<new (...args: any[]) => LiveComponent<any>>
+  components?: LiveComponentClass[]
   /** Custom ID generator function. When provided, all auto-generated IDs
    *  (component IDs, connection IDs, cluster singleton IDs) will use this function
    *  instead of the default generators. Must return a unique string each call. */
@@ -103,6 +129,10 @@ export class LiveServer {
 
   private transport: LiveTransport
   private options: LiveServerOptions
+  /** Hub SSE (quando `options.sse` está ligado). */
+  public sseHub: SseConnectionHub | null = null
+  /** Hub HTTP long-polling (quando `options.http` está ligado). */
+  public httpPollingHub: HttpPollingHub | null = null
   /** Connections with a backpressure resync coalesced for the current microtask. */
   private _pendingResync = new Set<GenericWebSocket>()
 
@@ -153,8 +183,8 @@ export class LiveServer {
     // Register statically-provided component classes (used in production bundles)
     if (options.components) {
       for (const componentClass of options.components) {
-        const name = (componentClass as any).componentName || componentClass.name
-        this.registry.registerComponentClass(name, componentClass as any)
+        const name = componentClass.componentName || componentClass.name
+        this.registry.registerComponentClass(name, componentClass)
       }
     }
 
@@ -209,6 +239,42 @@ export class LiveServer {
     }
     await this.transport.registerWebSocket(wsConfig)
 
+    // Transporte SSE: as mesmas callbacks, outro meio físico.
+    if (this.options.sse) {
+      if (!this.transport.registerRawRoutes) {
+        throw new Error(
+          `[LiveServer] sse habilitado, mas o transporte ${this.transport.constructor?.name ?? ''} ` +
+          `não implementa registerRawRoutes(). Atualize o adapter ou desligue { sse }.`
+        )
+      }
+      const sseOptions = this.options.sse === true ? {} : this.options.sse
+      const { path: _wsPath, ...callbacks } = wsConfig
+      this.sseHub = new SseConnectionHub(callbacks, {
+        maxMessageSize: this.options.maxMessageSize ?? MAX_MESSAGE_SIZE,
+        ...sseOptions,
+      })
+      await this.transport.registerRawRoutes(this.sseHub.routes())
+      liveLog('lifecycle', null, `SSE transport enabled at ${this.sseHub.path}`)
+    }
+
+    // Transporte HTTP long-polling: mesmas callbacks, requisições comuns.
+    if (this.options.http) {
+      if (!this.transport.registerRawRoutes) {
+        throw new Error(
+          `[LiveServer] http habilitado, mas o transporte ${this.transport.constructor?.name ?? ''} ` +
+          `não implementa registerRawRoutes(). Atualize o adapter ou desligue { http }.`
+        )
+      }
+      const httpOptions = this.options.http === true ? {} : this.options.http
+      const { path: _p, ...pollCallbacks } = wsConfig
+      this.httpPollingHub = new HttpPollingHub(pollCallbacks, {
+        maxMessageSize: this.options.maxMessageSize ?? MAX_MESSAGE_SIZE,
+        ...httpOptions,
+      })
+      await this.transport.registerRawRoutes(this.httpPollingHub.routes())
+      liveLog('lifecycle', null, `HTTP polling transport enabled at ${this.httpPollingHub.path}`)
+    }
+
     // Register HTTP routes
     if (this.options.httpPrefix !== false) {
       const prefix = this.options.httpPrefix ?? '/api/live'
@@ -232,6 +298,8 @@ export class LiveServer {
    * Graceful shutdown.
    */
   async shutdown(): Promise<void> {
+    this.sseHub?.closeAll()
+    this.httpPollingHub?.closeAll()
     this.registry.cleanup()
     this.connectionManager.shutdown()
     this.fileUploadManager.shutdown()
@@ -290,24 +358,36 @@ export class LiveServer {
       }
     }
 
+    const maxSize = this.options.maxMessageSize ?? MAX_MESSAGE_SIZE
+
     // Binary protocol (file upload chunks)
-    if (isBinary && rawMessage instanceof ArrayBuffer) {
+    if (isBinary && (rawMessage instanceof ArrayBuffer || rawMessage instanceof Uint8Array)) {
+      const buf = rawMessage instanceof Uint8Array
+        ? rawMessage.buffer.slice(rawMessage.byteOffset, rawMessage.byteOffset + rawMessage.byteLength) as ArrayBuffer
+        : rawMessage
+      if (buf.byteLength > maxSize) {
+        sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Message too large' }))
+        return
+      }
       try {
-        const { header, data } = decodeBinaryChunk(rawMessage)
+        const { header, data } = decodeBinaryChunk(buf)
         if (header.type === 'FILE_UPLOAD_CHUNK') {
-          const chunkMessage = { ...header, data: '' } as any
-          const progress = await this.fileUploadManager.receiveChunk(chunkMessage, data)
-          if (progress) sendImmediate(ws, JSON.stringify(progress))
+          const chunkMessage: FileUploadChunkMessage = { ...header, data: '' }
+          const progress = await this.fileUploadManager.receiveChunk(chunkMessage, data, ws.data?.connectionId)
+          // ecoa o requestId: o client casa a resposta sem depender de heurística
+          if (progress) sendImmediate(ws, JSON.stringify({ ...progress, requestId: header.requestId }))
         }
-      } catch (error: any) {
-        sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: error.message }))
+      } catch (error) {
+        let requestId: string | undefined
+        try { requestId = decodeBinaryChunk(buf).header.requestId } catch { /* header ilegível */ }
+        sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: errorMessage(error), requestId }))
       }
       return
     }
 
     // JSON protocol — check size before parsing
     const str = typeof rawMessage === 'string' ? rawMessage : new TextDecoder().decode(rawMessage as ArrayBuffer)
-    if (str.length > MAX_MESSAGE_SIZE) {
+    if (str.length > maxSize) {
       sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Message too large' }))
       return
     }
@@ -345,9 +425,9 @@ export class LiveServer {
       }
     }
 
-    let message: LiveMessage
+    let parsed: unknown
     try {
-      message = JSON.parse(str)
+      parsed = JSON.parse(str)
     } catch {
       sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Invalid JSON' }))
       return
@@ -356,103 +436,153 @@ export class LiveServer {
     // Reject non-object root values (null, numbers, strings, arrays, booleans).
     // Valid LiveMessages are always objects — a bare value cannot be dispatched
     // and reading `.payload` on it would throw.
-    if (message === null || typeof message !== 'object' || Array.isArray(message)) {
+    if (!isRecord(parsed)) {
       sendImmediate(ws, JSON.stringify({ type: 'ERROR', error: 'Invalid message: expected object' }))
       return
     }
 
     // Strip prototype pollution keys from payload
-    if (message.payload) {
-      message.payload = sanitizePayload(message.payload)
+    if (parsed.payload) {
+      parsed.payload = sanitizePayload(parsed.payload)
     }
 
-    try {
-      // Auth message
-      if (message.type === 'AUTH') {
-        const authContext = await this.authManager.authenticate(message.payload || {})
-        if (ws.data) ws.data.authContext = authContext
-        sendImmediate(ws, JSON.stringify({
-          type: 'AUTH_RESPONSE',
-          success: authContext.authenticated,
-          payload: authContext.authenticated
-            ? { authenticated: true, session: authContext.session }
-            : { authenticated: false, error: 'Authentication failed' },
-          requestId: message.requestId,
-        }))
-        return
-      }
+    // Validação de forma: cada tipo de mensagem precisa ter os campos que o
+    // handler lê. Mensagem malformada → ERROR 'Invalid message' (nunca exceção).
+    // Heartbeat do cliente: só mantém a conexão ativa, não exige resposta.
+    // (Antes caía em "Unknown message type" a cada 30s.)
+    if (parsed.type === 'PING') return
 
-      // Room messages
-      if (message.type === 'ROOM_JOIN' || message.type === 'ROOM_LEAVE' || message.type === 'ROOM_EMIT' || message.type === 'ROOM_STATE_SET' || message.type === 'ROOM_STATE_GET') {
-        await this.handleRoomMessage(ws, message)
-        return
-      }
-
-      // File upload messages
-      if (message.type === 'FILE_UPLOAD_START') {
-        const result = await this.fileUploadManager.startUpload(message as any, ws.data?.userId)
-        sendImmediate(ws, JSON.stringify({
-          type: 'FILE_UPLOAD_START_RESPONSE',
-          componentId: message.componentId,
-          uploadId: message.payload?.uploadId,
-          success: result.success,
-          error: result.error,
-          requestId: message.requestId,
-        }))
-        return
-      }
-
-      if (message.type === 'FILE_UPLOAD_CHUNK') {
-        const progress = await this.fileUploadManager.receiveChunk(message as any)
-        if (progress) sendImmediate(ws, JSON.stringify(progress))
-        return
-      }
-
-      if (message.type === 'FILE_UPLOAD_COMPLETE') {
-        const result = await this.fileUploadManager.completeUpload(message as any)
-        sendImmediate(ws, JSON.stringify(result))
-        return
-      }
-
-      // Component rehydration
-      if (message.type === 'COMPONENT_REHYDRATE') {
-        const result = await this.registry.rehydrateComponent(
-          message.componentId,
-          message.payload.component,
-          message.payload.signedState,
-          ws,
-          { room: message.payload.room, userId: message.userId }
-        )
-        sendImmediate(ws, JSON.stringify({
-          type: 'COMPONENT_REHYDRATED',
-          componentId: message.componentId,
-          success: result.success,
-          result: result.success ? { newComponentId: result.newComponentId } : undefined,
-          error: result.error,
-          requestId: message.requestId,
-        }))
-        return
-      }
-
-      // Delegate to registry
-      const result = await this.registry.handleMessage(ws, message)
-
-      if (result !== null) {
+    const validation = parseClientMessage(parsed)
+    if (!validation.ok) {
+      if (validation.reason === 'unknown-type') {
+        // Mesmo comportamento de antes: tipo desconhecido → MESSAGE_RESPONSE de falha.
         const response: WebSocketResponse = {
-          type: message.type === 'CALL_ACTION' ? 'ACTION_RESPONSE' : 'MESSAGE_RESPONSE',
-          componentId: message.componentId,
-          success: result.success,
-          result: result.result,
-          error: result.error,
-          requestId: message.requestId,
+          type: 'MESSAGE_RESPONSE',
+          componentId: validation.envelope.componentId,
+          success: false,
+          error: 'Unknown message type',
+          requestId: validation.envelope.requestId,
         }
         sendImmediate(ws, JSON.stringify(response))
+        return
       }
-    } catch (error: any) {
+      sendImmediate(ws, JSON.stringify({
+        type: 'ERROR',
+        componentId: validation.envelope.componentId,
+        success: false,
+        error: `Invalid message: ${validation.error}`,
+        requestId: validation.envelope.requestId,
+      }))
+      return
+    }
+    const message = validation.message
+
+    try {
+      switch (message.type) {
+        // Auth message
+        case 'AUTH': {
+          const authContext = await this.authManager.authenticate(message.payload || {})
+          if (ws.data) {
+            ws.data.authContext = authContext
+            // userId da conexão vem EXCLUSIVAMENTE da autenticação (quota de upload etc.)
+            ws.data.userId = authContext.authenticated ? authContext.session?.id : undefined
+          }
+          sendImmediate(ws, JSON.stringify({
+            type: 'AUTH_RESPONSE',
+            success: authContext.authenticated,
+            payload: authContext.authenticated
+              ? { authenticated: true, session: authContext.session }
+              : { authenticated: false, error: 'Authentication failed' },
+            requestId: message.requestId,
+          }))
+          return
+        }
+
+        // Room messages
+        case 'ROOM_JOIN':
+        case 'ROOM_LEAVE':
+        case 'ROOM_EMIT':
+        case 'ROOM_STATE_SET':
+        case 'ROOM_STATE_GET':
+          await this.handleRoomMessage(ws, message)
+          return
+
+        // File upload messages
+        case 'FILE_UPLOAD_START': {
+          // O upload precisa estar ligado a um componente desta conexão.
+          const ownsTarget = !message.componentId || !!ws.data?.components?.has(message.componentId)
+          const result = ownsTarget
+            ? await this.fileUploadManager.startUpload(message, ws.data?.userId, ws.data?.connectionId)
+            : { success: false, error: 'Component not found for upload' }
+          sendImmediate(ws, JSON.stringify({
+            type: 'FILE_UPLOAD_START_RESPONSE',
+            componentId: message.componentId,
+            uploadId: isRecord(message.payload) ? message.payload.uploadId : undefined,
+            success: result.success,
+            error: result.error,
+            requestId: message.requestId,
+          }))
+          return
+        }
+
+        case 'FILE_UPLOAD_CHUNK': {
+          const progress = await this.fileUploadManager.receiveChunk(message, null, ws.data?.connectionId)
+          if (progress) sendImmediate(ws, JSON.stringify({ ...progress, requestId: message.requestId }))
+          return
+        }
+
+        case 'FILE_UPLOAD_COMPLETE': {
+          const result = await this.fileUploadManager.completeUpload(message, ws.data?.connectionId)
+          sendImmediate(ws, JSON.stringify({ ...result, requestId: message.requestId }))
+          return
+        }
+
+        // Component rehydration
+        case 'COMPONENT_REHYDRATE': {
+          const result = await this.registry.rehydrateComponent(
+            message.componentId,
+            message.payload.component,
+            message.payload.signedState,
+            ws,
+            {
+              room: message.payload.room,
+              // userId do cliente é ignorado — só o da autenticação da conexão.
+              userId: ws.data?.authContext?.authenticated ? ws.data.authContext.session?.id : undefined,
+            }
+          )
+          sendImmediate(ws, JSON.stringify({
+            type: 'COMPONENT_REHYDRATED',
+            componentId: message.componentId,
+            success: result.success,
+            result: result.success ? { newComponentId: result.newComponentId } : undefined,
+            error: result.error,
+            requestId: message.requestId,
+          }))
+          return
+        }
+
+        // Delegate to registry (mount / unmount / action / property update)
+        default: {
+          const result = await this.registry.handleMessage(ws, message)
+
+          if (result !== null) {
+            const response: WebSocketResponse = {
+              type: message.type === 'CALL_ACTION' ? 'ACTION_RESPONSE' : 'MESSAGE_RESPONSE',
+              componentId: message.componentId,
+              success: result.success,
+              result: result.result,
+              error: result.error,
+              requestId: message.requestId,
+            }
+            sendImmediate(ws, JSON.stringify(response))
+          }
+        }
+      }
+    } catch (error) {
       sendImmediate(ws, JSON.stringify({
         type: 'ERROR',
         componentId: message.componentId,
-        error: error.message,
+        error: errorMessage(error),
         requestId: message.requestId,
       }))
     }
@@ -472,20 +602,34 @@ export class LiveServer {
     if (connectionId) {
       this.connectionManager.cleanupConnection(connectionId)
       this.rateLimiter.remove(connectionId)
+      // Uploads em andamento desta conexão liberam memória imediatamente.
+      this.fileUploadManager.cancelConnectionUploads(connectionId)
     }
 
     liveLog('websocket', null, `Connection closed: ${connectionId} (${componentCount} components)`)
   }
 
   private handleError(ws: GenericWebSocket, error: Error): void {
-    console.error(`[LiveServer] WebSocket error:`, error.message)
+    console.error(`[LiveServer] WebSocket error:`, errorMessage(error))
   }
 
   // ===== Room Message Router =====
 
-  private async handleRoomMessage(ws: GenericWebSocket, message: LiveMessage): Promise<void> {
-    const { componentId } = message
-    const roomId = (message as any).roomId || message.payload?.roomId
+  private async handleRoomMessage(ws: GenericWebSocket, message: RoomClientMessage): Promise<void> {
+    const { componentId, roomId } = message
+
+    // Posse: toda operação de sala age EM NOME de um componente — ele precisa
+    // ser desta conexão. Sem isso, um cliente emitia/saía da sala como outro
+    // (componentIds vazam em broadcasts).
+    if (!componentId || !ws.data?.components?.has(componentId)) {
+      sendImmediate(ws, JSON.stringify({
+        type: 'ERROR',
+        componentId,
+        error: 'Component not found',
+        requestId: message.requestId,
+      }))
+      return
+    }
 
     switch (message.type) {
       case 'ROOM_JOIN': {
@@ -501,7 +645,7 @@ export class LiveServer {
         }
 
         // Per-connection room limit
-        const connRooms = ws.data?.rooms as Set<string> | undefined
+        const connRooms = ws.data?.rooms
         if (connRooms && connRooms.size >= MAX_ROOMS_PER_CONNECTION) {
           sendImmediate(ws, JSON.stringify({
             type: 'ERROR',
@@ -542,9 +686,11 @@ export class LiveServer {
           break
         }
 
-        // Track rooms per connection
-        if (!ws.data!.rooms) ws.data!.rooms = new Set<string>()
-        ;(ws.data!.rooms as Set<string>).add(roomId)
+        // Track rooms per connection (ws.data existe: a posse do componente foi checada acima)
+        if (ws.data) {
+          if (!ws.data.rooms) ws.data.rooms = new Set<string>()
+          ws.data.rooms.add(roomId)
+        }
 
         sendImmediate(ws, JSON.stringify({
           type: 'ROOM_JOINED',
@@ -556,7 +702,7 @@ export class LiveServer {
       }
       case 'ROOM_LEAVE':
         await this.roomManager.leaveRoom(componentId, roomId)
-        ;(ws.data?.rooms as Set<string> | undefined)?.delete(roomId)
+        ws.data?.rooms?.delete(roomId)
         sendImmediate(ws, JSON.stringify({
           type: 'ROOM_LEFT',
           componentId,
@@ -575,7 +721,7 @@ export class LiveServer {
           }))
           break
         }
-        this.roomManager.emitToRoom(roomId, message.payload?.event, message.payload?.data, componentId)
+        this.roomManager.emitToRoom(roomId, message.payload.event, message.payload.data, componentId)
         break
       }
       case 'ROOM_STATE_SET': {
@@ -601,7 +747,7 @@ export class LiveServer {
         }
         // Use the client-facing variant: filters $-prefix + prototype-pollution
         // keys so the client can't inject server-only fields into shared room state.
-        this.roomManager.setRoomStateFromClient(roomId, message.payload?.state, componentId)
+        this.roomManager.setRoomStateFromClient(roomId, message.payload.state, componentId)
         break
       }
       case 'ROOM_STATE_GET': {
@@ -668,8 +814,12 @@ export class LiveServer {
         path: `${prefix}/rooms/:roomId/emit`,
         handler: (req) => {
           const roomId = req.params.roomId!
-          const { event, data } = req.body as any
-          this.roomManager.emitToRoom(roomId, event, data)
+          const body: Record<string, unknown> = isRecord(req.body) ? req.body : {}
+          if (typeof body.event !== 'string') {
+            return { status: 400, body: { success: false, error: 'event must be a string' } }
+          }
+          const event = body.event
+          this.roomManager.emitToRoom(roomId, event, body.data)
           return { body: { success: true, roomId, event } }
         },
         metadata: { summary: 'Emit custom event to room via HTTP', tags: ['live', 'rooms'] }

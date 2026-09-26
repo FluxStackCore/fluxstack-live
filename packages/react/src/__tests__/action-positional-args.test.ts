@@ -14,7 +14,7 @@ const HOOK_SRC = readFileSync(
 describe('action positional-args footgun guard (#49)', () => {
   it('the action proxy collects args with a rest param (so length is observable)', () => {
     // The returned action function must use `...args` to even see arg count.
-    expect(HOOK_SRC).toMatch(/return async \(\.\.\.args:\s*any\[\]\)\s*=>/)
+    expect(HOOK_SRC).toMatch(/return async \(\.\.\.args:\s*(?:any|unknown)\[\]\)\s*=>/)
   })
 
   it('warns in dev when called with more than one positional argument', () => {

@@ -23,14 +23,16 @@ interface ManagerWithMembers {
     roomId: string,
     members: Iterable<string>,
     event: string,
-    data: any,
+    data: unknown,
   ): number
 }
 
+// Restrições `object` (e não `Record<string, unknown>`) para aceitar interfaces
+// sem index signature — `object` satisfaz a restrição do LiveRoom do core.
 export abstract class SpatialLiveRoom<
-  TState extends Record<string, any> = Record<string, any>,
-  TMeta extends Record<string, any> = Record<string, any>,
-  TEvents extends Record<string, any> = Record<string, any>,
+  TState extends object = Record<string, unknown>,
+  TMeta extends object = Record<string, unknown>,
+  TEvents extends object = Record<string, unknown>,
 > extends LiveRoom<TState, TMeta, TEvents> {
   /**
    * Spatial configuration. Subclasses override with their own grid sizing.

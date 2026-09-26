@@ -36,13 +36,16 @@ const DEFAULT_GRACE_MS = 50
  * URL is the primary discriminator. We also include a hash of auth so two
  * Providers with different credentials get separate sockets.
  */
-export function poolKey(options: Pick<LiveConnectionOptions, 'url' | 'auth'>): string {
+export function poolKey(options: Pick<LiveConnectionOptions, 'url' | 'auth' | 'transport' | 'sseUrl' | 'httpUrl'>): string {
   const url = options.url ?? '<default>'
+  // Transportes diferentes nunca compartilham conexão.
+  const t = options.transport
+  const transport = typeof t === 'function' ? '<custom>' : Array.isArray(t) ? t.join('>') : (t ?? 'websocket')
   // Stable, cheap hash — JSON.stringify is fine: auth objects are small and
   // the order of keys is consistent within a single Provider's options.
   let authStr = ''
   try { authStr = JSON.stringify(options.auth ?? null) } catch { authStr = '<unserializable>' }
-  return `${url}|${authStr}`
+  return `${url}|${transport}|${options.sseUrl ?? ''}|${options.httpUrl ?? ''}|${authStr}`
 }
 
 /**

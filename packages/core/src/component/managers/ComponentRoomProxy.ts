@@ -10,8 +10,8 @@
 
 import type { GenericWebSocket } from '../../transport/types'
 import type { LiveComponentContext } from '../context'
-import type { ServerRoomHandle, ServerRoomProxy } from '../../protocol/messages'
-import type { LiveRoom, LiveRoomClass } from '../../rooms/LiveRoom'
+import type { RoomEmitOptions, ServerRoomHandle, ServerRoomProxy } from '../../protocol/messages'
+import type { AnyLiveRoom, InferRoomEvents, LiveRoomClass } from '../../rooms/LiveRoom'
 import { liveLog, liveWarn } from '../../debug/LiveLogger'
 import { sendImmediate } from '../../transport/WsSendBatcher'
 
@@ -21,13 +21,37 @@ export interface RoomProxyContext {
   defaultRoom?: string
   /** Lazy getter — only called when room features are used */
   getCtx: () => LiveComponentContext
-  setStateFn: (updates: any) => void
+  setStateFn: (updates: Record<string, unknown>) => void
   /** Deep diff setting for rooms (from component $options). Default: true */
   deepDiff?: boolean
   /** Max recursion depth for deep diff. Default: 3 */
   deepDiffDepth?: number
   /** When true, only server-side code can set room state. Default: false */
   serverOnlyState?: boolean
+}
+
+/** Resultado de `join()` numa sala tipada. */
+export type RoomJoinResult = { rejected?: false } | { rejected: true; reason: string }
+
+/**
+ * Handle de sala tipada: `this.$room(ChatRoom, 'lobby')`.
+ * Métodos customizados da LiveRoom (ex.: `addMessage`) ficam acessíveis via `R`.
+ */
+export type TypedRoomHandle<R extends AnyLiveRoom> = R & {
+  readonly id: string
+  /** Assíncrono: aguarde (`await`) para saber se o `onJoin` da sala recusou. */
+  join: (payload?: unknown) => Promise<RoomJoinResult>
+  leave: () => Promise<void>
+  // Issue #15: mantém o par evento/dado tipado + terceiro argumento opcional.
+  emit: <K extends keyof InferRoomEvents<R> & string>(event: K, data: InferRoomEvents<R>[K], options?: RoomEmitOptions) => number
+  on: <K extends keyof InferRoomEvents<R> & string>(event: K, handler: (data: InferRoomEvents<R>[K]) => void) => () => void
+  setState: (updates: Partial<R['state']>) => void
+  readonly memberCount: number
+}
+
+/** Tipo de `this.$room`: handle da sala padrão + chamadas `$room(id)` e `$room(Classe, id)`. */
+export type LiveComponentRoomAccessor = ServerRoomProxy & {
+  <R extends AnyLiveRoom>(roomClass: LiveRoomClass<R>, instanceId: string): TypedRoomHandle<R>
 }
 
 /** Keys that belong to the handle/proxy itself — never fall through to state */
@@ -50,8 +74,8 @@ const TYPED_RESERVED_KEYS = new Set<string | symbol>([
 /** Wrap a handle/proxy so unknown property access falls through to state */
 function wrapWithStateProxy<T extends object>(
   target: T,
-  getState: () => any,
-  setState: (updates: any) => void,
+  getState: () => Record<string, unknown> | undefined,
+  setState: (updates: Record<string, unknown>) => void,
 ): T {
   return new Proxy(target, {
     get(obj, prop, receiver) {
@@ -81,7 +105,7 @@ export class ComponentRoomProxy {
   private roomEventUnsubscribers: (() => void)[] = []
   private joinedRooms: Set<string> = new Set()
   private roomHandles: Map<string, ServerRoomHandle> = new Map()
-  private _roomProxy: ServerRoomProxy | null = null
+  private _roomProxy: LiveComponentRoomAccessor | null = null
   private _roomsCache: string[] | null = null
   private _cachedCtx: LiveComponentContext | null = null
 
@@ -91,7 +115,7 @@ export class ComponentRoomProxy {
   private componentId: string
   private ws: GenericWebSocket
   private getCtx: () => LiveComponentContext
-  private setStateFn: (updates: any) => void
+  private setStateFn: (updates: Record<string, unknown>) => void
   private _deepDiff: boolean
   private _deepDiffDepth: number | undefined
   private _serverOnlyState: boolean
@@ -121,7 +145,7 @@ export class ComponentRoomProxy {
     return this._cachedCtx
   }
 
-  get $room(): ServerRoomProxy {
+  get $room(): LiveComponentRoomAccessor {
     if (this._roomProxy) return this._roomProxy
 
     const self = this
@@ -135,7 +159,7 @@ export class ComponentRoomProxy {
         get id() { return roomId },
         get state() { return self.ctx.roomManager.getRoomState(roomId) },
 
-        join: async (initialState?: any) => {
+        join: async (initialState?: Record<string, unknown>) => {
           if (self.joinedRooms.has(roomId)) return
           self.joinedRooms.add(roomId)
           self._roomsCache = null
@@ -151,7 +175,7 @@ export class ComponentRoomProxy {
           // onRoomLeave hook is called from LiveComponent
         },
 
-        emit: (event: string, data: any, options?: { includeSelf?: boolean }): number => {
+        emit: (event: string, data: unknown, options?: RoomEmitOptions): number => {
           // Issue #15: by default exclude the caller so `room.emit` means
           // "broadcast to everyone else", matching the historical behaviour.
           // Callers that want their own `room.on` handler to fire too
@@ -160,7 +184,7 @@ export class ComponentRoomProxy {
           return self.ctx.roomManager.emitToRoom(roomId, event, data, excludeId)
         },
 
-        on: (event: string, handler: (data: any) => void): (() => void) => {
+        on: (event: string, handler: (data: unknown) => void): (() => void) => {
           const unsubscribe = self.ctx.roomEvents.on(
             'room',
             roomId,
@@ -172,7 +196,7 @@ export class ComponentRoomProxy {
           return unsubscribe
         },
 
-        setState: (updates: any) => {
+        setState: (updates: Partial<Record<string, unknown>>) => {
           self.ctx.roomManager.setRoomState(roomId, updates, self.componentId)
         }
       }
@@ -180,19 +204,23 @@ export class ComponentRoomProxy {
       const proxied = wrapWithStateProxy(
         handle,
         () => self.ctx.roomManager.getRoomState(roomId),
-        (updates: any) => self.ctx.roomManager.setRoomState(roomId, updates, self.componentId),
+        (updates) => self.ctx.roomManager.setRoomState(roomId, updates, self.componentId),
       )
       this.roomHandles.set(roomId, proxied)
       return proxied
     }
 
     // Overloaded: $room('roomId') → untyped handle, $room(ChatRoom, 'lobby') → typed handle
+    // Os membros de ServerRoomProxy (id/state/join/...) são definidos logo abaixo
+    // via defineProperties — por isso o cast da função crua.
     const proxyFn = ((roomIdOrClass: string | LiveRoomClass, instanceId?: string) => {
-      if (typeof roomIdOrClass === 'function' && instanceId !== undefined) {
-        return self.$typedRoom(roomIdOrClass as LiveRoomClass<any>, instanceId)
+      if (typeof roomIdOrClass === 'function') {
+        if (instanceId !== undefined) return self.$typedRoom(roomIdOrClass, instanceId)
+        // Classe sem instanceId: comportamento antigo (usa a classe como id)
+        return createHandle(String(roomIdOrClass))
       }
-      return createHandle(roomIdOrClass as string)
-    }) as ServerRoomProxy
+      return createHandle(roomIdOrClass)
+    }) as LiveComponentRoomAccessor
 
     const defaultHandle = this.room ? createHandle(this.room) : null
 
@@ -200,7 +228,7 @@ export class ComponentRoomProxy {
       id: { get: () => self.room },
       state: { get: () => defaultHandle?.state ?? {} },
       join: {
-        value: (initialState?: any) => {
+        value: (initialState?: Record<string, unknown>) => {
           if (!defaultHandle) throw new Error('No default room set')
           defaultHandle.join(initialState)
         }
@@ -212,19 +240,19 @@ export class ComponentRoomProxy {
         }
       },
       emit: {
-        value: (event: string, data: any, options?: { includeSelf?: boolean }) => {
+        value: (event: string, data: unknown, options?: RoomEmitOptions) => {
           if (!defaultHandle) throw new Error('No default room set')
-          return (defaultHandle as any).emit(event, data, options)
+          return defaultHandle.emit(event, data, options)
         }
       },
       on: {
-        value: (event: string, handler: (data: any) => void) => {
+        value: (event: string, handler: (data: unknown) => void) => {
           if (!defaultHandle) throw new Error('No default room set')
           return defaultHandle.on(event, handler)
         }
       },
       setState: {
-        value: (updates: any) => {
+        value: (updates: Record<string, unknown>) => {
           if (!defaultHandle) throw new Error('No default room set')
           defaultHandle.setState(updates)
         }
@@ -237,12 +265,12 @@ export class ComponentRoomProxy {
       ? wrapWithStateProxy(
           proxyFn,
           () => self.ctx.roomManager.getRoomState(defaultRoom),
-          (updates: any) => self.ctx.roomManager.setRoomState(defaultRoom, updates, self.componentId),
+          (updates) => self.ctx.roomManager.setRoomState(defaultRoom, updates, self.componentId),
         )
       : proxyFn
 
-    this._roomProxy = wrapped as ServerRoomProxy
-    return wrapped as ServerRoomProxy
+    this._roomProxy = wrapped
+    return wrapped
   }
 
   /**
@@ -257,24 +285,17 @@ export class ComponentRoomProxy {
    *
    * The compound room ID is `${roomClass.roomName}:${instanceId}`.
    */
-  $typedRoom<R extends LiveRoom<any, any, any>>(
+  $typedRoom<R extends AnyLiveRoom>(
     roomClass: LiveRoomClass<R>,
     instanceId: string,
-  ): R & {
-    readonly id: string
-    join: (payload?: any) => { rejected?: false } | { rejected: true; reason: string }
-    leave: () => void
-    emit: R['emit']
-    on: <K extends string>(event: K, handler: (data: any) => void) => () => void
-    setState: (updates: Partial<R['state']>) => void
-    readonly memberCount: number
-  } {
+  ): TypedRoomHandle<R> {
     const roomId = `${roomClass.roomName}:${instanceId}`
     const self = this
 
     // Return cached handle if it exists
+    // (mesmo Map dos handles não tipados: um id de sala tem um único handle)
     const cached = this.roomHandles.get(roomId)
-    if (cached) return cached as any
+    if (cached) return cached as unknown as TypedRoomHandle<R>
 
     const handle = {
       get id() { return roomId },
@@ -294,7 +315,7 @@ export class ComponentRoomProxy {
         return self.ctx.roomManager.getMemberCount?.(roomId) ?? 0
       },
 
-      join: async (payload?: any): Promise<{ rejected?: false } | { rejected: true; reason: string }> => {
+      join: async (payload?: unknown): Promise<RoomJoinResult> => {
         if (self.joinedRooms.has(roomId)) return {}
         const result = await self.ctx.roomManager.joinRoom(
           self.componentId, roomId, self.ws, undefined, undefined,
@@ -324,14 +345,14 @@ export class ComponentRoomProxy {
         await self.ctx.roomManager.leaveRoom(self.componentId, roomId, 'leave')
       },
 
-      emit: ((event: string, data: any, options?: { includeSelf?: boolean }): number => {
+      emit: (event: string, data: unknown, options?: RoomEmitOptions): number => {
         // Issue #15: see the untyped handle above for rationale. The default
         // still excludes the caller; pass `{ includeSelf: true }` to opt in.
         const excludeId = options?.includeSelf ? undefined : self.componentId
         return self.ctx.roomManager.emitToRoom(roomId, event, data, excludeId)
-      }) as any,
+      },
 
-      on: (event: string, handler: (data: any) => void): (() => void) => {
+      on: (event: string, handler: (data: unknown) => void): (() => void) => {
         const unsubscribe = self.ctx.roomEvents.on(
           'room', roomId, event, self.componentId, handler,
         )
@@ -339,7 +360,7 @@ export class ComponentRoomProxy {
         return unsubscribe
       },
 
-      setState: (updates: any) => {
+      setState: (updates: Partial<R['state']>) => {
         self.ctx.roomManager.setRoomState(roomId, updates, self.componentId)
       },
     }
@@ -356,7 +377,7 @@ export class ComponentRoomProxy {
         // Fall through to LiveRoom instance (custom methods like addMessage, ban, etc.)
         const instance = self.ctx.roomManager.getRoomInstance?.(roomId)
         if (instance && prop in instance) {
-          const val = (instance as any)[prop]
+          const val: unknown = Reflect.get(instance, prop)
           // Bind methods to the instance
           return typeof val === 'function' ? val.bind(instance) : val
         }
@@ -373,8 +394,11 @@ export class ComponentRoomProxy {
       },
     })
 
-    this.roomHandles.set(roomId, proxied as any)
-    return proxied as any
+    // O Proxy acima cai para os métodos da instância R em runtime; o TS não
+    // enxerga isso, daí o cast para o handle tipado.
+    const typed = proxied as unknown as TypedRoomHandle<R>
+    this.roomHandles.set(roomId, typed as unknown as ServerRoomHandle)
+    return typed
   }
 
   get $rooms(): string[] {
@@ -387,7 +411,7 @@ export class ComponentRoomProxy {
     return this.joinedRooms
   }
 
-  emitRoomEvent(event: string, data: any, notifySelf = false): number {
+  emitRoomEvent(event: string, data: unknown, notifySelf = false): number {
     if (!this.room) {
       liveWarn('rooms', this.componentId, `[${this.componentId}] Cannot emit room event '${event}' - no room set`)
       return 0
@@ -401,7 +425,7 @@ export class ComponentRoomProxy {
     return notified
   }
 
-  onRoomEvent<T = any>(event: string, handler: (data: T) => void): void {
+  onRoomEvent<T = unknown>(event: string, handler: (data: T) => void): void {
     if (!this.room) {
       liveWarn('rooms', this.componentId, `[${this.componentId}] Cannot subscribe to room event '${event}' - no room set`)
       return
@@ -420,7 +444,7 @@ export class ComponentRoomProxy {
     liveLog('rooms', this.componentId, `[${this.componentId}] Subscribed to room event '${event}'`)
   }
 
-  emitRoomEventWithState(event: string, data: any, stateUpdates: any): number {
+  emitRoomEventWithState(event: string, data: unknown, stateUpdates: Record<string, unknown>): number {
     this.setStateFn(stateUpdates)
     return this.emitRoomEvent(event, data, false)
   }
@@ -444,7 +468,7 @@ export class ComponentRoomProxy {
       for (const roomId of this.joinedRooms) {
         // leaveRoom is async but destroy() is sync — fire-and-forget during cleanup
         const result = this._cachedCtx.roomManager.leaveRoom(this.componentId, roomId)
-        if (result && typeof (result as any).catch === 'function') (result as Promise<void>).catch(() => {})
+        if (result instanceof Promise) result.catch(() => {})
       }
     }
     this.joinedRooms.clear()

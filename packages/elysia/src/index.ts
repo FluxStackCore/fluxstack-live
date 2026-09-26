@@ -15,41 +15,122 @@
 import { readFileSync, existsSync } from 'fs'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
-import type { Elysia } from 'elysia'
+import type { AnyElysia } from 'elysia'
 import type {
   LiveTransport,
   WebSocketConfig,
   HttpRouteDefinition,
+  RawHttpRoute,
   GenericWebSocket,
   LiveWSData,
 } from '@fluxstack/live'
 
-export class ElysiaTransport implements LiveTransport {
-  private app: Elysia<any>
+/**
+ * Formato mínimo do `ServerWebSocket` do Bun que o adapter usa. Tipado de forma
+ * estrutural para não depender de `bun-types` nem dos genéricos do `ElysiaWS`.
+ */
+interface BunServerWsLike {
+  send(data: string | ArrayBuffer | Uint8Array, compress?: boolean): number | void
+  close(code?: number, reason?: string): void
+  readonly readyState: number
+  readonly remoteAddress?: string
+  /** Slot de dados do Bun — o Elysia guarda aqui o contexto da rota (headers etc.). */
+  readonly data?: unknown
+}
 
-  constructor(app: Elysia<any>) {
+/** O `ElysiaWS` expõe o socket cru em `.raw`; em versões antigas o próprio objeto é o socket. */
+interface ElysiaWsLike {
+  readonly raw?: BunServerWsLike
+}
+
+/** Propriedades "expando" gravadas pelo adapter no socket cru. */
+type LiveRawWs = BunServerWsLike & {
+  __liveWs?: GenericWebSocket
+  __liveData?: LiveWSData
+}
+
+/** Headers no estilo Fetch (`Headers`) — só `get` é usado. */
+interface HeadersLike {
+  get?(name: string): string | null
+}
+
+/** Formato do contexto da rota que o Elysia grava em `raw.data`. */
+interface ElysiaWsRouteData {
+  headers?: HeadersLike
+  server?: { upgrade?: { headers?: HeadersLike } }
+}
+
+/** Subconjunto do `Context` do Elysia usado nas rotas HTTP de monitoramento. */
+interface ElysiaRouteContext {
+  params?: Record<string, string>
+  query?: Record<string, string | undefined>
+  body: unknown
+  headers?: Record<string, string | undefined>
+  set: {
+    status?: number | string
+    headers: Record<string, string | number>
+  }
+}
+
+function getRawWs(elysiaWs: ElysiaWsLike): LiveRawWs {
+  return (elysiaWs.raw || elysiaWs) as LiveRawWs
+}
+
+export interface ElysiaTransportOptions {
+  /**
+   * Tamanho máximo de um frame WebSocket (bytes). O Bun corta antes de chegar
+   * ao LiveServer. Default: 4MB (igual ao `maxMessageSize` do core).
+   */
+  maxPayloadLength?: number
+}
+
+export class ElysiaTransport implements LiveTransport {
+  private app: AnyElysia
+  private options: ElysiaTransportOptions
+
+  constructor(app: AnyElysia, options: ElysiaTransportOptions = {}) {
     this.app = app
+    this.options = options
+  }
+
+  /**
+   * Rotas Fetch (Request/Response) — usadas pelo transporte SSE.
+   * `parse: 'none'` impede o Elysia de consumir o corpo: o handler lê o
+   * corpo cru (JSON ou binário) da Request original.
+   */
+  registerRawRoutes(routes: RawHttpRoute[]): void {
+    for (const route of routes) {
+      // Com `AnyElysia` o contexto chega como `{ [x: string]: any }`; recebemos
+      // como `object` e estreitamos para o subconjunto que usamos.
+      const handler = (context: object) => route.handler((context as { request: Request }).request)
+      if (route.method === 'GET') this.app.get(route.path, handler)
+      else this.app.post(route.path, handler, { parse: 'none' })
+    }
   }
 
   registerWebSocket(config: WebSocketConfig): void {
     this.app.ws(config.path, {
-      open(elysiaWs: any) {
+      maxPayloadLength: this.options.maxPayloadLength ?? 4 * 1024 * 1024,
+      open(elysiaWs: ElysiaWsLike) {
         // Wrap Elysia WS into GenericWebSocket
         const ws = wrapElysiaWs(elysiaWs)
         // Extract origin from upgrade request headers for CSRF validation.
         // Pre-set on ws.data so handleOpen() can read it before overwriting.
         try {
-          const raw = elysiaWs.raw || elysiaWs
-          const origin = raw.data?.headers?.get?.('origin')
-            || raw.data?.server?.upgrade?.headers?.get?.('origin')
+          const routeData = getRawWs(elysiaWs).data as ElysiaWsRouteData | undefined
+          const origin = routeData?.headers?.get?.('origin')
+            || routeData?.server?.upgrade?.headers?.get?.('origin')
             || undefined
           if (origin) {
-            ws.data = { origin } as any
+            // Pré-preenchimento parcial: handleOpen() lê `origin` e depois
+            // sobrescreve ws.data com o LiveWSData completo.
+            const partial: Partial<LiveWSData> = { origin }
+            ws.data = partial as LiveWSData
           }
         } catch { /* origin extraction is best-effort */ }
         config.onOpen(ws)
       },
-      message(elysiaWs: any, rawMessage: unknown) {
+      message(elysiaWs: ElysiaWsLike, rawMessage: unknown) {
         const ws = wrapElysiaWs(elysiaWs)
         const isBinary = rawMessage instanceof ArrayBuffer || rawMessage instanceof Uint8Array
         // Elysia auto-parses JSON messages into objects. LiveServer expects
@@ -59,12 +140,12 @@ export class ElysiaTransport implements LiveTransport {
           : rawMessage
         config.onMessage(ws, message, isBinary)
       },
-      close(elysiaWs: any, code?: number, reason?: string) {
+      close(elysiaWs: ElysiaWsLike, code?: number, reason?: string) {
         const ws = wrapElysiaWs(elysiaWs)
         config.onClose(ws, code ?? 1000, reason ?? '')
       },
       // @ts-ignore - Elysia's error handler signature varies between versions
-      error(elysiaWs: any, error: any) {
+      error(elysiaWs: ElysiaWsLike, error: unknown) {
         if (config.onError) {
           const ws = wrapElysiaWs(elysiaWs)
           config.onError(ws, error instanceof Error ? error : new Error(String(error)))
@@ -102,7 +183,8 @@ export class ElysiaTransport implements LiveTransport {
 
   registerHttpRoutes(routes: HttpRouteDefinition[]): void {
     for (const route of routes) {
-      const handler = async (ctx: any) => {
+      const handler = async (context: object) => {
+        const ctx = context as ElysiaRouteContext
         try {
           const request = {
             params: ctx.params || {},
@@ -119,9 +201,9 @@ export class ElysiaTransport implements LiveTransport {
             }
           }
           return response.body
-        } catch (error: any) {
+        } catch (error: unknown) {
           ctx.set.status = 500
-          return { error: error.message }
+          return { error: (error as { message?: string } | null | undefined)?.message }
         }
       }
 
@@ -163,9 +245,9 @@ function resolveClientBundlePath(): string | null {
  * We must NOT overwrite it. Instead, LiveWSData is stored on a separate `__liveData`
  * property on the raw WS object.
  */
-function wrapElysiaWs(elysiaWs: any): GenericWebSocket {
+function wrapElysiaWs(elysiaWs: ElysiaWsLike): GenericWebSocket {
   // Elysia wraps the raw Bun ServerWebSocket. Access the raw ws:
-  const raw = elysiaWs.raw || elysiaWs
+  const raw = getRawWs(elysiaWs)
 
   // Reuse existing wrapper if already created (stored on the raw ws)
   if (raw.__liveWs) return raw.__liveWs
@@ -180,6 +262,7 @@ function wrapElysiaWs(elysiaWs: any): GenericWebSocket {
       raw.close(code, reason)
     },
     get data(): LiveWSData {
+      // Antes do handleOpen() ainda não existe — mesmo contrato de antes.
       return raw.__liveData as LiveWSData
     },
     set data(value: LiveWSData) {
@@ -189,7 +272,7 @@ function wrapElysiaWs(elysiaWs: any): GenericWebSocket {
       return raw.remoteAddress || ''
     },
     get readyState(): 0 | 1 | 2 | 3 {
-      return raw.readyState
+      return raw.readyState as 0 | 1 | 2 | 3
     }
   }
 

@@ -11,15 +11,24 @@
 import type { GenericWebSocket } from './types'
 import { MAX_QUEUE_SIZE } from '../protocol/constants'
 import { liveWarn } from '../debug/LiveLogger'
+import { errorMessage } from '../utils/errors'
 
-interface PendingMessage {
+/** Mensagem JSON enfileirada para envio (serializada no flush). */
+export interface PendingMessage {
   type: string
   componentId: string
-  payload: any
-  timestamp: number
+  payload?: unknown
+  timestamp?: number
   userId?: string
   room?: string
-  [key: string]: any
+  requestId?: string
+}
+
+/** `payload.delta` de um STATE_DELTA, quando é um objeto plano. */
+function deltaOf(msg: PendingMessage): Record<string, unknown> | undefined {
+  if (msg.type !== 'STATE_DELTA' || !msg.componentId || !isPlainObject(msg.payload)) return undefined
+  const delta = msg.payload.delta
+  return isPlainObject(delta) ? delta : undefined
 }
 
 // A queued item is either an object (needs serialization) or a pre-serialized string
@@ -258,13 +267,13 @@ function flushOne(ws: GenericWebSocket): void {
         ws.send('[' + parts.join(',') + ']')
       }
     }
-  } catch (err: any) {
+  } catch (err) {
     // Fixes #7 H4: previously this catch was empty, so circular refs,
     // BigInt, getter throws, and post-close ws.send failures were all
     // swallowed with zero telemetry. Count and log so the cause is visible.
     stats.droppedSerializationError += queue.length
     liveWarn('websocket', null,
-      `WsSendBatcher flush failed (${queue.length} message${queue.length === 1 ? '' : 's'} dropped): ${err?.message || err}`)
+      `WsSendBatcher flush failed (${queue.length} message${queue.length === 1 ? '' : 's'} dropped): ${errorMessage(err)}`)
   }
 }
 
@@ -307,7 +316,7 @@ function deduplicateDeltas(messages: PendingMessage[]): PendingMessage[] {
   let firstDupIdx = -1
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]!
-    if (msg.type === 'STATE_DELTA' && msg.componentId && msg.payload?.delta) {
+    if (deltaOf(msg)) {
       if (firstSeen.has(msg.componentId)) {
         firstDupIdx = i
         break
@@ -324,13 +333,14 @@ function deduplicateDeltas(messages: PendingMessage[]): PendingMessage[] {
   for (let i = 0; i < firstDupIdx; i++) {
     const m = messages[i]!
     result[i] = m
-    if (m.type === 'STATE_DELTA' && m.componentId && m.payload?.delta) {
+    if (deltaOf(m)) {
       deltaIndices.set(m.componentId, i)
     }
   }
   for (let i = firstDupIdx; i < messages.length; i++) {
     const msg = messages[i]!
-    if (msg.type === 'STATE_DELTA' && msg.componentId && msg.payload?.delta) {
+    const msgDelta = deltaOf(msg)
+    if (msgDelta) {
       const existing = deltaIndices.get(msg.componentId)
       if (existing !== undefined) {
         // Deep-merge into existing message. We clone the target lazily here
@@ -338,7 +348,7 @@ function deduplicateDeltas(messages: PendingMessage[]): PendingMessage[] {
         const target = result[existing]!
         const cloned: PendingMessage = {
           ...target,
-          payload: { delta: mergeDeltas(target.payload.delta, msg.payload.delta) },
+          payload: { delta: mergeDeltas(deltaOf(target) ?? {}, msgDelta) },
           timestamp: msg.timestamp,
         }
         result[existing] = cloned
@@ -375,9 +385,9 @@ export function sendBinaryImmediate(ws: GenericWebSocket, data: Uint8Array): voi
   flushOne(ws)
   try {
     ws.send(data)
-  } catch (err: any) {
+  } catch (err) {
     stats.droppedSerializationError++
-    liveWarn('websocket', null, `WsSendBatcher sendBinaryImmediate failed: ${err?.message || err}`)
+    liveWarn('websocket', null, `WsSendBatcher sendBinaryImmediate failed: ${errorMessage(err)}`)
   }
 }
 
@@ -398,8 +408,8 @@ export function sendImmediate(ws: GenericWebSocket, data: string): void {
   flushOne(ws)
   try {
     ws.send(data)
-  } catch (err: any) {
+  } catch (err) {
     stats.droppedSerializationError++
-    liveWarn('websocket', null, `WsSendBatcher sendImmediate failed: ${err?.message || err}`)
+    liveWarn('websocket', null, `WsSendBatcher sendImmediate failed: ${errorMessage(err)}`)
   }
 }

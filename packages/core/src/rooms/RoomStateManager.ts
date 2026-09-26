@@ -1,6 +1,7 @@
 // @fluxstack/live - Room State Manager (In-memory storage per room)
 
-type RoomStateData = Record<string, any>
+/** State de uma sala: qualquer objeto (interfaces e type aliases são aceitos). */
+type RoomStateData = object
 
 interface RoomInfo {
   state: RoomStateData

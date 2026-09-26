@@ -95,7 +95,18 @@ Guarda contra referência circular via `seen` Set.
 
 Fluxo: (1) lookup da classe → (2) auth check → (3) singleton local/remote/cluster →
 (4) cria instância → (5) metadata+logging → (6) emite `STATE_UPDATE` com `signedState`
-→ (7) `onConnect()` + `await onMount()` → (8) retorna `componentId` + `initialState`.
+(versão 1) e liga a renovação → (7) `onConnect()` + `await onMount()` → (8) retorna
+`componentId` + `initialState`.
+
+**Renovação do signedState (2026-09-26):** todo STATE_DELTA (JSON ou
+`sendBinaryDelta`) chama o gancho `STATE_DELTA_HOOK_KEY`, que avisa o
+`SignedStateRenewer`. Ele re-assina o estado **atual** no máximo 1× por
+`stateSignature.renewInterval` (default 1000 ms; `0` desliga) — leading adiado 1 tick
+(pega o lote síncrono da action) + trailing (estado final da rajada) — e o registry
+emite `STATE_SIGNATURE { signedState }` (versão monotônica por componente). O
+client/react guarda sempre a mais recente e a usa no rehydrate, que então retoma do
+estado atual e não do snapshot do mount. Mount, rehydrate (`version+1`), resync e
+entrada em singleton também abrem a janela. Modelo de ameaça: spec 03 §1.2.1.
 No cluster: pré-gera o ID, `claimSingleton` atômico, fallback para remote proxy.
 
 ### 1.7 Singletons — `EMIT_OVERRIDE_KEY` — `ComponentRegistry.ts:400-425`

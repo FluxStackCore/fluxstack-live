@@ -1,0 +1,16 @@
+{
+  "total": 1,
+  "packages": {
+    "cli": 0,
+    "client": 0,
+    "core": 0,
+    "elysia": 0,
+    "express": 0,
+    "fastify": 0,
+    "plugin-kit": 1,
+    "react": 0,
+    "redis": 0,
+    "spatial-room": 0,
+    "vue": 0
+  }
+}

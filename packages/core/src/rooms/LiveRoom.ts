@@ -17,7 +17,7 @@ import type { LiveAuthSession } from '../auth/types'
 
 // ===== Lifecycle Context Types =====
 
-export interface RoomJoinContext<TMembership = any> {
+export interface RoomJoinContext<TMembership = unknown> {
   componentId: string
   /**
    * Full auth session of the joining peer (when authenticated). Generic by
@@ -28,7 +28,8 @@ export interface RoomJoinContext<TMembership = any> {
   session?: LiveAuthSession
   /** @deprecated Use `session?.id`. Kept for backwards compatibility. */
   userId?: string
-  payload?: any
+  /** Payload enviado em `$room(Classe, id).join(payload)` (formato definido pela sala). */
+  payload?: unknown
   /**
    * Per-member, server-only metadata bag. Mutate freely from `onJoin`
    * (e.g. `ctx.membership.playerId = payload.playerId`); the same object
@@ -40,7 +41,7 @@ export interface RoomJoinContext<TMembership = any> {
   membership: TMembership
 }
 
-export interface RoomLeaveContext<TMembership = any> {
+export interface RoomLeaveContext<TMembership = unknown> {
   componentId: string
   /**
    * Full auth session captured at join time. See `RoomJoinContext.session`.
@@ -96,18 +97,18 @@ export interface LiveRoomOptions {
  * @typeParam TEvents - Event map for typed emit/on
  */
 export abstract class LiveRoom<
-  TState extends Record<string, any> = Record<string, any>,
-  TMeta extends Record<string, any> = Record<string, any>,
-  TEvents extends Record<string, any> = Record<string, any>,
+  TState extends object = Record<string, unknown>,
+  TMeta extends object = Record<string, unknown>,
+  TEvents extends object = Record<string, unknown>,
 > {
   /** Unique room type name. Used as prefix in compound room IDs (e.g. "chat:lobby"). */
   static roomName: string
 
   /** Initial public state template. Cloned per room instance. */
-  static defaultState: Record<string, any> = {}
+  static defaultState: object = {}
 
   /** Initial private metadata template. Cloned per room instance. */
-  static defaultMeta: Record<string, any> = {}
+  static defaultMeta: object = {}
 
   /** Room-level options */
   static $options?: LiveRoomOptions
@@ -194,7 +195,7 @@ export abstract class LiveRoom<
    * Called when an event is emitted to this room.
    * Can intercept/validate events before broadcasting.
    */
-  onEvent(_event: string, _data: any, _ctx: RoomEventContext): void | Promise<void> {}
+  onEvent(_event: string, _data: unknown, _ctx: RoomEventContext): void | Promise<void> {}
 
   /**
    * Called once when the room is first created (first member joins).
@@ -211,22 +212,27 @@ export abstract class LiveRoom<
 // ===== Type Utilities =====
 
 /** Extract the public state type from a LiveRoom subclass */
+// Inferência pelos campos (e não por `R extends LiveRoom<infer S, ...>`): funciona
+// para qualquer subclasse sem depender da variância dos genéricos.
 export type InferRoomState<R> =
-  R extends LiveRoom<infer S, any, any> ? S : Record<string, any>
+  R extends { state: infer S } ? S : Record<string, unknown>
 
 /** Extract the private meta type from a LiveRoom subclass */
 export type InferRoomMeta<R> =
-  R extends LiveRoom<any, infer M, any> ? M : Record<string, any>
+  R extends { meta: infer M } ? M : Record<string, unknown>
 
 /** Extract the events type from a LiveRoom subclass */
 export type InferRoomEvents<R> =
-  R extends LiveRoom<any, any, infer E> ? E : Record<string, any>
+  R extends { readonly $events: infer E } ? E : Record<string, unknown>
+
+/** Qualquer LiveRoom, com os genéricos apagados (coleções heterogêneas). */
+export type AnyLiveRoom = LiveRoom<object, object, object>
 
 /** LiveRoom class constructor type */
-export type LiveRoomClass<R extends LiveRoom = LiveRoom> = {
+export type LiveRoomClass<R extends AnyLiveRoom = AnyLiveRoom> = {
   new (id: string, manager: LiveRoomManagerInterface): R
   roomName: string
-  defaultState: Record<string, any>
-  defaultMeta: Record<string, any>
+  defaultState: object
+  defaultMeta: object
   $options?: LiveRoomOptions
 }

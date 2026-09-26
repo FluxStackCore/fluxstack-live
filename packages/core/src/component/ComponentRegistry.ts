@@ -3,19 +3,26 @@
 // Enhanced component registry with lifecycle management, health monitoring,
 // state signing, singleton support, and auto-discovery.
 
-import type { LiveComponent } from './LiveComponent'
+import type { AnyLiveComponent, LiveComponentClass, LiveComponentConstructorOptions } from './LiveComponent'
 import { EMIT_OVERRIDE_KEY } from './LiveComponent'
+import { STATE_DELTA_HOOK_KEY } from './managers/ComponentMessaging'
+import { SignedStateRenewer } from './SignedStateRenewer'
+import { internals } from './internals'
 import type { GenericWebSocket, LiveWSData } from '../transport/types'
 import { queueWsMessage, queuePreSerialized, sendImmediate } from '../transport/WsSendBatcher'
-import type { LiveMessage, BroadcastMessage, ComponentDefinition } from '../protocol/messages'
-import type { LiveComponentAuth, LiveActionAuthMap } from '../auth/types'
+import type { LiveMessage, LiveMessageType, BroadcastMessage, ComponentDefinition, RegistryClientMessage } from '../protocol/messages'
+import { isRecord } from '../protocol/validation'
 import { ANONYMOUS_CONTEXT } from '../auth/LiveAuthContext'
 import type { LiveAuthManager } from '../auth/LiveAuthManager'
 import type { StateSignatureManager, SignedState } from '../security/StateSignature'
 import type { PerformanceMonitor } from '../monitoring/PerformanceMonitor'
-import { liveLog, registerComponentLogging, unregisterComponentLogging } from '../debug/LiveLogger'
+import { liveLog, liveWarn, registerComponentLogging, unregisterComponentLogging } from '../debug/LiveLogger'
 import type { IClusterAdapter, ClusterActionRequest, ClusterActionResponse } from '../cluster/types'
 import { generateId as defaultGenerateId } from '../utils/generateId'
+import type { ActionCaller } from './managers/ActionSecurityManager'
+import type { LiveAuthContext } from '../auth/types'
+import { AuthenticatedContext } from '../auth/LiveAuthContext'
+import { errorMessage, toError } from '../utils/errors'
 
 export interface ComponentMetadata {
   id: string
@@ -26,7 +33,7 @@ export interface ComponentMetadata {
   state: 'mounting' | 'active' | 'inactive' | 'error' | 'destroying'
   healthStatus: 'healthy' | 'degraded' | 'unhealthy'
   dependencies: string[]
-  services: Map<string, any>
+  services: Map<string, unknown>
   metrics: ComponentMetrics
   migrationHistory: StateMigration[]
 }
@@ -61,19 +68,32 @@ interface RemoteSingletonEntry {
   componentName: string
   componentId: string
   ownerInstanceId: string
-  lastState: any
+  lastState: Record<string, unknown>
   connections: Map<string, GenericWebSocket>
 }
 
+
+/**
+ * Log de erros que antes eram engolidos em silêncio (`catch {}`).
+ * Hooks de lifecycle e persistência do cluster não derrubam o fluxo,
+ * mas a falha precisa aparecer no log.
+ */
+function logSwallowed(context: string): (err: unknown) => void {
+  return (err: unknown) => {
+    const msg = errorMessage(err)
+    console.error(`[LiveComponents] ${context} failed: ${msg}`)
+  }
+}
+
 export class ComponentRegistry {
-  private components = new Map<string, LiveComponent>()
-  private definitions = new Map<string, ComponentDefinition<any>>()
+  private components = new Map<string, AnyLiveComponent>()
+  private definitions = new Map<string, ComponentDefinition<Record<string, unknown>>>()
   private metadata = new Map<string, ComponentMetadata>()
   private rooms = new Map<string, Set<string>>()
   private wsConnections = new Map<string, GenericWebSocket>()
-  private autoDiscoveredComponents = new Map<string, new (initialState: any, ws: GenericWebSocket, options?: { room?: string; userId?: string }) => LiveComponent<any>>()
+  private autoDiscoveredComponents = new Map<string, LiveComponentClass>()
   private healthCheckInterval?: ReturnType<typeof setInterval>
-  private singletons = new Map<string, { instance: LiveComponent; connections: Map<string, GenericWebSocket> }>()
+  private singletons = new Map<string, { instance: AnyLiveComponent; connections: Map<string, GenericWebSocket> }>()
   private remoteSingletons = new Map<string, RemoteSingletonEntry>()
   private cluster?: IClusterAdapter
 
@@ -82,12 +102,27 @@ export class ComponentRegistry {
   private performanceMonitor: PerformanceMonitor
   private _generateId?: () => string
 
+  /**
+   * Renovação throttled do signedState (ver `SignedStateRenewer`). Sem ela a
+   * re-hidratação voltava ao snapshot do mount.
+   */
+  private signatureRenewer: SignedStateRenewer
+  /** Por componente: nome usado em `__componentName` e última versão assinada. */
+  private signatureMeta = new Map<string, { name: string; version: number }>()
+
   constructor(deps: ComponentRegistryDeps) {
     this.authManager = deps.authManager
     this.stateSignature = deps.stateSignature
     this.performanceMonitor = deps.performanceMonitor
     this.cluster = deps.cluster
     this._generateId = deps.generateId
+
+    // `renewInterval` pode faltar em mocks de StateSignatureManager -> desligado.
+    const renewInterval: unknown = (deps.stateSignature as { renewInterval?: unknown }).renewInterval
+    this.signatureRenewer = new SignedStateRenewer({
+      intervalMs: typeof renewInterval === 'number' ? renewInterval : 0,
+      renew: (componentId) => this.renewSignedState(componentId),
+    })
 
     this.setupHealthMonitoring()
     this.setupClusterHandlers()
@@ -103,7 +138,7 @@ export class ComponentRegistry {
       if (!remote || remote.componentId !== componentId) return
 
       // Apply delta to local cache
-      if (delta && remote.lastState) {
+      if (isRecord(delta) && remote.lastState) {
         Object.assign(remote.lastState, delta)
       }
 
@@ -130,7 +165,7 @@ export class ComponentRegistry {
       if (!singleton) return
 
       // Save final state before losing ownership
-      this.cluster!.saveSingletonState(componentName, singleton.instance.getSerializableState()).catch(() => {})
+      this.cluster!.saveSingletonState(componentName, singleton.instance.getSerializableState()).catch(logSwallowed('cluster.saveSingletonState'))
 
       // Notify all local clients that this singleton is being destroyed
       const errorMsg = JSON.stringify({
@@ -139,7 +174,7 @@ export class ComponentRegistry {
         payload: { error: 'OWNERSHIP_LOST: singleton moved to another server' }
       })
       for (const [, ws] of singleton.connections) {
-        try { ws.send(errorMsg) } catch { /* ignore */ }
+        try { ws.send(errorMsg) } catch { /* conexão já fechada */ }
       }
 
       // Clean up local singleton
@@ -156,10 +191,18 @@ export class ComponentRegistry {
           return { success: false, error: 'OWNERSHIP_LOST: this instance no longer owns the singleton', requestId: request.requestId }
         }
 
-        const result = await this.executeAction(request.componentId, request.action, request.payload)
+        // Identidade do usuário que originou a chamada na outra instância.
+        // Sem ela, a action seria autorizada como anônima (nunca com o $auth do singleton).
+        const callerAuth: LiveAuthContext = request.callerSession
+          ? new AuthenticatedContext(request.callerSession)
+          : ANONYMOUS_CONTEXT
+        const result = await this.executeAction(request.componentId, request.action, request.payload, {
+          connectionId: request.callerConnectionId,
+          auth: callerAuth,
+        })
         return { success: true, result, requestId: request.requestId }
-      } catch (error: any) {
-        return { success: false, error: error.message, requestId: request.requestId }
+      } catch (error) {
+        return { success: false, error: errorMessage(error), requestId: request.requestId }
       }
     })
   }
@@ -168,12 +211,14 @@ export class ComponentRegistry {
     this.healthCheckInterval = setInterval(() => this.performHealthChecks(), 30000)
   }
 
-  registerComponent<TState>(definition: ComponentDefinition<TState>) {
-    this.definitions.set(definition.name, definition)
+  registerComponent<TState extends Record<string, unknown>>(definition: ComponentDefinition<TState>) {
+    // O Map guarda definições heterogêneas: o initialState é espalhado junto
+    // das props do cliente, então o TState concreto é apagado aqui.
+    this.definitions.set(definition.name, definition as unknown as ComponentDefinition<Record<string, unknown>>)
     liveLog('lifecycle', null, `Registered component: ${definition.name}`)
   }
 
-  registerComponentClass(name: string, componentClass: new (initialState: any, ws: GenericWebSocket, options?: { room?: string; userId?: string }) => LiveComponent<any>) {
+  registerComponentClass(name: string, componentClass: LiveComponentClass) {
     this.autoDiscoveredComponents.set(name, componentClass)
   }
 
@@ -190,13 +235,11 @@ export class ComponentRegistry {
         if (file.endsWith('.ts') || file.endsWith('.js')) {
           try {
             const fullPath = path.join(componentsPath, file)
-            const module = await import(fullPath)
+            const module: Record<string, unknown> = await import(fullPath)
 
             Object.keys(module).forEach(exportName => {
               const exportedItem = module[exportName]
-              if (typeof exportedItem === 'function' &&
-                  exportedItem.prototype &&
-                  this.isLiveComponentClass(exportedItem)) {
+              if (this.isLiveComponentClass(exportedItem)) {
                 // Prefer static componentName over export name
                 const componentName = exportedItem.componentName || exportName.replace(/Component$/, '')
                 this.registerComponentClass(componentName, exportedItem)
@@ -213,10 +256,11 @@ export class ComponentRegistry {
     }
   }
 
-  private isLiveComponentClass(cls: any): boolean {
+  private isLiveComponentClass(cls: unknown): cls is LiveComponentClass {
+    if (typeof cls !== 'function' || !cls.prototype) return false
     try {
       // Most reliable: check for static componentName (all LiveComponent subclasses define it)
-      if (typeof cls.componentName === 'string') return true
+      if (typeof (cls as { componentName?: unknown }).componentName === 'string') return true
 
       // Check prototype chain for LiveComponent methods (bundler-safe)
       if (cls.prototype && typeof cls.prototype.executeAction === 'function' &&
@@ -225,7 +269,7 @@ export class ComponentRegistry {
 
       // Fallback: walk prototype chain checking class name
       // tsup/esbuild may rename LiveComponent to _LiveComponent in bundles
-      let prototype = cls.prototype
+      let prototype: { constructor: { name: string } } | null = cls.prototype
       while (prototype) {
         const name = prototype.constructor.name
         if (name === 'LiveComponent' || name === '_LiveComponent') return true
@@ -245,7 +289,7 @@ export class ComponentRegistry {
 
     try {
       const definition = this.definitions.get(componentName)
-      let ComponentClass: (new (initialState: any, ws: GenericWebSocket, options?: { room?: string; userId?: string }) => LiveComponent<any>) | null = null
+      let ComponentClass: LiveComponentClass | null = null
       let initialState: Record<string, unknown> = {}
 
       if (definition) {
@@ -270,12 +314,11 @@ export class ComponentRegistry {
 
       // Auth check
       const authContext = ws.data?.authContext || ANONYMOUS_CONTEXT
-      const componentAuth = (ComponentClass as any).auth as LiveComponentAuth | undefined
-      const authResult = await this.authManager.authorizeComponent(authContext, componentAuth)
+      const authResult = await this.authManager.authorizeComponent(authContext, ComponentClass.auth)
       if (!authResult.allowed) throw new Error(`AUTH_DENIED: ${authResult.reason}`)
 
       // Singleton check
-      const isSingleton = (ComponentClass as any).singleton === true
+      const isSingleton = ComponentClass.singleton === true
       let clusterSingletonId: string | null = null
       if (isSingleton) {
         // Check local singleton first
@@ -287,10 +330,7 @@ export class ComponentRegistry {
           ws.data.components.set(existing.instance.id, existing.instance)
 
           const currentState = existing.instance.getSerializableState()
-          const signedState = this.stateSignature.signState(existing.instance.id, {
-            ...currentState,
-            __componentName: componentName
-          }, 1, { compress: true, backup: true })
+          const signedState = this.signComponentState(existing.instance, componentName, currentState)
 
           sendImmediate(ws, JSON.stringify({
             type: 'STATE_UPDATE',
@@ -298,7 +338,7 @@ export class ComponentRegistry {
             payload: { state: currentState, signedState },
           }))
 
-          try { (existing.instance as any).onClientJoin(connId, existing.connections.size) } catch { /* ignore */ }
+          try { internals(existing.instance).onClientJoin(connId, existing.connections.size) } catch (err) { logSwallowed('onClientJoin')(err) }
 
           return { componentId: existing.instance.id, initialState: currentState, signedState }
         }
@@ -336,7 +376,7 @@ export class ComponentRegistry {
                 componentName,
                 componentId: owner.componentId,
                 ownerInstanceId: owner.instanceId,
-                lastState: stored?.state || {},
+                lastState: isRecord(stored?.state) ? stored.state : {},
                 connections: new Map([[connId, ws]])
               }
               this.remoteSingletons.set(componentName, remote)
@@ -352,7 +392,7 @@ export class ComponentRegistry {
           }
 
           // Failover recovery: recovered state from adapter takes priority over client props
-          if (claim.recoveredState) {
+          if (isRecord(claim.recoveredState)) {
             props = { ...props, ...claim.recoveredState }
           }
         }
@@ -364,7 +404,7 @@ export class ComponentRegistry {
 
       // Cluster singleton: replace auto-generated ID with the one used for the atomic claim
       if (clusterSingletonId) {
-        ;(component as any).id = clusterSingletonId
+        internals(component).id = clusterSingletonId
       }
 
       component.broadcastToRoom = (message: BroadcastMessage) => {
@@ -393,13 +433,14 @@ export class ComponentRegistry {
         // Cluster: save initial state (claim already established with correct ID)
         if (this.cluster) {
           const singletonState = component.getSerializableState()
-          this.cluster.saveState(component.id, componentName, singletonState).catch(() => {})
-          this.cluster.saveSingletonState(componentName, singletonState).catch(() => {})
+          this.cluster.saveState(component.id, componentName, singletonState).catch(logSwallowed('cluster.saveState'))
+          this.cluster.saveSingletonState(componentName, singletonState).catch(logSwallowed('cluster.saveSingletonState'))
         }
 
-        ;(component as any)[EMIT_OVERRIDE_KEY] = (type: string, payload: any) => {
+        internals(component)[EMIT_OVERRIDE_KEY] = (type: string, payload: unknown) => {
           const message: LiveMessage = {
-            type: type as any,
+            // emit() aceita qualquer string (tipos custom); o envelope só descreve os conhecidos.
+            type: type as LiveMessageType,
             componentId: component.id,
             payload,
             userId: component.userId,
@@ -416,47 +457,53 @@ export class ComponentRegistry {
           }
 
           // Cluster: publish delta and save state for remote instances
-          if (this.cluster && type === 'STATE_DELTA' && payload?.delta) {
+          if (this.cluster && type === 'STATE_DELTA' && isRecord(payload) && payload.delta) {
             const clusterState = component.getSerializableState()
-            this.cluster.publishDelta(component.id, componentName, payload.delta).catch(() => {})
-            this.cluster.saveState(component.id, componentName, clusterState).catch(() => {})
-            this.cluster.saveSingletonState(componentName, clusterState).catch(() => {})
+            this.cluster.publishDelta(component.id, componentName, payload.delta).catch(logSwallowed('cluster.publishDelta'))
+            this.cluster.saveState(component.id, componentName, clusterState).catch(logSwallowed('cluster.saveState'))
+            this.cluster.saveSingletonState(componentName, clusterState).catch(logSwallowed('cluster.saveSingletonState'))
           }
         }
 
-        try { (component as any).onClientJoin(connId, 1) } catch { /* ignore */ }
+        try { internals(component).onClientJoin(connId, 1) } catch (err) { logSwallowed('onClientJoin')(err) }
       }
 
       // Metrics & logging
       metadata.state = 'active'
       const renderTime = Date.now() - startTime
       this.recordComponentMetrics(component.id, renderTime)
-      registerComponentLogging(component.id, (ComponentClass as any).logging)
+      registerComponentLogging(component.id, ComponentClass.logging)
       this.performanceMonitor.initializeComponent(component.id, componentName)
       this.performanceMonitor.recordRenderTime(component.id, renderTime)
 
-      // Sign initial state
+      // Sign initial state (versão 1) e liga a renovação: deltas posteriores
+      // (inclusive os do onMount) geram STATE_SIGNATURE throttled.
       const mountState = component.getSerializableState()
-      const signedState = this.stateSignature.signState(component.id, {
-        ...mountState,
-        __componentName: componentName
-      }, 1, { compress: true, backup: true })
+      const signedState = this.signComponentState(component, componentName, mountState, { version: 1 })
+      this.installSignatureRenewal(component)
 
-      ;(component as any).emit('STATE_UPDATE', {
+      internals(component).emit('STATE_UPDATE', {
         state: mountState,
         signedState
       })
 
       // Lifecycle hooks
-      try { (component as any).onConnect() } catch { /* ignore */ }
-      try { await (component as any).onMount() } catch (err: any) {
-        ;(component as any).emit('ERROR', { action: 'onMount', error: `Mount initialization failed: ${err?.message || err}` })
+      try { internals(component).onConnect() } catch (err) { logSwallowed('onConnect')(err) }
+      try { await internals(component).onMount() } catch (err) {
+        internals(component).emit('ERROR', { action: 'onMount', error: `Mount initialization failed: ${errorMessage(err)}` })
       }
 
       // Re-read state after onMount (hook may have changed it)
       return { componentId: component.id, initialState: component.getSerializableState(), signedState }
-    } catch (error: any) {
-      console.error(`Failed to mount component ${componentName}:`, error)
+    } catch (error) {
+      // Acesso negado é fluxo normal de autorização (ex.: página monta componente
+      // protegido antes do login): aviso curto, sem stack. O cliente recebe o erro.
+      const message = errorMessage(error)
+      if (message.startsWith('AUTH_DENIED')) {
+        liveWarn('lifecycle', null, `Mount de ${componentName} negado: ${message}`)
+      } else {
+        console.error(`Failed to mount component ${componentName}:`, error)
+      }
       throw error
     }
   }
@@ -466,14 +513,14 @@ export class ComponentRegistry {
     componentName: string,
     signedState: SignedState,
     ws: GenericWebSocket,
-    options?: { room?: string; userId?: string }
+    options?: LiveComponentConstructorOptions
   ): Promise<{ success: boolean; newComponentId?: string; error?: string }> {
     try {
       const validation = this.stateSignature.validateState(signedState, { skipNonce: true })
       if (!validation.valid) return { success: false, error: validation.error || 'Invalid state signature' }
 
       const definition = this.definitions.get(componentName)
-      let ComponentClass: (new (initialState: any, ws: GenericWebSocket, options?: { room?: string; userId?: string }) => LiveComponent<any>) | null = null
+      let ComponentClass: LiveComponentClass | null = null
       let initialState: Record<string, unknown> = {}
 
       if (definition) {
@@ -493,17 +540,26 @@ export class ComponentRegistry {
 
       // Auth check
       const authContext = ws.data?.authContext || ANONYMOUS_CONTEXT
-      const componentAuth = (ComponentClass as any).auth as LiveComponentAuth | undefined
-      const authResult = await this.authManager.authorizeComponent(authContext, componentAuth)
+      const authResult = await this.authManager.authorizeComponent(authContext, ComponentClass.auth)
       if (!authResult.allowed) return { success: false, error: `AUTH_DENIED: ${authResult.reason}` }
 
-      const clientState = this.stateSignature.extractData(signedState) as Record<string, any>
+      const clientState = this.stateSignature.extractData(signedState)
 
       if (!clientState.__componentName || clientState.__componentName !== componentName) {
         return { success: false, error: 'Component class mismatch - state tampering detected' }
       }
 
       const { __componentName, ...cleanState } = clientState
+
+      // Singleton: re-hidratar NÃO pode criar uma instância privada — o cliente
+      // volta para a instância compartilhada (entra nela se existir; se o server
+      // reiniciou e ela não existe, o estado assinado pelo próprio server semeia
+      // a nova). O estado atual é enviado pelo mount (STATE_UPDATE).
+      if (ComponentClass.singleton === true) {
+        const mounted = await this.mountComponent(ws, componentName, cleanState, options)
+        return { success: true, newComponentId: mounted.componentId }
+      }
+
       const finalState = definition ? { ...initialState, ...cleanState } : cleanState
       const component = new ComponentClass(finalState, ws, options)
       component.setAuthContext(authContext)
@@ -513,29 +569,26 @@ export class ComponentRegistry {
       if (options?.room) this.subscribeToRoom(component.id, options.room)
       this.ensureWsData(ws, options?.userId)
       ws.data.components.set(component.id, component)
-      registerComponentLogging(component.id, (ComponentClass as any).logging)
+      registerComponentLogging(component.id, ComponentClass.logging)
 
       const rehydratedState = component.getSerializableState()
-      const newSignedState = this.stateSignature.signState(
-        component.id,
-        { ...rehydratedState, __componentName: componentName },
-        signedState.version + 1
-      )
+      const newSignedState = this.signComponentState(component, componentName, rehydratedState, { version: signedState.version + 1 })
+      this.installSignatureRenewal(component)
 
-      ;(component as any).emit('STATE_REHYDRATED', {
+      internals(component).emit('STATE_REHYDRATED', {
         state: rehydratedState,
         signedState: newSignedState,
         oldComponentId: componentId,
         newComponentId: component.id
       })
 
-      try { (component as any).onConnect() } catch { /* ignore */ }
-      try { (component as any).onRehydrate(clientState) } catch { /* ignore */ }
-      try { await (component as any).onMount() } catch { /* ignore */ }
+      try { internals(component).onConnect() } catch (err) { logSwallowed('onConnect')(err) }
+      try { internals(component).onRehydrate(clientState) } catch (err) { logSwallowed('onRehydrate')(err) }
+      try { await internals(component).onMount() } catch (err) { logSwallowed('onMount')(err) }
 
       return { success: true, newComponentId: component.id }
-    } catch (error: any) {
-      return { success: false, error: error.message }
+    } catch (error) {
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -565,7 +618,7 @@ export class ComponentRegistry {
       if (singleton.connections.size === 0) {
         // Capture final state synchronously BEFORE cleanup destroys the instance
         const finalState = singleton.instance.getSerializableState()
-        try { (singleton.instance as any).onDisconnect() } catch { /* ignore */ }
+        try { internals(singleton.instance).onDisconnect() } catch (err) { logSwallowed('onDisconnect')(err) }
         this.cleanupComponent(componentId)
         this.singletons.delete(name)
         // Save state to Redis, THEN release claim (must be sequential to avoid race)
@@ -573,7 +626,7 @@ export class ComponentRegistry {
           this.cluster.saveSingletonState(name, finalState)
             .then(() => this.cluster!.releaseSingleton(name))
             .then(() => this.cluster!.deleteState(componentId))
-            .catch(() => {})
+            .catch(logSwallowed('cluster.release'))
         }
       }
       return true
@@ -610,7 +663,7 @@ export class ComponentRegistry {
       if (this.isSingletonComponent(componentId)) {
         const singleton = this.singletons.get(this.getSingletonName(componentId) || '')
         const remaining = singleton ? singleton.connections.size - 1 : 0
-        try { (component as any).onClientLeave(connId || 'unknown', Math.max(0, remaining)) } catch { /* ignore */ }
+        try { internals(component).onClientLeave(connId || 'unknown', Math.max(0, remaining)) } catch (err) { logSwallowed('onClientLeave')(err) }
       }
 
       if (this.removeSingletonConnection(componentId, connId, 'unmount')) return
@@ -619,6 +672,7 @@ export class ComponentRegistry {
     }
 
     component.destroy?.()
+    this.forgetSignedState(componentId)
     this.unsubscribeFromAllRooms(componentId)
     this.components.delete(componentId)
     this.wsConnections.delete(componentId)
@@ -640,22 +694,46 @@ export class ComponentRegistry {
     return null
   }
 
-  async executeAction(componentId: string, action: string, payload: any): Promise<any> {
+  /**
+   * Executa uma action. `caller` é a identidade de QUEM chamou: a autorização
+   * (`static actionAuth`) é avaliada com ela — não com o `$auth` do componente,
+   * que num singleton pertence a quem montou primeiro. Sem `caller` (chamada
+   * interna/programática) cai no `$auth` do componente.
+   */
+  async executeAction(componentId: string, action: string, payload: unknown, caller?: ActionCaller): Promise<unknown> {
     const component = this.components.get(componentId)
     if (!component) throw new Error(`COMPONENT_REHYDRATION_REQUIRED:${componentId}`)
 
-    const componentClass = component.constructor as any
-    const actionAuthMap = componentClass.actionAuth as LiveActionAuthMap | undefined
-    const actionAuth = actionAuthMap?.[action]
+    const componentClass = component.constructor as LiveComponentClass
+    const actionAuth = componentClass.actionAuth?.[action]
 
     if (actionAuth) {
-      const authContext = (component as any).$auth || ANONYMOUS_CONTEXT
+      const authContext = caller?.auth || component.$auth || ANONYMOUS_CONTEXT
       const componentName = componentClass.componentName || componentClass.name
       const authResult = await this.authManager.authorizeAction(authContext, componentName, action, actionAuth, undefined, payload)
       if (!authResult.allowed) throw new Error(`AUTH_DENIED: ${authResult.reason}`)
     }
 
-    return await component.executeAction?.(action, payload)
+    return await component.executeAction?.(action, payload, caller)
+  }
+
+  /**
+   * A conexão `ws` montou (ou entrou no singleton) `componentId`?
+   * Actions e PROPERTY_UPDATE só são aceitos de quem é dono do componente —
+   * ids vazam (ex.: broadcast de sala carrega o componentId do remetente).
+   */
+  private ownsComponent(ws: GenericWebSocket, componentId: string): boolean {
+    if (ws.data?.components?.has(componentId)) return true
+    const connId = ws.data?.connectionId
+    if (!connId) return false
+    const remote = this.findRemoteSingleton(componentId)
+    return !!remote && remote.connections.has(connId)
+  }
+
+  /** userId confiável: SÓ o que veio da autenticação da conexão (nunca do cliente). */
+  private trustedUserId(ws: GenericWebSocket): string | undefined {
+    const auth = ws.data?.authContext
+    return auth?.authenticated ? auth.session?.id : undefined
   }
 
   /**
@@ -676,7 +754,7 @@ export class ComponentRegistry {
    *   3. The key must be in EITHER `static updatableFields` (explicit
    *      allowlist, takes precedence) OR `static defaultState` (default).
    */
-  updateProperty(componentId: string, property: string, value: any) {
+  updateProperty(componentId: string, property: string, value: unknown) {
     const component = this.components.get(componentId)
     if (!component) throw new Error(`Component '${componentId}' not found`)
 
@@ -695,10 +773,10 @@ export class ComponentRegistry {
     }
 
     // (3) Allowlist check.
-    const componentClass = component.constructor as any
-    const explicit = componentClass.updatableFields as readonly string[] | undefined
+    const componentClass = component.constructor as LiveComponentClass
+    const explicit = componentClass.updatableFields
     const defaults = componentClass.defaultState
-      ? Object.keys(componentClass.defaultState as Record<string, unknown>)
+      ? Object.keys(componentClass.defaultState)
       : []
     const allowed = explicit ?? defaults
 
@@ -756,22 +834,32 @@ export class ComponentRegistry {
     }
   }
 
-  async handleMessage(ws: GenericWebSocket, message: LiveMessage): Promise<{ success: boolean; result?: unknown; error?: string } | null> {
+  async handleMessage(ws: GenericWebSocket, message: RegistryClientMessage): Promise<{ success: boolean; result?: unknown; error?: string } | null> {
     try {
       switch (message.type) {
-        case 'COMPONENT_MOUNT':
+        case 'COMPONENT_MOUNT': {
           const mountResult = await this.mountComponent(ws, message.payload.component, message.payload.props, {
             room: message.payload.room,
-            userId: message.userId,
+            // userId enviado pelo cliente é IGNORADO (impersonação). Só auth do server.
+            userId: this.trustedUserId(ws),
             debugLabel: message.payload.debugLabel
           })
           return { success: true, result: mountResult }
+        }
 
         case 'COMPONENT_UNMOUNT':
           this.unmountComponent(message.componentId, ws)
           return { success: true }
 
         case 'CALL_ACTION': {
+          // Posse: a mesma resposta de "não existe" para não vazar quais ids existem.
+          if (!this.ownsComponent(ws, message.componentId)) {
+            throw new Error(`COMPONENT_REHYDRATION_REQUIRED:${message.componentId}`)
+          }
+          const caller: ActionCaller = {
+            connectionId: ws.data?.connectionId,
+            auth: ws.data?.authContext || ANONYMOUS_CONTEXT,
+          }
           // Check if this action targets a remote singleton (owned by another server)
           const remoteSingleton = this.cluster ? this.findRemoteSingleton(message.componentId) : null
           if (remoteSingleton && this.cluster) {
@@ -781,9 +869,11 @@ export class ComponentRegistry {
               targetInstanceId: remoteSingleton.ownerInstanceId,
               componentId: remoteSingleton.componentId,
               componentName: remoteSingleton.componentName,
-              action: message.action!,
+              action: message.action,
               payload: message.payload,
-              requestId
+              requestId,
+              callerConnectionId: caller.connectionId,
+              callerSession: caller.auth.authenticated ? caller.auth.session : undefined,
             }
             const response = await this.cluster.forwardAction(request)
             if (!response.success) throw new Error(response.error || 'Remote action failed')
@@ -794,26 +884,29 @@ export class ComponentRegistry {
           this.recordComponentMetrics(message.componentId, undefined, message.action)
           const actionStart = Date.now()
           try {
-            const actionResult = await this.executeAction(message.componentId, message.action!, message.payload)
-            this.performanceMonitor.recordActionTime(message.componentId, message.action!, Date.now() - actionStart)
+            const actionResult = await this.executeAction(message.componentId, message.action, message.payload, caller)
+            this.performanceMonitor.recordActionTime(message.componentId, message.action, Date.now() - actionStart)
             if (message.expectResponse) return { success: true, result: actionResult }
             return null
-          } catch (error: any) {
-            this.performanceMonitor.recordActionTime(message.componentId, message.action!, Date.now() - actionStart, error)
+          } catch (error) {
+            this.performanceMonitor.recordActionTime(message.componentId, message.action, Date.now() - actionStart, toError(error))
             throw error
           }
         }
 
         case 'PROPERTY_UPDATE':
-          this.updateProperty(message.componentId, message.property!, message.payload.value)
+          if (!this.ownsComponent(ws, message.componentId)) {
+            throw new Error(`COMPONENT_REHYDRATION_REQUIRED:${message.componentId}`)
+          }
+          this.updateProperty(message.componentId, message.property, message.payload.value)
           return { success: true }
 
         default:
           return { success: false, error: 'Unknown message type' }
       }
-    } catch (error: any) {
-      if (message.componentId) this.recordComponentError(message.componentId, error)
-      return { success: false, error: error.message }
+    } catch (error) {
+      if (message.componentId) this.recordComponentError(message.componentId, toError(error))
+      return { success: false, error: errorMessage(error) }
     }
   }
 
@@ -826,7 +919,7 @@ export class ComponentRegistry {
     for (const componentId of componentsToCleanup) {
       const component = this.components.get(componentId)
       if (component && !this.isSingletonComponent(componentId)) {
-        try { (component as any).onDisconnect() } catch { /* ignore */ }
+        try { internals(component).onDisconnect() } catch (err) { logSwallowed('onDisconnect')(err) }
       }
       if (!this.removeSingletonConnection(componentId, connId || undefined, 'disconnect')) {
         this.cleanupComponent(componentId)
@@ -861,13 +954,12 @@ export class ComponentRegistry {
       if (!component) continue
       try {
         const componentName =
-          (component.constructor as { componentName?: string }).componentName ||
-          this.metadata.get(componentId)?.name
+          this.signatureMeta.get(componentId)?.name ||
+          (component.constructor as LiveComponentClass).componentName ||
+          this.metadata.get(componentId)?.name ||
+          ''
         const currentState = component.getSerializableState()
-        const signedState = this.stateSignature.signState(component.id, {
-          ...(currentState as Record<string, unknown>),
-          __componentName: componentName,
-        }, 1, { compress: true, backup: true })
+        const signedState = this.signComponentState(component, componentName, currentState)
 
         sendImmediate(ws, JSON.stringify({
           type: 'STATE_UPDATE',
@@ -876,6 +968,57 @@ export class ComponentRegistry {
         }))
       } catch { /* best-effort recovery — never break the send path */ }
     }
+  }
+
+  // ===== signedState: assinatura + renovação =====
+
+  /**
+   * Assina o estado de `component` para o cliente persistir e re-hidratar.
+   * Versão: a informada, ou a última assinada + 1 (monotônica por componente).
+   * Registra a assinatura no renewer (abre a janela de throttle).
+   */
+  private signComponentState(
+    component: AnyLiveComponent,
+    componentName: string,
+    state: object,
+    opts: { version?: number; backup?: boolean } = {},
+  ): SignedState {
+    const previous = this.signatureMeta.get(component.id)
+    const version = opts.version ?? (previous ? previous.version + 1 : 1)
+    const signedState = this.stateSignature.signState(component.id, {
+      ...state,
+      __componentName: componentName,
+    }, version, { compress: true, backup: opts.backup ?? true })
+    this.signatureMeta.set(component.id, { name: componentName, version })
+    this.signatureRenewer.markSigned(component.id)
+    return signedState
+  }
+
+  /** Liga o gancho pós-delta do componente ao renewer (no-op se a renovação estiver desligada). */
+  private installSignatureRenewal(component: AnyLiveComponent): void {
+    if (!this.signatureRenewer.enabled) return
+    const id = component.id
+    internals(component)[STATE_DELTA_HOOK_KEY] = () => this.signatureRenewer.notifyDelta(id)
+  }
+
+  /**
+   * Disparado pelo renewer (fora do caminho do delta): re-assina o estado ATUAL
+   * e envia `STATE_SIGNATURE`. Pelo `emit` do componente, então num singleton
+   * vai (uma assinatura só) para todas as conexões via EMIT_OVERRIDE.
+   * Sem backup: renovações frequentes não devem girar o histórico de backups.
+   */
+  private renewSignedState(componentId: string): void {
+    const component = this.components.get(componentId)
+    const meta = this.signatureMeta.get(componentId)
+    if (!component || !meta) return
+    const signedState = this.signComponentState(component, meta.name, component.getSerializableState(), { backup: false })
+    internals(component).emit('STATE_SIGNATURE', { signedState })
+  }
+
+  private forgetSignedState(componentId: string): void {
+    this.signatureRenewer.forget(componentId)
+    this.signatureMeta.delete(componentId)
+    this.stateSignature.clearBackups?.(componentId)
   }
 
   getStats() {
@@ -900,13 +1043,18 @@ export class ComponentRegistry {
     return [...new Set([...this.definitions.keys(), ...this.autoDiscoveredComponents.keys()])]
   }
 
-  getComponent(componentId: string): LiveComponent | undefined {
+  getComponent(componentId: string): AnyLiveComponent | undefined {
     return this.components.get(componentId)
   }
 
-  getRoomComponents(roomId: string): LiveComponent[] {
-    const componentIds = this.rooms.get(roomId) || new Set()
-    return Array.from(componentIds).map(id => this.components.get(id)).filter(Boolean) as LiveComponent[]
+  getRoomComponents(roomId: string): AnyLiveComponent[] {
+    const componentIds = this.rooms.get(roomId) || new Set<string>()
+    const found: AnyLiveComponent[] = []
+    for (const id of componentIds) {
+      const component = this.components.get(id)
+      if (component) found.push(component)
+    }
+    return found
   }
 
   private createComponentMetadata(componentId: string, componentName: string, version = '1.0.0'): ComponentMetadata {
@@ -961,7 +1109,8 @@ export class ComponentRegistry {
 
   private cleanupComponent(componentId: string): void {
     const component = this.components.get(componentId)
-    if (component) try { component.destroy?.() } catch { /* ignore */ }
+    if (component) try { component.destroy?.() } catch (err) { logSwallowed('destroy')(err) }
+    this.forgetSignedState(componentId)
     this.performanceMonitor.removeComponent(componentId)
     unregisterComponentLogging(componentId)
     this.components.delete(componentId)
@@ -975,6 +1124,7 @@ export class ComponentRegistry {
 
   cleanup(): void {
     if (this.healthCheckInterval) clearInterval(this.healthCheckInterval)
+    this.signatureRenewer.stop()
     this.singletons.clear()
     this.remoteSingletons.clear()
     for (const [componentId] of this.components) this.cleanupComponent(componentId)

@@ -60,10 +60,10 @@ interface PubSubMessage {
   type: 'event' | 'state' | 'membership'
   roomId: string
   event?: string
-  data?: any
+  data?: unknown
   action?: 'join' | 'leave'
   componentId?: string
-  updates?: any
+  updates?: unknown
   /** Instance ID to prevent echo (processing own messages) */
   origin: string
 }
@@ -74,7 +74,7 @@ export class RedisRoomAdapter implements IRoomPubSubAdapter {
   private prefix: string
   private stateTtl: number
   private instanceId: string
-  private handlers = new Map<string, Set<(event: string, data: any) => void>>()
+  private handlers = new Map<string, Set<(event: string, data: unknown) => void>>()
   private subscribed = new Set<string>()
   private started = false
 
@@ -145,7 +145,7 @@ export class RedisRoomAdapter implements IRoomPubSubAdapter {
 
   // ===== IRoomPubSubAdapter =====
 
-  async publish(roomId: string, event: string, data: any): Promise<void> {
+  async publish(roomId: string, event: string, data: unknown): Promise<void> {
     const msg: PubSubMessage = {
       type: 'event',
       roomId,
@@ -156,7 +156,7 @@ export class RedisRoomAdapter implements IRoomPubSubAdapter {
     await this.redis.publish(this.channel(roomId), JSON.stringify(msg))
   }
 
-  async subscribe(roomId: string, handler: (event: string, data: any) => void): Promise<() => void> {
+  async subscribe(roomId: string, handler: (event: string, data: unknown) => void): Promise<() => void> {
     // Track handler
     let roomHandlers = this.handlers.get(roomId)
     if (!roomHandlers) {
@@ -194,7 +194,7 @@ export class RedisRoomAdapter implements IRoomPubSubAdapter {
     await this.redis.publish(this.channel(roomId), JSON.stringify(msg))
   }
 
-  async publishStateChange(roomId: string, updates: any): Promise<void> {
+  async publishStateChange(roomId: string, updates: unknown): Promise<void> {
     // 1. Persist state update to Redis (for new instances joining later).
     //    Done atomically via a Lua script: the GET, shallow-merge and SET run
     //    server-side as one unit, so concurrent writes from other instances can
@@ -225,7 +225,7 @@ export class RedisRoomAdapter implements IRoomPubSubAdapter {
    * Get persisted room state from Redis.
    * Useful for loading state when a new instance joins an existing room.
    */
-  async getPersistedState<T = any>(roomId: string): Promise<T | null> {
+  async getPersistedState<T = Record<string, unknown>>(roomId: string): Promise<T | null> {
     const raw = await this.redis.get(this.stateKey(roomId))
     if (!raw) return null
     try { return JSON.parse(raw) } catch { return null }

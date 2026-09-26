@@ -19,26 +19,15 @@ The FluxStack app (`../FluxStack`) resolves `@fluxstack/live-*` packages via `no
 bun run build:core       # packages/core
 bun run build:client     # packages/client
 bun run build:react      # packages/react
-bun run build:adapters   # packages/elysia, express, fastify (parallel via &)
+bun run build:adapters   # packages/elysia, express, fastify (sequencial)
 
 # Rebuild everything
 bun run build            # core -> adapters -> client -> react (sequential)
 ```
 
-**`vue` and `redis` have NO dedicated build script** in the root `package.json` and are NOT included in `bun run build`. If you modify them, build manually:
+`bun run build` covers every package (plugin-kit, core, adapters, client, react, cli, redis, vue, spatial-room). There are per-package scripts (`build:redis`, `build:vue`, `build:spatial`, ...) — see root `package.json`.
 
-```bash
-cd packages/vue && bunx tsup
-cd packages/redis && bunx tsup
-```
-
-**Windows gotcha:** `bun run build:adapters` uses POSIX `&` (background) and fails on Windows cmd/PowerShell. Run the three adapter builds sequentially instead:
-
-```bash
-cd packages/elysia && bunx tsup
-cd packages/express && bunx tsup
-cd packages/fastify && bunx tsup
-```
+`build:adapters` roda elysia → express → fastify em sequência (`&&`); funciona no Windows desde 2026-09-26.
 
 ### When to Rebuild
 
@@ -65,7 +54,7 @@ Monorepo workspaces: `packages/*` and `examples/*`.
 - `packages/elysia` — Elysia.js transport adapter (thin wrapper, no security logic)
 - `packages/express` — Express transport adapter
 - `packages/fastify` — Fastify transport adapter
-- `packages/client` — Browser WebSocket client
+- `packages/client` — Browser client (pluggable transports: WebSocket, SSE, custom — see `specs/07-transports.md`)
 - `packages/react` — React hooks and providers (LiveComponentsProvider, Live.use())
 - `packages/vue` — Vue 3 composables (provideLiveConnection, useLive)
 - `packages/redis` — Redis adapters (RedisRoomAdapter for room pub/sub, RedisClusterAdapter for singleton coordination)
@@ -138,7 +127,9 @@ bun run lint
 bunx tsc -p packages/core/tsconfig.json --noEmit
 ```
 
-The root `vitest.workspace.ts` aggregates: `core`, `redis`, `elysia`, `express`, `fastify`, `client`, `react`, and the top-level `__tests__/` (integration). `packages/vue` is NOT in the workspace.
+The root `vitest.workspace.ts` aggregates: `plugin-kit`, `core`, `redis`, `elysia`, `express`, `fastify`, `client`, `react`, `vue`, `spatial-room`, `cli`, and the top-level `__tests__/` (integration). Vue tests run without DOM (headless custom renderer, see `packages/vue/src/__tests__/harness.ts`); vue/cli tests include integration against a real `LiveServer` in memory. The Elysia adapter also has Bun-runtime tests: `cd packages/elysia && bun test`.
+
+Type-safety ratchet: `bun run check:any` fails if any package gains explicit `any` over `scripts/any-baseline.json`. After reducing, run `bun scripts/check-any.ts --update`.
 
 ### Cluster Integration Tests
 

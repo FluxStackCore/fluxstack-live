@@ -7,6 +7,7 @@
 import { createHmac, createCipheriv, createDecipheriv, randomBytes, scryptSync, timingSafeEqual as cryptoTimingSafeEqual } from 'crypto'
 import { gzipSync, gunzipSync } from 'zlib'
 import { liveLog, liveWarn } from '../debug/LiveLogger'
+import { errorMessage } from '../utils/errors'
 
 export interface SignedState {
   data: string
@@ -40,6 +41,13 @@ export interface StateSignatureConfig {
   maxBackups?: number
   /** Nonce TTL in ms. Nonces older than this are rejected. Default: 10000 (10 seconds) */
   nonceTTL?: number
+  /**
+   * Renovação do `signedState` depois de mudanças de estado (ms). O servidor
+   * re-assina no máximo uma vez por janela por componente (leading + trailing)
+   * e envia `STATE_SIGNATURE { signedState }`, para a re-hidratação retomar do
+   * estado mais recente e não do snapshot do mount. `0` desliga. Default: 1000.
+   */
+  renewInterval?: number
 }
 
 interface StateBackup {
@@ -90,6 +98,7 @@ export class StateSignatureManager {
       backupEnabled: config.backupEnabled ?? true,
       maxBackups: config.maxBackups ?? 3,
       nonceTTL: config.nonceTTL ?? 5 * 60 * 1000,
+      renewInterval: config.renewInterval ?? 1000,
     }
 
     // Generate random secret if none provided
@@ -166,6 +175,12 @@ export class StateSignatureManager {
     }
 
     return { valid: false, error: 'Invalid nonce signature' }
+  }
+
+  /** Janela de renovação do signedState em ms (`0` = desligado). Ver `StateSignatureConfig.renewInterval`. */
+  get renewInterval(): number {
+    const v = this.config.renewInterval
+    return Number.isFinite(v) && v > 0 ? v : 0
   }
 
   signState(
@@ -270,8 +285,8 @@ export class StateSignatureManager {
       }
 
       return { valid: false, error: 'Invalid signature' }
-    } catch (error: any) {
-      return { valid: false, error: error.message }
+    } catch (error) {
+      return { valid: false, error: errorMessage(error) }
     }
   }
 

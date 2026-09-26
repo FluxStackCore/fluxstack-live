@@ -32,7 +32,7 @@ function bench(fn: () => string, warmup = 5000, iterations = 100_000) {
   return performance.now() - start
 }
 
-describe('generateId — performance comparison: old vs new', () => {
+describe('generateId — performance comparison: old vs new', { timeout: 30_000 }, () => {
 
   it('individual generator comparison', () => {
     const N = 100_000

@@ -56,7 +56,7 @@ interface ClusterMessage {
   // delta fields
   componentId?: string
   componentName?: string
-  delta?: any
+  delta?: unknown
   /** Monotonic per-(origin,component) sequence for dedup + ordering of deltas. */
   seq?: number
   // action fields
@@ -66,7 +66,7 @@ interface ClusterMessage {
 
 interface PendingAction {
   resolve: (value: ClusterActionResponse) => void
-  reject: (reason: any) => void
+  reject: (reason: unknown) => void
   timeout: ReturnType<typeof setTimeout>
 }
 
@@ -124,7 +124,7 @@ export class RedisClusterAdapter implements IClusterAdapter {
 
   // ── State Mirror ─────────────────────────────────────
 
-  async saveState(componentId: string, componentName: string, state: any): Promise<void> {
+  async saveState(componentId: string, componentName: string, state: unknown): Promise<void> {
     const data: ClusterComponentState = {
       componentName,
       state,
@@ -160,7 +160,7 @@ export class RedisClusterAdapter implements IClusterAdapter {
   /** Highest delta seq seen per `${origin}:${componentId}` (dedup + ordering). */
   private seenDeltaSeq: Map<string, number> = new Map()
 
-  async publishDelta(componentId: string, componentName: string, delta: any): Promise<void> {
+  async publishDelta(componentId: string, componentName: string, delta: unknown): Promise<void> {
     const seq = (this.deltaSeq.get(componentId) ?? 0) + 1
     this.deltaSeq.set(componentId, seq)
     const msg: ClusterMessage = {
@@ -218,7 +218,7 @@ export class RedisClusterAdapter implements IClusterAdapter {
     this.ownershipLostHandler = handler
   }
 
-  async saveSingletonState(componentName: string, state: any): Promise<void> {
+  async saveSingletonState(componentName: string, state: unknown): Promise<void> {
     const key = this.singletonStateKey(componentName)
     const data = JSON.stringify({ state, updatedAt: Date.now() })
     if (this.stateTtl > 0) {
@@ -373,14 +373,14 @@ export class RedisClusterAdapter implements IClusterAdapter {
         this.actionsChannel(msg.request.sourceInstanceId),
         JSON.stringify(reply)
       )
-    } catch (error: any) {
+    } catch (error: unknown) {
       // Send error response
       const reply: ClusterMessage = {
         type: 'action_response',
         origin: this.instanceId,
         response: {
           success: false,
-          error: error.message,
+          error: (error as { message?: string } | null | undefined)?.message,
           requestId: msg.request.requestId,
         },
       }

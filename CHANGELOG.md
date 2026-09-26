@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 with the `0.x` convention where minor bumps may include breaking changes.
 
+## [0.11.0] - 2026-09-26
+
+Security audit fixes, pluggable transports and an SSE transport. All `@fluxstack/live*` packages aligned at 0.11.0 (some were still at 0.9.0 and depended on `^0.9.0`, which does not accept 0.10.x).
+
+### Security
+
+- **core**: `CALL_ACTION`, `PROPERTY_UPDATE` and every room message now require the target component to belong to the calling connection. Before, any client that learned a `componentId` (they leak through room broadcasts) could run actions, write state or emit/leave rooms as another user.
+- **core**: `static actionAuth` is evaluated against the **caller's** connection auth, not the component's `$auth`. In singletons the latter belongs to whoever mounted first, so every later client inherited those permissions. Cluster-forwarded actions now carry the caller session (`ClusterActionRequest.callerSession`).
+- **core**: client-supplied `userId` is ignored on mount/rehydrate; `component.userId` and `ws.data.userId` come only from authentication.
+- **core**: uploads are bound to the connection that started them; `totalChunks` is computed server-side; chunk size and total bytes are capped; quota applies per connection when anonymous; uploads are cancelled on disconnect; `FILE_UPLOAD_START` requires a component owned by the connection.
+- **core**: `MAX_MESSAGE_SIZE` lowered from 100MB to 4MB and configurable via `maxMessageSize`; binary frames are size-checked too. Elysia adapter sets `maxPayloadLength` (default 4MB).
+- **core**: `actionRateLimit` buckets are per connection, so one client cannot exhaust a singleton's limit for everybody.
+- **core**: msgpack decoder rejects nesting deeper than 64, container counts larger than the remaining buffer, and drops `__proto__`/`constructor`/`prototype` keys.
+
+### Added
+
+- **core**: `LiveServer({ sse: true | SseTransportOptions })` — Server-Sent Events + HTTP POST transport served by `SseConnectionHub` (Fetch API only). See `specs/07-transports.md`.
+- **core**: `LiveServer({ http: true | HttpPollingTransportOptions })` — plain HTTP transport (long-polling + POST, `HttpPollingHub`), the floor that works on any network.
+- **client**: `HttpPollingClientTransport`; `transport` accepts an ordered list (e.g. `['sse', 'http']`) and `'auto'` is now `['websocket', 'sse', 'http']`; SSE `openTimeoutMs` so buffered streams fall through.
+- **core**: `LiveTransport.registerRawRoutes(routes)` and `RawHttpRoute` for HTTP-based transports; `handleNodeWithFetch` / `nodeToFetchRequest` / `writeFetchResponse` bridge for Node `http` adapters.
+- **elysia / express / fastify**: implement `registerRawRoutes`.
+- **client**: `ClientTransport` interface with `WebSocketClientTransport` and `SseClientTransport`; `LiveConnection({ transport: 'websocket' | 'sse' | 'auto' | factory, sseUrl })`; `LiveConnectionState.transport`; `getTransport()`.
+- **react**: `LiveComponentsProvider` accepts `transport` / `sseUrl` and exposes `transport` in context. Vue passes the options through.
+- Actions receive the caller as a second argument: `method(payload, { connectionId, auth })`.
+
+### Added (continued)
+
+- **core/client/react/vue**: signed state is renewed (throttled, `stateSignature.renewInterval`, default 1000 ms) via `STATE_SIGNATURE`, so rehydration resumes the latest state instead of the mount state. Vue now rehydrates too (`persistState`, `onRehydrate`).
+
+### Fixed
+
+- **core**: Node bridge (Express/Fastify) now honours `res.write()` backpressure, and HTTP transport bodies are read with a size cap before buffering — an endless chunked POST could grow memory without bound.
+- **core**: assigning a whole object through the state proxy (`this.state.tags = {...}`) now emits a deep diff; removed keys used to survive on clients.
+- **client**: in-flight requests are rejected as soon as the transport closes instead of waiting for the timeout.
+- **vue / plugin-kit / cli**: 15 bugs found by new tests (see `.ai-notes/bugs/2026-09-26-testes-vue-pluginkit-cli.md`), incl. the CLI inspector never recognising mounts.
+- **react**: provider default `maxReconnectAttempts` was 5, contradicting the documented infinite reconnection. Now defaults to infinite.
+- **core**: lifecycle-hook and cluster-persistence errors in `ComponentRegistry` are logged instead of silently swallowed.
+- Tests: Redis test files no longer share a database (parallel `flushdb` wiped each other); cluster tests wait on conditions instead of fixed sleeps; perf benchmarks get 30s timeouts.
+
 ## [0.9.0] - 2026-04-16
 
 Handler decoupling (issue #28), binary state codec, and React provider async-import fix. All packages bumped to 0.9.0.

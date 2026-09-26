@@ -24,6 +24,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify'
 import { WebSocket as WsWebSocket } from 'ws'
+import { handleNodeWithFetch } from '@fluxstack/live'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
@@ -31,6 +32,7 @@ import type {
   LiveTransport,
   WebSocketConfig,
   HttpRouteDefinition,
+  RawHttpRoute,
   GenericWebSocket,
   LiveWSData,
 } from '@fluxstack/live'
@@ -64,7 +66,10 @@ export class FastifyTransport implements LiveTransport {
         // Extract origin from upgrade request for CSRF validation
         const origin = req?.headers?.origin
         if (origin) {
-          ws.data = { origin } as any
+          // Pré-preenchimento parcial: handleOpen() lê `origin` e depois
+          // sobrescreve ws.data com o LiveWSData completo.
+          const partial: Partial<LiveWSData> = { origin }
+          ws.data = partial as LiveWSData
         }
 
         config.onOpen(ws)
@@ -99,6 +104,33 @@ export class FastifyTransport implements LiveTransport {
     )
   }
 
+  /**
+   * Rotas Fetch (Request/Response) — usadas pelo transporte SSE.
+   * Registradas num escopo encapsulado cujo parser de corpo NÃO consome o
+   * stream: a ponte lê o corpo cru (JSON ou binário) direto de `req.raw`.
+   */
+  registerRawRoutes(routes: RawHttpRoute[]): void {
+    this.app.register(async (scope: FastifyInstance) => {
+      scope.removeAllContentTypeParsers()
+      scope.addContentTypeParser('*', (_req: unknown, _payload: unknown, done: (err: Error | null, body?: unknown) => void) => done(null))
+      for (const route of routes) {
+        const handler = async (req: FastifyRequest, reply: FastifyReply) => {
+          reply.hijack()
+          try {
+            await handleNodeWithFetch(req.raw as never, reply.raw as never, route.handler)
+          } catch (error: unknown) {
+            if (!reply.raw.headersSent) {
+              reply.raw.writeHead(500, { 'Content-Type': 'application/json' })
+              reply.raw.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }))
+            }
+          }
+        }
+        if (route.method === 'GET') scope.get(route.path, handler)
+        else scope.post(route.path, handler)
+      }
+    })
+  }
+
   registerHttpRoutes(routes: HttpRouteDefinition[]): void {
     for (const route of routes) {
       const handler = async (req: FastifyRequest, reply: FastifyReply) => {
@@ -110,7 +142,7 @@ export class FastifyTransport implements LiveTransport {
             headers: req.headers as Record<string, string | undefined>,
           }
 
-          const response = await route.handler(request as any)
+          const response = await route.handler(request)
           reply.status(response.status ?? 200)
           if (response.headers) {
             for (const [key, value] of Object.entries(response.headers)) {
@@ -118,8 +150,8 @@ export class FastifyTransport implements LiveTransport {
             }
           }
           return reply.send(response.body)
-        } catch (error: any) {
-          return reply.status(500).send({ error: error.message })
+        } catch (error: unknown) {
+          return reply.status(500).send({ error: (error as { message?: string } | null | undefined)?.message })
         }
       }
 
@@ -149,9 +181,8 @@ export class FastifyTransport implements LiveTransport {
  * Wrap a raw `ws` WebSocket (from @fastify/websocket v11+) into GenericWebSocket.
  */
 function wrapFastifyWs(rawWs: WsWebSocket, req?: FastifyRequest): GenericWebSocket {
-  const dataStore: { value: LiveWSData } = {
-    value: undefined as any,
-  }
+  // LiveWSData fica numa closure; só existe depois do handleOpen()
+  const dataStore: { value?: LiveWSData } = {}
 
   const ws: GenericWebSocket = {
     send(data: string | ArrayBuffer | Uint8Array, compress?: boolean) {
@@ -163,7 +194,7 @@ function wrapFastifyWs(rawWs: WsWebSocket, req?: FastifyRequest): GenericWebSock
       rawWs.close(code, reason)
     },
     get data(): LiveWSData {
-      return dataStore.value
+      return dataStore.value as LiveWSData
     },
     set data(value: LiveWSData) {
       dataStore.value = value

@@ -29,7 +29,26 @@ Severidades: 🔴 critical · 🟠 high · 🟡 medium · ⚪ low.
 | [04-client-react.md](04-client-react.md) | `LiveConnection`, reconexão resiliente, `Live.use()`, `Live.Boundary`, connection pool |
 | [05-adapters-redis-vue-cli-spatial.md](05-adapters-redis-vue-cli-spatial.md) | Adapters transport, Redis (cluster+room), Vue, CLI inspector, `spatial-room` |
 | [06-plugin-kit.md](06-plugin-kit.md) | `@fluxstack/plugin-kit` — runtime de plugins (discovery, executor, manager) |
+| [07-transports.md](07-transports.md) | Transportes modulares: WebSocket, **SSE + POST**, `auto`, custom |
 | [99-status-bugs-historicos.md](99-status-bugs-historicos.md) | Bugs do bug-hunt de abril/2026: o que foi corrigido vs o que persiste |
+
+## ✅ Auditoria 2026-09-26 (0.11.0)
+
+| Item | Status |
+|---|---|
+| `CALL_ACTION` / `PROPERTY_UPDATE` / salas exigem posse do componente pela conexão | ✅ |
+| `actionAuth` avaliado com a identidade de quem chama (singletons e forward de cluster) | ✅ |
+| `userId` vindo do cliente ignorado — só `authContext.session.id` | ✅ |
+| Upload: dono do `uploadId`, `totalChunks` do servidor, teto de bytes, quota por conexão | ✅ |
+| `MAX_MESSAGE_SIZE` 100MB → 4MB (configurável), frames binários checados | ✅ |
+| Rate limit de action por conexão em singletons | ✅ |
+| msgpack do core: limite de profundidade, contagem vs. buffer, `__proto__` | ✅ |
+| `catch {}` silenciosos no registry agora logam | ✅ |
+| Transporte SSE + transporte plugável no cliente | ✅ ver `07` |
+| Versões de todos os pacotes alinhadas em 0.11.0 | ✅ |
+
+Testes novos: `security/multi-user-authorization`, `security/msgpack-decoder-limits`,
+`upload/FileUploadManager` (posse e limites), `integration/sse-transport`, `ElysiaSse.bun`.
 
 ## Estado do código (2026-06-09)
 
@@ -54,5 +73,5 @@ Severidades: 🔴 critical · 🟠 high · 🟡 medium · ⚪ low.
 
 **Suítes verdes:** core 1209 · redis 45 · cli 6 · client 107 · plugin-kit 7.
 **Ainda abertos** (não-críticos): proxy shallow nested (`01` FP-1), `onEvent` doc (`02` FP-3),
-Vue auto-reconnect (`05` FP-4), AES-GCM (`03` FP-3), e o **O(n²)** arquitetural.
+Vue auto-reconnect (`05` FP-4) e o **O(n²)** arquitetural. (AES-GCM: resolvido — `03` FP-3.)
 Bugs do bug-hunt de abril: ver `99`.

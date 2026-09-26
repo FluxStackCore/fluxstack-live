@@ -10,15 +10,22 @@
  * All methods return Promises to support async backends (Redis, DB, etc.).
  * The InMemoryRoomAdapter resolves immediately for zero-overhead in single-instance mode.
  */
+/** Estatística de uma sala no storage. */
+export interface RoomStorageStats {
+  createdAt: number
+  lastUpdate: number
+  stateKeys: string[]
+}
+
 export interface IRoomStorageAdapter {
   /** Create or get a room. Returns current state and whether it was newly created. */
-  getOrCreateRoom(roomId: string, initialState?: any): Promise<{ state: any; created: boolean }>
+  getOrCreateRoom(roomId: string, initialState?: Record<string, unknown>): Promise<{ state: Record<string, unknown>; created: boolean }>
 
   /** Get the state of a room. Returns empty object if room doesn't exist. */
-  getState(roomId: string): Promise<any>
+  getState(roomId: string): Promise<Record<string, unknown>>
 
   /** Update room state (merge partial updates). */
-  updateState(roomId: string, updates: any): Promise<void>
+  updateState(roomId: string, updates: Record<string, unknown>): Promise<void>
 
   /** Check if a room exists. */
   hasRoom(roomId: string): Promise<boolean>
@@ -27,7 +34,7 @@ export interface IRoomStorageAdapter {
   deleteRoom(roomId: string): Promise<boolean>
 
   /** Get storage statistics. */
-  getStats(): Promise<{ totalRooms: number; rooms: Record<string, any> }>
+  getStats(): Promise<{ totalRooms: number; rooms: Record<string, RoomStorageStats> }>
 }
 
 /**
@@ -39,14 +46,14 @@ export interface IRoomStorageAdapter {
  */
 export interface IRoomPubSubAdapter {
   /** Publish an event to all server instances subscribed to this room. */
-  publish(roomId: string, event: string, data: any): Promise<void>
+  publish(roomId: string, event: string, data: unknown): Promise<void>
 
   /** Subscribe to events for a room (from other server instances). */
-  subscribe(roomId: string, handler: (event: string, data: any) => void): Promise<() => void>
+  subscribe(roomId: string, handler: (event: string, data: unknown) => void): Promise<() => void>
 
   /** Publish a membership change (join/leave) to other instances. */
   publishMembership(roomId: string, action: 'join' | 'leave', componentId: string): Promise<void>
 
   /** Publish a state change to other instances. */
-  publishStateChange(roomId: string, updates: any): Promise<void>
+  publishStateChange(roomId: string, updates: unknown): Promise<void>
 }

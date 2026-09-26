@@ -23,7 +23,7 @@
 //   await liveServer.start()
 
 import type { Express, Request, Response } from 'express'
-import type { Server as HttpServer } from 'http'
+import type { Server as HttpServer, IncomingMessage } from 'http'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
@@ -32,9 +32,11 @@ import type {
   LiveTransport,
   WebSocketConfig,
   HttpRouteDefinition,
+  RawHttpRoute,
   GenericWebSocket,
   LiveWSData,
 } from '@fluxstack/live'
+import { handleNodeWithFetch } from '@fluxstack/live'
 
 export interface ExpressTransportOptions {
   /** Maximum payload size for WebSocket messages. Defaults to 10MB. */
@@ -72,7 +74,10 @@ export class ExpressTransport implements LiveTransport {
       // Extract origin from upgrade request for CSRF validation
       const origin = req?.headers?.origin
       if (origin) {
-        ws.data = { origin } as any
+        // Pré-preenchimento parcial: handleOpen() lê `origin` e depois
+        // sobrescreve ws.data com o LiveWSData completo.
+        const partial: Partial<LiveWSData> = { origin }
+        ws.data = partial as LiveWSData
       }
 
       config.onOpen(ws)
@@ -106,6 +111,19 @@ export class ExpressTransport implements LiveTransport {
     })
   }
 
+  /** Rotas Fetch (Request/Response) — usadas pelo transporte SSE. */
+  registerRawRoutes(routes: RawHttpRoute[]): void {
+    for (const route of routes) {
+      const handler = (req: Request, res: Response) => {
+        handleNodeWithFetch(req as never, res as never, route.handler).catch((error: unknown) => {
+          if (!res.headersSent) res.status(500).json({ error: error instanceof Error ? error.message : String(error) })
+        })
+      }
+      if (route.method === 'GET') this.app.get(route.path, handler)
+      else this.app.post(route.path, handler)
+    }
+  }
+
   registerHttpRoutes(routes: HttpRouteDefinition[]): void {
     for (const route of routes) {
       const handler = async (req: Request, res: Response) => {
@@ -117,7 +135,7 @@ export class ExpressTransport implements LiveTransport {
             headers: req.headers as Record<string, string | undefined>,
           }
 
-          const response = await route.handler(request as any)
+          const response = await route.handler(request)
           res.status(response.status ?? 200)
           if (response.headers) {
             for (const [key, value] of Object.entries(response.headers)) {
@@ -125,8 +143,8 @@ export class ExpressTransport implements LiveTransport {
             }
           }
           res.json(response.body)
-        } catch (error: any) {
-          res.status(500).json({ error: error.message })
+        } catch (error: unknown) {
+          res.status(500).json({ error: (error as { message?: string } | null | undefined)?.message })
         }
       }
 
@@ -160,11 +178,9 @@ export class ExpressTransport implements LiveTransport {
 /**
  * Wrap a `ws` WebSocket into GenericWebSocket.
  */
-function wrapNodeWs(rawWs: WsWebSocket, req?: any): GenericWebSocket {
-  // Store LiveWSData directly on the raw ws
-  const dataStore: { value: LiveWSData } = {
-    value: undefined as any,
-  }
+function wrapNodeWs(rawWs: WsWebSocket, req?: IncomingMessage): GenericWebSocket {
+  // LiveWSData fica numa closure; só existe depois do handleOpen()
+  const dataStore: { value?: LiveWSData } = {}
 
   const ws: GenericWebSocket = {
     send(data: string | ArrayBuffer | Uint8Array, compress?: boolean) {
@@ -176,7 +192,7 @@ function wrapNodeWs(rawWs: WsWebSocket, req?: any): GenericWebSocket {
       rawWs.close(code, reason)
     },
     get data(): LiveWSData {
-      return dataStore.value
+      return dataStore.value as LiveWSData
     },
     set data(value: LiveWSData) {
       dataStore.value = value
@@ -304,6 +320,9 @@ export async function expressLive(
 
 import type { NextFunction } from 'express'
 
+/** App Express com o handler de shutdown que o `live()` guarda para não acumular listeners. */
+type PatchableExpress = Express & { __liveShutdownHandler?: () => Promise<void> }
+
 export interface LiveMiddlewareResult {
   /** The middleware function to pass to app.use() */
   (req: Request, res: Response, next: NextFunction): void
@@ -334,8 +353,11 @@ export function live(app: Express, options: ExpressLiveOptions = {}): LiveMiddle
   // Hook app.listen() immediately to capture the httpServer
   const originalListen = app.listen.bind(app)
 
-  ;(app as any).listen = function patchedListen(...args: any[]) {
-    const httpServer: HttpServer = originalListen(...args)
+  // `listen` tem vários overloads; a versão patcheada repassa os args intactos.
+  type ListenFn = (...args: unknown[]) => HttpServer
+  const patchable = app as PatchableExpress
+  ;(patchable as { listen: ListenFn }).listen = function patchedListen(...args: unknown[]) {
+    const httpServer = (originalListen as ListenFn)(...args)
 
     // Attach live system to the server (async, WS can attach to a running server)
     const { componentsPath, wsPath, httpPrefix, debug, clientPath: _, roomPubSub, cluster, ...transportOpts } = options
@@ -360,16 +382,16 @@ export function live(app: Express, options: ExpressLiveOptions = {}): LiveMiddle
     })
 
     // Handle graceful shutdown (remove previous handlers to avoid accumulation)
-    if ((app as any).__liveShutdownHandler) {
-      process.removeListener('SIGINT', (app as any).__liveShutdownHandler)
-      process.removeListener('SIGTERM', (app as any).__liveShutdownHandler)
+    if (patchable.__liveShutdownHandler) {
+      process.removeListener('SIGINT', patchable.__liveShutdownHandler)
+      process.removeListener('SIGTERM', patchable.__liveShutdownHandler)
     }
     const onShutdown = async () => {
       if (liveServer) await liveServer.shutdown()
       httpServer.close()
       process.exit(0)
     }
-    ;(app as any).__liveShutdownHandler = onShutdown
+    patchable.__liveShutdownHandler = onShutdown
     process.on('SIGINT', onShutdown)
     process.on('SIGTERM', onShutdown)
 

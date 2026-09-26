@@ -86,8 +86,11 @@ describe('Room Security - LiveServer', () => {
   })
 
   /** Simulate a client connection opening */
-  function openConnection(ws: GenericWebSocket) {
+  function openConnection(ws: GenericWebSocket, ownedComponents: string[] = ['comp-1', 'comp-2']) {
     transport.wsConfig!.onOpen(ws)
+    // Operações de sala exigem que o componente seja desta conexão (posse).
+    // Simula os componentes já montados por este cliente.
+    for (const id of ownedComponents) ws.data.components.set(id, {} as any)
   }
 
   /** Simulate a client sending a JSON message */
@@ -524,5 +527,24 @@ describe('Room Security - LiveServer', () => {
       expect(resp.requestId).toBe('my-req-123')
       expect(resp.componentId).toBe('comp-1')
     })
+  })
+})
+
+describe('Room Security - posse do componente (auditoria 2026-09-26)', () => {
+  it('rejeita operação de sala com componentId que não é da conexão', async () => {
+    const transport = createMockTransport()
+    const server = new LiveServer({ transport })
+    await server.start()
+    const ws = createMockWS()
+    transport.wsConfig!.onOpen(ws)
+    // Nenhum componente montado nesta conexão: 'comp-vitima' é de outra pessoa.
+    for (const type of ['ROOM_JOIN', 'ROOM_LEAVE', 'ROOM_EMIT', 'ROOM_STATE_SET', 'ROOM_STATE_GET']) {
+      vi.clearAllMocks()
+      await transport.wsConfig!.onMessage(ws, roomMsg(type, 'comp-vitima', 'sala', { event: 'x', state: {} }, 'r'), false)
+      const resp = getLastResponse()
+      expect(resp.type).toBe('ERROR')
+      expect(resp.error).toBe('Component not found')
+    }
+    await server.shutdown()
   })
 })

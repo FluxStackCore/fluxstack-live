@@ -7,6 +7,7 @@ import type { GenericWebSocket } from '../../transport/types'
 import type { ComponentState } from '../../protocol/messages'
 import { computeDeepDiff, deepAssign } from '../../utils/deepDiff'
 import { liveWarn } from '../../debug/LiveLogger'
+import { errorMessage } from '../../utils/errors'
 
 /** Per-class cache for forbidden property names in createDirectStateAccessors */
 const _forbiddenSetCache = new WeakMap<Function, Set<string>>()
@@ -22,8 +23,10 @@ export interface StateManagerOptions<TState> {
   componentId: string
   initialState: TState
   ws: GenericWebSocket
-  emitFn: (type: string, payload: any) => void
+  emitFn: (type: string, payload: unknown) => void
   onStateChangeFn: (changes: Partial<TState>) => void
+  /** Chamado depois de cada delta enviado (JSON ou binário). Usado pela renovação do signedState. */
+  onDeltaFn?: () => void
   deepDiff?: boolean
   deepDiffDepth?: number
   recursiveProxy?: boolean
@@ -42,14 +45,16 @@ export class ComponentStateManager<TState = ComponentState> {
 
   private componentId: string
   private ws: GenericWebSocket
-  private emitFn: (type: string, payload: any) => void
+  private emitFn: (type: string, payload: unknown) => void
   private onStateChangeFn: (changes: Partial<TState>) => void
+  private onDeltaFn?: () => void
 
   constructor(opts: StateManagerOptions<TState>) {
     this.componentId = opts.componentId
     this.ws = opts.ws
     this.emitFn = opts.emitFn
     this.onStateChangeFn = opts.onStateChangeFn
+    this.onDeltaFn = opts.onDeltaFn
     this._deepDiff = opts.deepDiff ?? true
     this._deepDiffDepth = opts.deepDiffDepth ?? 3
     this._recursiveProxy = opts.recursiveProxy ?? false
@@ -62,6 +67,15 @@ export class ComponentStateManager<TState = ComponentState> {
   }
 
   get rawState(): TState { return this._state }
+
+  /**
+   * Visão do state como dicionário. TState é genérico (pode ser uma interface
+   * sem index signature), mas em runtime é sempre um objeto plano — é assim
+   * que o proxy e o diff o enxergam.
+   */
+  private get bag(): Record<PropertyKey, unknown> {
+    return this._state as unknown as Record<PropertyKey, unknown>
+  }
   get proxyState(): TState { return this._proxyState }
 
   /** Guard flag — prevents infinite recursion in onStateChange */
@@ -69,24 +83,34 @@ export class ComponentStateManager<TState = ComponentState> {
 
   private createStateProxy(state: TState): TState {
     const self = this
-    return new Proxy(state as object, {
+    return new Proxy(state as unknown as Record<PropertyKey, unknown>, {
       set(target, prop, value) {
-        const oldValue = (target as any)[prop]
+        const oldValue = target[prop]
         if (oldValue !== value) {
-          (target as any)[prop] = value
+          target[prop] = value
           const changes = { [prop]: value } as Partial<TState>
-          self.emitFn('STATE_DELTA', { delta: changes })
+          // Objeto inteiro trocado: o cliente aplica o delta com merge profundo,
+          // então mandar o objeto novo cru deixaria chaves antigas vivas lá.
+          // Com deepDiff, emite o diff (remoções viram null), como o setState.
+          if (self._deepDiff && typeof prop === 'string' && isPlainObjectOrArray(oldValue) && isPlainObjectOrArray(value)
+            && !Array.isArray(oldValue) && !Array.isArray(value)) {
+            const diff = computeDeepDiff({ [prop]: oldValue }, { [prop]: value }, 0, self._deepDiffDepth)
+            if (diff === null) return true // igual em valor: nada a sincronizar
+            self.emitDelta(diff as Partial<TState>)
+          } else {
+            self.emitDelta(changes)
+          }
           if (!self._inStateChange) {
             self._inStateChange = true
-            try { self.onStateChangeFn(changes) } catch (err: any) {
-              console.error(`[${self.componentId}] onStateChange error:`, err?.message || err)
+            try { self.onStateChangeFn(changes) } catch (err) {
+              console.error(`[${self.componentId}] onStateChange error:`, errorMessage(err))
             } finally { self._inStateChange = false }
           }
         }
         return true
       },
       get(target, prop) {
-        const value = (target as any)[prop]
+        const value = target[prop]
         // Recursive proxy (opt-in): wrap nested plain objects so a mutation like
         // `state.nested.x = y` is detected and synced. Shallow proxy (default)
         // would drop it silently. Identity is preserved via the child cache.
@@ -95,7 +119,7 @@ export class ComponentStateManager<TState = ComponentState> {
         }
         return value
       }
-    }) as TState
+    }) as unknown as TState
   }
 
   /**
@@ -115,40 +139,53 @@ export class ComponentStateManager<TState = ComponentState> {
     /** Emit a delta for the nested mutation: snapshot the root, run the mutation,
      *  diff before/after, and emit only the changed sub-tree under rootKey. */
     const withDelta = (mutate: () => void) => {
-      const before = structuredClone((self._state as any)[rootKey])
+      const before = structuredClone(self.bag[rootKey])
       mutate()
-      const after = (self._state as any)[rootKey]
+      const after = self.bag[rootKey]
       const subDiff = self._deepDiff
-        ? computeDeepDiff({ [rootKey]: before } as any, { [rootKey]: after } as any, 0, self._deepDiffDepth)
+        ? computeDeepDiff({ [rootKey]: before }, { [rootKey]: after }, 0, self._deepDiffDepth)
         : { [rootKey]: after }
       if (subDiff === null) return
-      self.emitFn('STATE_DELTA', { delta: subDiff })
+      self.emitDelta(subDiff)
       if (!self._inStateChange) {
         self._inStateChange = true
-        try { self.onStateChangeFn(subDiff as Partial<TState>) } catch (err: any) {
-          console.error(`[${self.componentId}] onStateChange error:`, err?.message || err)
+        try { self.onStateChangeFn(subDiff as Partial<TState>) } catch (err) {
+          console.error(`[${self.componentId}] onStateChange error:`, errorMessage(err))
         } finally { self._inStateChange = false }
       }
     }
-    const proxy = new Proxy(obj, {
+    const proxy = new Proxy(obj as Record<PropertyKey, unknown>, {
       get(target, prop) {
-        const value = (target as any)[prop]
+        const value = target[prop]
         if (isPlainObjectOrArray(value)) return self.wrapChild(value, rootKey)
         return value
       },
       set(target, prop, value) {
-        if ((target as any)[prop] === value) return true
-        withDelta(() => { (target as any)[prop] = value })
+        if (target[prop] === value) return true
+        withDelta(() => { target[prop] = value })
         return true
       },
       deleteProperty(target, prop) {
         if (!(prop in target)) return true
-        withDelta(() => { delete (target as any)[prop] })
+        withDelta(() => { delete target[prop] })
         return true
       },
     })
     this._childProxies.set(obj, proxy)
     return proxy
+  }
+
+  /** Emite STATE_DELTA e avisa quem acompanha mudanças (renovação do signedState). */
+  private emitDelta(delta: unknown): void {
+    this.emitFn('STATE_DELTA', { delta })
+    this.notifyDelta()
+  }
+
+  private notifyDelta(): void {
+    if (!this.onDeltaFn) return
+    try { this.onDeltaFn() } catch (err) {
+      console.error(`[${this.componentId}] onDelta hook error:`, errorMessage(err))
+    }
   }
 
   setState(updates: Partial<TState> | ((prev: TState) => Partial<TState>)): void {
@@ -163,9 +200,10 @@ export class ComponentStateManager<TState = ComponentState> {
       // cause deepDiff to short-circuit and silently drop the update — a common
       // footgun when doing shallow clones of room state (issue #19).
       if (process.env.NODE_ENV !== 'production') {
-        for (const key of Object.keys(newUpdates as object)) {
-          const patchVal = (newUpdates as any)[key]
-          const stateVal = (this._state as any)[key]
+        const patch = newUpdates as Record<string, unknown>
+        for (const key of Object.keys(patch)) {
+          const patchVal = patch[key]
+          const stateVal = this.bag[key]
           if (
             patchVal !== null &&
             typeof patchVal === 'object' &&
@@ -193,30 +231,32 @@ export class ComponentStateManager<TState = ComponentState> {
       hasChanges = true
     } else {
       // Shallow diff: reference equality (original behavior)
-      actualChanges = {} as Partial<TState>
+      const patch = newUpdates as Record<string, unknown>
+      const changes: Record<string, unknown> = {}
       hasChanges = false
-      for (const key of Object.keys(newUpdates as object) as Array<keyof TState>) {
-        if ((this._state as any)[key] !== (newUpdates as any)[key]) {
-          (actualChanges as any)[key] = (newUpdates as any)[key]
+      for (const key of Object.keys(patch)) {
+        if (this.bag[key] !== patch[key]) {
+          changes[key] = patch[key]
           hasChanges = true
         }
       }
+      actualChanges = changes as Partial<TState>
     }
 
     if (!hasChanges) return
 
     // Apply changes to internal state
     if (this._deepDiff) {
-      deepAssign(this._state, actualChanges)
+      deepAssign(this.bag, actualChanges)
     } else {
       Object.assign(this._state as object, actualChanges)
     }
 
-    this.emitFn('STATE_DELTA', { delta: actualChanges })
+    this.emitDelta(actualChanges)
     if (!this._inStateChange) {
       this._inStateChange = true
-      try { this.onStateChangeFn(actualChanges) } catch (err: any) {
-        console.error(`[${this.componentId}] onStateChange error:`, err?.message || err)
+      try { this.onStateChangeFn(actualChanges) } catch (err) {
+        console.error(`[${this.componentId}] onStateChange error:`, errorMessage(err))
       } finally { this._inStateChange = false }
     }
   }
@@ -225,18 +265,20 @@ export class ComponentStateManager<TState = ComponentState> {
     delta: Partial<TState>,
     encoder: (delta: Partial<TState>) => Uint8Array
   ): void {
-    const actualChanges: Partial<TState> = {} as Partial<TState>
+    const incoming = delta as Record<string, unknown>
+    const changes: Record<string, unknown> = {}
     let hasChanges = false
-    for (const key of Object.keys(delta as object) as Array<keyof TState>) {
-      if ((this._state as any)[key] !== (delta as any)[key]) {
-        (actualChanges as any)[key] = (delta as any)[key]
+    for (const key of Object.keys(incoming)) {
+      if (this.bag[key] !== incoming[key]) {
+        changes[key] = incoming[key]
         hasChanges = true
       }
     }
 
     if (!hasChanges) return
 
-    Object.assign(this._state as object, actualChanges)
+    Object.assign(this.bag, changes)
+    const actualChanges = changes as Partial<TState>
 
     const payload = encoder(actualChanges)
 
@@ -266,6 +308,7 @@ export class ComponentStateManager<TState = ComponentState> {
     if (this.ws && this.ws.readyState === 1) {
       this.ws.send(frame)
     }
+    this.notifyDelta()
   }
 
   setValue<K extends keyof TState>(payload: { key: K; value: TState[K] }): { success: true; key: K; value: TState[K] } {
@@ -283,7 +326,7 @@ export class ComponentStateManager<TState = ComponentState> {
    * Create getters/setters for each state property directly on `target`.
    * This allows `this.count` instead of `this.state.count` in subclasses.
    */
-  applyDirectAccessors(target: any, constructorFn: Function): void {
+  applyDirectAccessors(target: object, constructorFn: Function): void {
     let forbidden = _forbiddenSetCache.get(constructorFn)
     if (!forbidden) {
       forbidden = new Set([
@@ -301,8 +344,8 @@ export class ComponentStateManager<TState = ComponentState> {
     for (const key of Object.keys(this._state as object)) {
       if (!forbidden.has(key)) {
         Object.defineProperty(target, key, {
-          get: () => (this._state as any)[key],
-          set: (value) => { (this._proxyState as any)[key] = value },
+          get: () => this.bag[key],
+          set: (value: unknown) => { (this._proxyState as unknown as Record<string, unknown>)[key] = value },
           enumerable: true,
           configurable: true
         })

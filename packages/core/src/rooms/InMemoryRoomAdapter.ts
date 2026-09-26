@@ -4,10 +4,10 @@
 // All operations resolve synchronously via Promise.resolve().
 // Pub/sub methods are no-ops since all events are already local.
 
-import type { IRoomStorageAdapter, IRoomPubSubAdapter } from './adapters'
+import type { IRoomStorageAdapter, IRoomPubSubAdapter, RoomStorageStats } from './adapters'
 
 interface RoomData {
-  state: any
+  state: Record<string, unknown>
   createdAt: number
   lastUpdate: number
 }
@@ -17,7 +17,7 @@ export class InMemoryRoomAdapter implements IRoomStorageAdapter, IRoomPubSubAdap
 
   // ===== IRoomStorageAdapter =====
 
-  async getOrCreateRoom(roomId: string, initialState?: any): Promise<{ state: any; created: boolean }> {
+  async getOrCreateRoom(roomId: string, initialState?: Record<string, unknown>): Promise<{ state: Record<string, unknown>; created: boolean }> {
     const existing = this.rooms.get(roomId)
     if (existing) {
       return { state: existing.state, created: false }
@@ -33,11 +33,11 @@ export class InMemoryRoomAdapter implements IRoomStorageAdapter, IRoomPubSubAdap
     return { state: data.state, created: true }
   }
 
-  async getState(roomId: string): Promise<any> {
+  async getState(roomId: string): Promise<Record<string, unknown>> {
     return this.rooms.get(roomId)?.state ?? {}
   }
 
-  async updateState(roomId: string, updates: any): Promise<void> {
+  async updateState(roomId: string, updates: Record<string, unknown>): Promise<void> {
     const room = this.rooms.get(roomId)
     if (room) {
       Object.assign(room.state, updates)
@@ -53,8 +53,8 @@ export class InMemoryRoomAdapter implements IRoomStorageAdapter, IRoomPubSubAdap
     return this.rooms.delete(roomId)
   }
 
-  async getStats(): Promise<{ totalRooms: number; rooms: Record<string, any> }> {
-    const rooms: Record<string, any> = {}
+  async getStats(): Promise<{ totalRooms: number; rooms: Record<string, RoomStorageStats> }> {
+    const rooms: Record<string, RoomStorageStats> = {}
     for (const [id, data] of this.rooms) {
       rooms[id] = {
         createdAt: data.createdAt,
@@ -69,11 +69,11 @@ export class InMemoryRoomAdapter implements IRoomStorageAdapter, IRoomPubSubAdap
   // No-ops for single-instance: all events are already propagated locally
   // by RoomEventBus and LiveRoomManager's broadcastToRoom().
 
-  async publish(_roomId: string, _event: string, _data: any): Promise<void> {
+  async publish(_roomId: string, _event: string, _data: unknown): Promise<void> {
     // No-op: events are already local
   }
 
-  async subscribe(_roomId: string, _handler: (event: string, data: any) => void): Promise<() => void> {
+  async subscribe(_roomId: string, _handler: (event: string, data: unknown) => void): Promise<() => void> {
     // No-op: return empty unsubscribe
     return () => {}
   }
@@ -82,7 +82,7 @@ export class InMemoryRoomAdapter implements IRoomStorageAdapter, IRoomPubSubAdap
     // No-op: membership is already tracked locally
   }
 
-  async publishStateChange(_roomId: string, _updates: any): Promise<void> {
+  async publishStateChange(_roomId: string, _updates: unknown): Promise<void> {
     // No-op: state changes are already propagated locally
   }
 }

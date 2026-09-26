@@ -19,7 +19,6 @@
  */
 
 import type {
-  FluxStack,
   PluginHook,
   PluginHookResult,
   PluginMetrics,
@@ -33,19 +32,16 @@ import type {
   PluginClientHooksAPI,
 } from '../types'
 import type { Logger } from '../types/logger'
+import type { ErasedPlugin } from './erased-plugin'
 import { PluginRegistry, type PluginRegistrySettings } from './registry'
 import { createPluginUtils } from './utils'
 import { PluginError } from './errors'
 import { EventEmitter } from 'events'
 
-// See registry.ts for why this uses `any` instead of `unknown`. The
-// manager is generic over TConfig (PluginManager<TConfig>) and flows
-// the host-app config through to PluginContext<TConfig>, but the
-// internal Plugin type alias here is intentionally erased so a
-// consumer can pass Plugin<HostConfig> to registerPlugin() without
-// variance errors.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type Plugin = FluxStack.Plugin<any>
+// O manager é genérico em TConfig (PluginManager<TConfig>) e repassa a config
+// do host para PluginContext<TConfig>, mas o alias interno de Plugin é apagado
+// para aceitar Plugin<HostConfig> em registerPlugin() — ver erased-plugin.ts
+type Plugin = ErasedPlugin
 
 /**
  * Helper: safely parse `request.url` which might be relative or absolute.
@@ -185,8 +181,11 @@ export class PluginManager<TConfig = unknown> extends EventEmitter {
     }
   }
 
-  unregisterPlugin(name: string): void {
-    this.registry.unregister(name)
+  async unregisterPlugin(name: string): Promise<void> {
+    // Aguarda o registry: antes a Promise ficava solta — erro (plugin inexistente
+    // ou com dependentes) virava unhandled rejection e o contexto/métricas eram
+    // apagados mesmo com o plugin ainda registrado.
+    await this.registry.unregister(name)
     this.contexts.delete(name)
     this.metrics.delete(name)
   }

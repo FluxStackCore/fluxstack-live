@@ -96,6 +96,11 @@ function buildTestFrame(
 const BINARY_ROOM_EVENT = 0x02
 const BINARY_ROOM_STATE = 0x03
 
+type GameState = {
+  board: { cells: number[][] }
+  players: Record<string, { name: string; score: number; items: string[] }>
+}
+
 // ===== RoomManager binary frame tests =====
 
 describe('RoomManager binary frame handling', () => {
@@ -321,9 +326,9 @@ describe('RoomManager binary frame handling', () => {
       }
       binaryHandler!(buildTestFrame(BINARY_ROOM_STATE, 'comp-test-1', 'game:complex', '$state:update', stateUpdate))
 
-      expect(handle.state.board.cells).toEqual([[1, 0], [0, 2]])
-      expect(handle.state.players.p1.name).toBe('Alice')
-      expect(handle.state.players.p1.items).toEqual(['sword'])
+      expect((handle.state as GameState).board.cells).toEqual([[1, 0], [0, 2]])
+      expect((handle.state as GameState).players.p1.name).toBe('Alice')
+      expect((handle.state as GameState).players.p1.items).toEqual(['sword'])
     })
 
     it('decodes boolean and null values correctly', () => {

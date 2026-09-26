@@ -37,7 +37,7 @@ describe('StateSignature — replay-protection window', () => {
     const s = m.signState('c1', { x: 1 }, 1)
     // Forge a far-future embedded timestamp in the nonce — but the HMAC is over
     // the original ts:rand, so tampering the ts must invalidate the nonce.
-    const [, rand, mac] = s.nonce.split(':')
+    const [, rand, mac] = s.nonce!.split(':')
     const futureTs = Date.now() + 5 * 60_000
     const tampered = { ...s, nonce: `${futureTs}:${rand}:${mac}` }
     expect(m.validateState(tampered).valid).toBe(false)
@@ -57,7 +57,7 @@ describe('StateSignature — replay-protection window', () => {
     // Force the map to look full and evict, capturing the victim's window.
     const used = (m as any).usedNonces as Map<string, number>
     // Pad the map with synthetic, older nonce keys so the victim is among evicted.
-    const baseTs = Number(victim.nonce.split(':')[0])
+    const baseTs = Number(victim.nonce!.split(':')[0])
     for (let i = 0; i < cap + 10; i++) {
       used.set(`${baseTs - 1000 + i}:pad${i}:mac`, Date.now())
     }

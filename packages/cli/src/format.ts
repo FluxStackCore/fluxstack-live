@@ -8,13 +8,56 @@ export interface FormatOptions {
   filter?: string
 }
 
+/**
+ * Formato "frouxo" de uma mensagem do protocolo como o inspector a enxerga.
+ * Tudo é opcional: o inspector exibe o que vier, sem validar o protocolo.
+ */
+export interface WireMessage {
+  type?: string
+  componentId?: string
+  connectionId?: string
+  originalType?: string
+  action?: string
+  roomId?: string
+  event?: string
+  component?: string
+  success?: boolean
+  error?: unknown
+  delta?: unknown
+  state?: unknown
+  data?: unknown
+  payload?: WirePayload
+  result?: WireResult
+  [key: string]: unknown
+}
+
+/** `payload` de uma mensagem — campos conhecidos + qualquer payload de action. */
+export interface WirePayload {
+  delta?: unknown
+  state?: unknown
+  component?: string
+  props?: unknown
+  roomId?: string
+  event?: string
+  data?: unknown
+  [key: string]: unknown
+}
+
+/** `result` de uma MESSAGE_RESPONSE / ACTION_RESPONSE. */
+export interface WireResult {
+  componentId?: string
+  componentName?: string
+  state?: unknown
+  [key: string]: unknown
+}
+
 /** Collect leaf paths from a nested object for delta display */
-export function collectLeafPaths(obj: any, prefix = '', out: [string, any][] = []): [string, any][] {
+export function collectLeafPaths(obj: unknown, prefix = '', out: [string, unknown][] = []): [string, unknown][] {
   if (obj === null || typeof obj !== 'object') {
     out.push([prefix, obj])
     return out
   }
-  for (const [k, v] of Object.entries(obj)) {
+  for (const [k, v] of Object.entries(obj) as [string, unknown][]) {
     const path = prefix ? `${prefix}.${k}` : k
     if (v !== null && typeof v === 'object' && !Array.isArray(v)) {
       collectLeafPaths(v, path, out)
@@ -26,7 +69,7 @@ export function collectLeafPaths(obj: any, prefix = '', out: [string, any][] = [
 }
 
 /** Summarize a value to a max string length */
-export function summarize(obj: any, maxLen = 80): string {
+export function summarize(obj: unknown, maxLen = 80): string {
   const s = JSON.stringify(obj)
   return s.length > maxLen ? s.slice(0, maxLen) + '\u2026' : s
 }
@@ -37,7 +80,7 @@ function ts(): string {
 }
 
 /** Format a JSON message for display */
-export function formatMessage(msg: any, direction: 'IN' | 'OUT', opts: FormatOptions): string | null {
+export function formatMessage(msg: WireMessage, direction: 'IN' | 'OUT', opts: FormatOptions): string | null {
   const type: string = msg.type ?? '?'
 
   if (opts.quiet && (type === 'COMPONENT_PING' || type === 'COMPONENT_PONG' || type === 'PING' || type === 'PONG')) return null
@@ -180,8 +223,14 @@ export function formatBinaryFrame(frame: {
 
   const lines = [`${time} ${dir} ${t}`]
   if (frame.componentId) lines.push(color(`  cid: ${frame.componentId}`, C.dim))
-  lines.push(color(`  room: ${frame.roomId}  event: ${frame.event}`, C.yellow))
-  lines.push(color(`  data: ${summarize(frame.data, 200)}`, C.white))
+  if (frame.data instanceof Uint8Array) {
+    // 0x01: payload do encoder custom do componente — mostra tamanho + prévia hex
+    const hex = Array.from(frame.data.subarray(0, 32), (b) => b.toString(16).padStart(2, '0')).join(' ')
+    lines.push(color(`  payload: ${frame.data.byteLength} bytes  ${hex}${frame.data.byteLength > 32 ? ' …' : ''}`, C.white))
+  } else {
+    lines.push(color(`  room: ${frame.roomId}  event: ${frame.event}`, C.yellow))
+    lines.push(color(`  data: ${summarize(frame.data, 200)}`, C.white))
+  }
 
   return lines.join('\n')
 }

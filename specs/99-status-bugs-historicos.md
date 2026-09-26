@@ -40,7 +40,7 @@ código atual + testes). **Não retrabalhe os itais marcados "CORRIGIDO".**
 | `LiveAuthContext` permite provider **não-freezado** | tipo permissivo; reabre #2 se mal usado | `03` FP-2 |
 | Whitelist NPM **não enforçada** no `.use()` manual | segurança em camadas inativa na prática | `06` FP-1 |
 | ~~`RedisRoomAdapter.publishStateChange` não-atômico~~ | **✅ CORRIGIDO (2026-06-10)** — Lua script atômico; testado com 100 escritas concorrentes | `05` FP-1 |
-| AES-256-CBC **sem autenticação** (state crypto opcional) | tampering não detectado | `03` FP-3 |
+| ~~AES-256-CBC **sem autenticação** (state crypto opcional)~~ ✅ migrado para AES-256-GCM | tampering não detectado | `03` FP-3 |
 
 ## Como manter esta tabela
 

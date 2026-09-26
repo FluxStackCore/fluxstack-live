@@ -2,7 +2,7 @@
 // quota-exceeded resilience. Zero coverage before this file.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { persistState, getPersistedState, clearPersistedState } from '../persistence'
+import { persistState, getPersistedState, clearPersistedState, getRehydratableState } from '../persistence'
 
 // jsdom-free mock — vitest does not bring a DOM by default for this package.
 class FakeStorage implements Storage {
@@ -112,7 +112,7 @@ describe('getPersistedState', () => {
     }))
     const got = getPersistedState(true, 'Fresh')
     expect(got).toBeTruthy()
-    expect(got!.signedState.ok).toBe(true)
+    expect((got!.signedState as { ok: boolean }).ok).toBe(true)
   })
 
   it('returns null when the stored value is corrupt JSON', () => {
@@ -136,5 +136,46 @@ describe('clearPersistedState', () => {
 
   it('does not throw when the key does not exist', () => {
     expect(() => clearPersistedState(true, 'Ghost')).not.toThrow()
+  })
+})
+
+const signed = { data: '{"count":5}', signature: 'sig', timestamp: 1, version: 3, componentId: 'c-1' }
+
+describe('getRehydratableState', () => {
+  it('devolve o signedState persistido (com room/userId) quando fresco e bem formado', () => {
+    persistState(true, 'Counter', signed, 'lobby', 'u-1')
+    expect(getRehydratableState(true, 'Counter')).toEqual({ signedState: signed, room: 'lobby', userId: 'u-1' })
+  })
+
+  it('descarta e apaga token mais velho que maxAge (padrão 1 h)', () => {
+    fake._setRaw('fluxstack_component_Old', JSON.stringify({
+      componentName: 'Old', signedState: signed, lastUpdate: Date.now() - 61 * 60 * 1000,
+    }))
+    expect(getRehydratableState(true, 'Old')).toBeNull()
+    expect(fake.getItem('fluxstack_component_Old')).toBeNull()
+  })
+
+  it('descarta e apaga token com forma inválida', () => {
+    persistState(true, 'Bad', { nope: true })
+    expect(getRehydratableState(true, 'Bad')).toBeNull()
+    expect(fake.getItem('fluxstack_component_Bad')).toBeNull()
+  })
+
+  it('null quando desligado', () => {
+    persistState(true, 'Counter', signed)
+    expect(getRehydratableState(false, 'Counter')).toBeNull()
+  })
+})
+
+describe('sem localStorage (SSR/Node)', () => {
+  it('persist/get/clear viram no-op silencioso (sem warn)', () => {
+    delete (globalThis as any).localStorage
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    expect(() => persistState(true, 'X', signed)).not.toThrow()
+    expect(getPersistedState(true, 'X')).toBeNull()
+    expect(getRehydratableState(true, 'X')).toBeNull()
+    expect(() => clearPersistedState(true, 'X')).not.toThrow()
+    expect(warn).not.toHaveBeenCalled()
+    warn.mockRestore()
   })
 })

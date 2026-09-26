@@ -39,6 +39,36 @@ Adapters implementam `LiveTransport`: `registerWebSocket(config)`,
 `deepMerge` aplica `STATE_DELTA` com a semântica null-as-deletion (top-level null real,
 nested null deleta, undefined no-op) — `:52-78`.
 
+**Re-hidratação (2026-09-26, paridade com o React).** O `useLive` guarda sempre o
+`signedState` mais recente — resposta do mount, `STATE_UPDATE.signedState`,
+`STATE_REHYDRATED` (versão+1) e a renovação throttled `STATE_SIGNATURE` — e o expõe em
+`signedState: Ref<SignedState | null>`. Na reconexão (o watcher olha `connected` **e**
+`connectionId`, então uma queda-e-volta rápida que o watcher não viu como
+`connected=false` também conta) envia `COMPONENT_REHYDRATE` via
+`clientMessages.rehydrate(<último componentId>, { component, signedState, room, userId })`
+e continua do estado atual; `rehydrating: Ref<boolean>` durante o pedido.
+- **Recusa** (assinatura inválida/vencida, `__componentName` diferente, erro, timeout na
+  mesma conexão) → descarta o token (memória + localStorage) e cai para o mount normal.
+- **Interrupção** (a conexão caiu/trocou no meio do pedido — detectado pela identidade do
+  transporte) → mantém o token e tenta de novo na conexão nova (até 3 voltas; o mesmo
+  vale para um mount perdido numa troca de conexão).
+- **`persistState`** (padrão `true`, igual ao React): `false` = nunca re-hidrata e não
+  grava nada. Ligado, também persiste em `localStorage` com os helpers do client
+  (`persistState`/`getRehydratableState`/`clearPersistedState`, chave
+  `fluxstack_component_<nome>`, a mesma do React) e, na primeira conexão, re-hidrata a
+  partir dele (reload) se o token tiver < 1 h e forma válida (`REHYDRATE_MAX_AGE`).
+  Sem `localStorage` (SSR/Node) a persistência é no-op silencioso e fica só a memória.
+- `onRehydrate?: () => void` chamado após re-hidratação aceita. `unmount()` explícito
+  esquece o token em memória (o próximo `mount()` começa do zero); o localStorage segue a
+  regra do React (não é apagado no unmount).
+- Ordem no mount: `initialState` é aplicado **antes** de registrar o componente, para
+  que mensagens bufferizadas (delta do `onMount`, `STATE_SIGNATURE`) prevaleçam.
+- Testes: `vue/src/__tests__/use-live.test.ts` (harness sem DOM: rehydrate com o token
+  renovado, recusa → mount, `persistState:false`, troca de `connectionId`, localStorage)
+  e `integration-sse.test.ts` (LiveServer real via SSE em memória: 0→5, renovação, queda
+  → 5 e próxima action 6; restart do servidor com o mesmo segredo; token adulterado no
+  localStorage → mount do zero; reload íntegro → 5).
+
 ### 1.4 CLI inspector (NOVO) — `packages/cli/src`
 
 Ferramenta standalone (`bunx fluxstack-inspect`) que conecta no WS e **introspecta**
@@ -108,7 +138,7 @@ Era: decoder recursivo sem limite → frame com aninhamento profundo estourava a
 | 🟠 | **Documentar estes pacotes** | `CLAUDE.md`/`llms.txt` mencionam só core/client/react. Adapters (GenericWebSocket), Redis (atomicidade/heartbeat/failover), Vue, CLI e `spatial-room` precisam de seção própria. |
 | ✅ | ~~Versionar/deduplicar cluster deltas~~ | FP-2 — CORRIGIDO (seq monotônico). |
 | ✅ | ~~`--max-depth` no msgpack do CLI~~ | FP-3 — CORRIGIDO (maxDepth=100). |
-| ⚪ | Vue: auto-reconnect com backoff + replay | FP-4. |
+| ✅ | ~~Vue: auto-reconnect com backoff + replay~~ | FP-4 (reconexão já existia) + **re-hidratação com o signedState mais recente implementada (2026-09-26)** — ver §1.3. |
 
 ---
 

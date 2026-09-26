@@ -11,6 +11,7 @@ import type {
   LiveAuthResult,
 } from './types'
 import { ANONYMOUS_CONTEXT, AuthenticatedContext } from './LiveAuthContext'
+import { errorMessage, toError } from '../utils/errors'
 
 /**
  * Normalize a context returned by a provider so an AUTHENTICATED context always
@@ -125,8 +126,8 @@ export class LiveAuthManager {
       try {
         const context = await provider.authenticate(credentials)
         return freezeAuthContext(context) || ANONYMOUS_CONTEXT
-      } catch (error: any) {
-        console.error(`[Auth] Failed via '${providerName}':`, error.message)
+      } catch (error) {
+        console.error(`[Auth] Failed via '${providerName}':`, errorMessage(error))
         return ANONYMOUS_CONTEXT
       }
     }
@@ -153,14 +154,14 @@ export class LiveAuthManager {
         if (context && context.authenticated) {
           return freezeAuthContext(context)!
         }
-      } catch (error: any) {
-        console.warn(`[Auth] Provider '${provider.name}' threw during authentication:`, error.message)
-        errors.push({ provider: provider.name, error })
+      } catch (error) {
+        console.warn(`[Auth] Provider '${provider.name}' threw during authentication:`, errorMessage(error))
+        errors.push({ provider: provider.name, error: toError(error) })
       }
     }
 
     if (errors.length > 0) {
-      console.warn(`[Auth] All ${providersToTry.length} provider(s) failed. Errors: ${errors.map(e => `${e.provider}: ${e.error.message}`).join('; ')}`)
+      console.warn(`[Auth] All ${providersToTry.length} provider(s) failed. Errors: ${errors.map(e => `${e.provider}: ${errorMessage(e.error)}`).join('; ')}`)
     }
 
     return ANONYMOUS_CONTEXT
@@ -206,8 +207,8 @@ export class LiveAuthManager {
         const raw = await authConfig.authorize(authContext)
         const coerced = coerceAuthResult(raw, 'Denied by custom authorize')
         if (!coerced.allowed) return coerced
-      } catch (error: any) {
-        return { allowed: false, reason: `Authorization error: ${error.message}` }
+      } catch (error) {
+        return { allowed: false, reason: `Authorization error: ${errorMessage(error)}` }
       }
     }
 
@@ -254,8 +255,8 @@ export class LiveAuthManager {
         const raw = await actionAuth.authorize(authContext, payload)
         const coerced = coerceAuthResult(raw, `Action '${action}' denied by custom authorize`)
         if (!coerced.allowed) return coerced
-      } catch (error: any) {
-        return { allowed: false, reason: `Action '${action}' authorization error: ${error.message}` }
+      } catch (error) {
+        return { allowed: false, reason: `Action '${action}' authorization error: ${errorMessage(error)}` }
       }
     }
 
@@ -293,8 +294,8 @@ export class LiveAuthManager {
         return { allowed: false, reason: `Access to room '${roomId}' denied by auth provider '${name}'` }
       }
       return { allowed: true }
-    } catch (error: any) {
-      return { allowed: false, reason: `Room authorization error: ${error.message}` }
+    } catch (error) {
+      return { allowed: false, reason: `Room authorization error: ${errorMessage(error)}` }
     }
   }
 

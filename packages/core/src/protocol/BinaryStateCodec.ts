@@ -80,7 +80,7 @@ export interface BinaryCodecInfo {
   estimatedFixedSize: number
 }
 
-export class BinaryStateCodec<TState = Record<string, any>> {
+export class BinaryStateCodec<TState = Record<string, unknown>> {
   private readonly _fields: FieldDef[]
   private readonly _fieldIndex: Map<string, number>
   private readonly _unsupported: string[]
@@ -107,7 +107,8 @@ export class BinaryStateCodec<TState = Record<string, any>> {
     this._fieldIndex = new Map()
     this._unsupported = []
 
-    const state = defaultState as Record<string, any>
+    // TState é genérico; em runtime o defaultState é um objeto plano.
+    const state = defaultState as unknown as Record<string, unknown>
     const keys = Object.keys(state)
 
     for (const key of keys) {
@@ -167,10 +168,10 @@ export class BinaryStateCodec<TState = Record<string, any>> {
    */
   encodeDelta(delta: Partial<TState>): {
     binary: Uint8Array | null
-    jsonFallback: Record<string, any> | null
+    jsonFallback: Record<string, unknown> | null
   } {
-    const d = delta as Record<string, any>
-    let jsonFallback: Record<string, any> | null = null
+    const d = delta as Record<string, unknown>
+    let jsonFallback: Record<string, unknown> | null = null
     let hasBinary = false
 
     // Reuse the scratch bitmask — zero it first.
@@ -225,38 +226,40 @@ export class BinaryStateCodec<TState = Record<string, any>> {
       if (!(bitmask[i >> 3] & (1 << (i & 7)))) continue
       const field = this._fields[i]
       const val = d[field.name]
+      // Campos numéricos: o DataView converte com ToNumber (hot path — sem checagem extra).
+      const num = val as number
 
       switch (field.wireType) {
         case TYPE_UINT8:
-          this._encodeBuf[offset] = val & 0xff
+          this._encodeBuf[offset] = num & 0xff
           offset += 1
           break
         case TYPE_UINT16:
-          this._encodeView.setUint16(offset, val, true)
+          this._encodeView.setUint16(offset, num, true)
           offset += 2
           break
         case TYPE_UINT32:
-          this._encodeView.setUint32(offset, val, true)
+          this._encodeView.setUint32(offset, num, true)
           offset += 4
           break
         case TYPE_INT8:
-          this._encodeView.setInt8(offset, val)
+          this._encodeView.setInt8(offset, num)
           offset += 1
           break
         case TYPE_INT16:
-          this._encodeView.setInt16(offset, val, true)
+          this._encodeView.setInt16(offset, num, true)
           offset += 2
           break
         case TYPE_INT32:
-          this._encodeView.setInt32(offset, val, true)
+          this._encodeView.setInt32(offset, num, true)
           offset += 4
           break
         case TYPE_FLOAT32:
-          this._encodeView.setFloat32(offset, val, true)
+          this._encodeView.setFloat32(offset, num, true)
           offset += 4
           break
         case TYPE_FLOAT64:
-          this._encodeView.setFloat64(offset, val, true)
+          this._encodeView.setFloat64(offset, num, true)
           offset += 8
           break
         case TYPE_BOOLEAN:
@@ -283,7 +286,7 @@ export class BinaryStateCodec<TState = Record<string, any>> {
    */
   decodeDelta(buf: Uint8Array): Partial<TState> {
     const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength)
-    const result: Record<string, any> = {}
+    const result: Record<string, unknown> = {}
     let offset = this._bitmaskBytes
 
     for (let i = 0; i < this._fields.length; i++) {

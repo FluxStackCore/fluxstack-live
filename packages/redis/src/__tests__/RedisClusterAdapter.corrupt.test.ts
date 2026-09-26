@@ -4,12 +4,16 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest'
 import Redis from 'ioredis'
 import { RedisClusterAdapter } from '../RedisClusterAdapter'
+import { redisAvailable } from './redis-available'
+
+/** Sem Redis local: pula. Na CI: falha (ver redis-available.ts). */
+const REDIS_UP = await redisAvailable()
 
 const REDIS_HOST = '127.0.0.1'
 const REDIS_PORT = 16379
 const TEST_PREFIX = 'test:corrupt:'
 
-describe('RedisClusterAdapter — corrupted data handling', () => {
+describe.skipIf(!REDIS_UP)('RedisClusterAdapter — corrupted data handling', () => {
   let redis: Redis
   let adapter: RedisClusterAdapter
 
@@ -28,7 +32,8 @@ describe('RedisClusterAdapter — corrupted data handling', () => {
   })
 
   beforeEach(async () => {
-    redis = new Redis({ host: REDIS_HOST, port: REDIS_PORT, db: 15 })
+    // banco exclusivo: cluster-sync.test usa o 15 e faz flushdb em paralelo
+    redis = new Redis({ host: REDIS_HOST, port: REDIS_PORT, db: 12 })
     await redis.flushdb()
     adapter = new RedisClusterAdapter({
       redis,

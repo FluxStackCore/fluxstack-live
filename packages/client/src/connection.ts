@@ -1,10 +1,29 @@
-// @fluxstack/live-client - WebSocket Connection Manager
+// @fluxstack/live-client - Connection Manager
 //
-// Framework-agnostic WebSocket connection with auto-reconnect, heartbeat,
-// request-response pattern, and component message routing.
+// Conexão agnóstica de framework E de transporte: auto-reconnect, heartbeat,
+// request-response e roteamento por componente. O transporte (WebSocket, SSE
+// ou custom) é plugável — ver ./transports.ts.
 
-import type { WebSocketMessage, WebSocketResponse } from '@fluxstack/live'
+import type { WebSocketResponse } from '@fluxstack/live'
 import { generateId } from './generateId'
+import {
+  clientMessages,
+  isRecord,
+  readAuthPayload,
+  type LiveOutgoingMessage,
+} from './protocol'
+import {
+  createClientTransport,
+  resolveTransportEndpoints,
+  WebSocketClientTransport,
+  type ClientTransport,
+  type ClientTransportEndpoints,
+  type ClientTransportKind,
+  type ClientTransportOption,
+  type ClientTransportMode,
+  type ClientTransportFactory,
+  resolveTransportChain,
+} from './transports'
 
 /**
  * Deep-freeze a session mirror so client code cannot mutate fields locally.
@@ -25,6 +44,38 @@ function deepFreezeSession(s: unknown, depth = 0): unknown {
   return Object.freeze(s)
 }
 
+/** Congela o espelho da sessão (a forma já foi validada por `readAuthPayload`). */
+function freezeSession(session: Record<string, unknown> | null): Record<string, unknown> | null {
+  deepFreezeSession(session)
+  return session
+}
+
+/** Chave de correlação de upload de uma mensagem enviada (ver `uploadAliases`). */
+function uploadAliasOf(message: unknown): string | undefined {
+  if (!isRecord(message) || typeof message.uploadId !== 'string') return undefined
+  if (message.type === 'FILE_UPLOAD_CHUNK' && typeof message.chunkIndex === 'number') {
+    return `${message.uploadId}:${message.chunkIndex}`
+  }
+  if (message.type === 'FILE_UPLOAD_COMPLETE') return `${message.uploadId}:complete`
+  return undefined
+}
+
+/** Header JSON de um chunk binário: `[u32 LE tamanho][JSON][dados]` (ver createBinaryChunkMessage). */
+function readBinaryChunkHeader(data: ArrayBuffer): unknown {
+  try {
+    if (data.byteLength < 4) return undefined
+    const len = new DataView(data).getUint32(0, true)
+    if (4 + len > data.byteLength) return undefined
+    return JSON.parse(new TextDecoder().decode(new Uint8Array(data, 4, len)))
+  } catch {
+    return undefined
+  }
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error))
+}
+
 /** Auth credentials to send during WebSocket connection */
 export interface LiveAuthOptions {
   /** JWT or opaque token */
@@ -38,6 +89,17 @@ export interface LiveAuthOptions {
 export interface LiveConnectionOptions {
   /** WebSocket URL. Auto-detected from window.location if omitted. */
   url?: string
+  /**
+   * Transporte: 'websocket' (padrão), 'sse' (Server-Sent Events + POST HTTP),
+   * 'http' (long-polling + POST), 'auto' (= ['websocket', 'sse', 'http']),
+   * uma lista em ordem de preferência (ex.: ['sse', 'http']) — desce para o
+   * próximo se o atual nunca abrir — ou uma fábrica custom.
+   */
+  transport?: ClientTransportOption
+  /** URL base do SSE. Default: derivada de `url` (`/api/live/ws` → `/api/live/sse`). */
+  sseUrl?: string
+  /** URL base do HTTP long-polling. Default: derivada de `url` (`/api/live/ws` → `/api/live/http`). */
+  httpUrl?: string
   /** Auth credentials to send on connection */
   auth?: LiveAuthOptions
   /** Auto-connect on creation. Default: true */
@@ -61,6 +123,8 @@ export interface LiveClientAuth {
 
 export interface LiveConnectionState {
   connected: boolean
+  /** transporte em uso ('websocket' | 'sse' | custom) — null antes de conectar */
+  transport: ClientTransportKind | null
   connecting: boolean
   error: string | null
   connectionId: string | null
@@ -73,12 +137,41 @@ type StateChangeCallback = (state: LiveConnectionState) => void
 type ComponentCallback = (message: WebSocketResponse) => void
 
 /**
+ * Mensagens para um componente que ainda não registrou callback ficam
+ * guardadas por pouco tempo e são entregues no `registerComponent`.
+ *
+ * Por quê: o servidor envia (e dá flush) nos eventos do componente ANTES da
+ * resposta do request — `STATE_REHYDRATED` chega antes de `COMPONENT_REHYDRATED`,
+ * e deltas emitidos em `onMount` chegam antes da resposta do mount. O cliente
+ * só conhece o componentId depois da resposta, então sem este buffer essas
+ * mensagens eram descartadas ("No callback registered").
+ */
+const UNROUTED_TTL_MS = 5000
+const UNROUTED_MAX_PER_COMPONENT = 32
+const UNROUTED_MAX_COMPONENTS = 64
+
+/**
  * Framework-agnostic WebSocket connection manager.
  * Handles reconnection, heartbeat, request-response pattern, and message routing.
  */
 export class LiveConnection {
-  private ws: WebSocket | null = null
-  private options: Required<Omit<LiveConnectionOptions, 'url' | 'auth'>> & { url?: string; auth?: LiveAuthOptions }
+  private transport: ClientTransport | null = null
+  private readonly endpoints: ClientTransportEndpoints
+  /** modo efetivo (em 'auto' começa em websocket e pode cair para sse) */
+  private activeMode: ClientTransportMode | ClientTransportFactory
+  /** cadeia de fallback resolvida a partir de `options.transport` */
+  private readonly chain: ReadonlyArray<ClientTransportMode | ClientTransportFactory>
+  /** falhas seguidas do transporte atual sem nunca abrir (modo 'auto') */
+  private autoWsFailures = 0
+  /** ordem de fallback do modo 'auto': do melhor para o que passa em qualquer rede */
+  private static readonly AUTO_FALLBACK_AFTER = 2
+  private options: Required<Omit<LiveConnectionOptions, 'url' | 'auth' | 'transport' | 'sseUrl' | 'httpUrl'>> & {
+    url?: string
+    auth?: LiveAuthOptions
+    transport: ClientTransportOption
+    sseUrl?: string
+    httpUrl?: string
+  }
   private reconnectAttempts = 0
   private reconnectTimeout: ReturnType<typeof setTimeout> | null = null
   private manualReconnectTimeout: ReturnType<typeof setTimeout> | null = null
@@ -91,13 +184,25 @@ export class LiveConnection {
   private roomBinaryHandlers = new Set<(frame: Uint8Array) => void>()
   private _textDecoder = new TextDecoder()
   private pendingRequests = new Map<string, {
-    resolve: (value: any) => void
-    reject: (error: any) => void
+    resolve: (value: WebSocketResponse) => void
+    reject: (error: Error) => void
     timeout: ReturnType<typeof setTimeout>
+    /** chave de upload (ver uploadAliases) — removida junto com o request */
+    uploadAlias?: string
   }>()
+  /**
+   * `uploadId:chunkIndex` / `uploadId:complete` → requestId.
+   * O servidor responde FILE_UPLOAD_PROGRESS / FILE_UPLOAD_COMPLETE SEM ecoar o
+   * `requestId`; sem esta correlação cada chunk esperava até o timeout e o
+   * upload falhava. Quando a resposta trouxer `requestId`, o caminho normal vence.
+   */
+  private uploadAliases = new Map<string, string>()
+  /** componentId → mensagens que chegaram antes do registerComponent (ver UNROUTED_TTL_MS). */
+  private unrouted = new Map<string, { at: number; messages: WebSocketResponse[] }>()
   private stateListeners = new Set<StateChangeCallback>()
   private _state: LiveConnectionState = {
     connected: false,
+    transport: null,
     connecting: false,
     error: null,
     connectionId: null,
@@ -109,6 +214,9 @@ export class LiveConnection {
     this.options = {
       url: options.url,
       auth: options.auth,
+      transport: options.transport ?? 'websocket',
+      sseUrl: options.sseUrl,
+      httpUrl: options.httpUrl,
       autoConnect: options.autoConnect ?? true,
       reconnectInterval: options.reconnectInterval ?? 1000,
       // Infinito por padrão: app tempo real não deve "morrer" após N falhas e
@@ -118,6 +226,9 @@ export class LiveConnection {
       heartbeatInterval: options.heartbeatInterval ?? 30000,
       debug: options.debug ?? false,
     }
+    this.endpoints = resolveTransportEndpoints(this.options.url, this.options.sseUrl, this.options.httpUrl)
+    this.chain = resolveTransportChain(this.options.transport)
+    this.activeMode = this.chain[0]!
 
     // Reconexão guiada pela rede/visibilidade: quando o navegador volta a ficar
     // online ou a aba volta ao foco, tentamos reconectar IMEDIATAMENTE (sem
@@ -152,7 +263,7 @@ export class LiveConnection {
       reconnectNow()
     }
     this.visibilityHandler = () => {
-      if (document.visibilityState === 'visible' && this.ws?.readyState !== WebSocket.OPEN) {
+      if (document.visibilityState === 'visible' && !this.transport?.isOpen) {
         this.log('Tab visible again — reconnecting')
         reconnectNow()
       }
@@ -186,18 +297,7 @@ export class LiveConnection {
     }
   }
 
-  private getWebSocketUrl(): string {
-    if (this.options.url) {
-      return this.options.url
-    } else if (typeof window === 'undefined') {
-      return 'ws://localhost:3000/api/live/ws'
-    } else {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-      return `${protocol}//${window.location.host}/api/live/ws`
-    }
-  }
-
-  private log(message: string, data?: any) {
+  private log(message: string, data?: unknown) {
     if (this.options.debug) {
       console.log(`[LiveConnection] ${message}`, data || '')
     }
@@ -208,13 +308,13 @@ export class LiveConnection {
     return generateId()
   }
 
-  /** Connect to WebSocket server */
+  /** Conecta usando o transporte configurado. */
   connect(): void {
-    if (this.ws?.readyState === WebSocket.CONNECTING) {
+    if (this.transport?.isConnecting) {
       this.log('Already connecting, skipping...')
       return
     }
-    if (this.ws?.readyState === WebSocket.OPEN) {
+    if (this.transport?.isOpen) {
       this.log('Already connected, skipping...')
       return
     }
@@ -223,69 +323,94 @@ export class LiveConnection {
     // fechamento intencional — a partir daqui quedas voltam a reconectar.
     this.intentionalClose = false
     this.setState({ connecting: true, error: null })
-    const url = this.getWebSocketUrl()
-    this.log('Connecting...', { url })
 
     try {
-      const ws = new WebSocket(url)
-      ws.binaryType = 'arraybuffer'
-      this.ws = ws
+      const transport = createClientTransport(this.activeMode, this.endpoints)
+      this.transport = transport
+      let opened = false
+      this.log('Connecting...', { transport: transport.kind, endpoints: this.endpoints })
 
-      ws.onopen = () => {
-        this.log('Connected')
-        this.setState({ connected: true, connecting: false })
-        this.reconnectAttempts = 0
-        this.startHeartbeat()
-      }
+      transport.open({
+        onOpen: () => {
+          if (this.transport !== transport) return
+          opened = true
+          this.autoWsFailures = 0
+          this.log('Connected', { transport: transport.kind })
+          this.setState({ connected: true, connecting: false, transport: transport.kind })
+          this.reconnectAttempts = 0
+          this.startHeartbeat()
+        },
+        onMessage: (data) => {
+          if (this.transport !== transport) return
+          this.handleIncoming(data)
+        },
+        onError: (error) => {
+          if (this.transport !== transport) return
+          this.log('Transport error', { transport: transport.kind, error: error.message })
+          this.setState({ error: `${transport.kind} connection error`, connecting: false })
+        },
+        onClose: (code, reason) => {
+          if (this.transport !== transport) return
+          this.transport = null
+          this.log('Disconnected', { code, reason })
+          this.setState({ connected: false, connecting: false, connectionId: null, authenticated: false, auth: { authenticated: false, session: null } })
+          this.stopHeartbeat()
+          // A resposta de um pedido em voo nunca chegará por uma conexão morta:
+          // rejeita já, em vez de esperar o timeout (mount/rehydrate/action
+          // ficavam parados até 5-10s antes de tentar na conexão nova).
+          this.rejectPendingRequests(`Connection lost (${code}${reason ? `: ${reason}` : ''})`)
 
-      ws.onmessage = (event) => {
-        // Binary message path (BINARY_STATE_DELTA)
-        if (event.data instanceof ArrayBuffer) {
-          this.handleBinaryMessage(new Uint8Array(event.data))
-          return
-        }
-
-        try {
-          const parsed = JSON.parse(event.data)
-          // Server may send batched messages as a JSON array
-          if (Array.isArray(parsed)) {
-            for (const msg of parsed) {
-              this.log('Received', { type: msg.type, componentId: msg.componentId })
-              this.handleMessage(msg)
-            }
-          } else {
-            this.log('Received', { type: parsed.type, componentId: parsed.componentId })
-            this.handleMessage(parsed)
+          // Server rejected connection due to CSRF origin validation — don't retry
+          if (code === 4003) {
+            this.setState({ error: 'Connection rejected: origin not allowed' })
+            return
           }
-        } catch {
-          this.log('Failed to parse message')
-          this.setState({ error: 'Failed to parse message' })
-        }
-      }
 
-      ws.onclose = (event) => {
-        this.log('Disconnected', { code: event.code, reason: event.reason })
-        this.setState({ connected: false, connecting: false, connectionId: null, authenticated: false, auth: { authenticated: false, session: null } })
-        this.stopHeartbeat()
+          // 'auto': transporte que nunca abre (proxy/firewall) → desce um nível:
+          // websocket → sse → http. HTTP puro é o piso e passa em qualquer rede.
+          if (!opened) {
+            const chain = this.chain
+            const idx = chain.indexOf(this.activeMode)
+            if (idx >= 0 && idx < chain.length - 1) {
+              this.autoWsFailures++
+              if (this.autoWsFailures >= LiveConnection.AUTO_FALLBACK_AFTER) {
+                const next = chain[idx + 1]!
+                this.log(`${String(this.activeMode)} unavailable — falling back to ${String(next)}`)
+                this.activeMode = next
+                this.autoWsFailures = 0
+                this.reconnectAttempts = 0
+              }
+            }
+          }
 
-        // Server rejected connection due to CSRF origin validation — don't retry
-        if (event.code === 4003) {
-          this.setState({ error: 'Connection rejected: origin not allowed' })
-          return
-        }
-
-        this.attemptReconnect()
-      }
-
-      ws.onerror = () => {
-        this.log('WebSocket error')
-        this.setState({ error: 'WebSocket connection error', connecting: false })
-      }
+          this.attemptReconnect()
+        },
+      })
     } catch (error) {
       this.setState({
         connecting: false,
         error: error instanceof Error ? error.message : 'Connection failed',
       })
+    }
+  }
+
+  /** Decodifica um frame recebido (texto JSON — possivelmente em lote — ou binário). */
+  private handleIncoming(data: string | ArrayBuffer): void {
+    if (typeof data !== 'string') {
+      this.handleBinaryMessage(new Uint8Array(data))
+      return
+    }
+    try {
+      const parsed = JSON.parse(data) as WebSocketResponse | WebSocketResponse[]
+      // Server may send batched messages as a JSON array
+      const messages = Array.isArray(parsed) ? parsed : [parsed]
+      for (const msg of messages) {
+        this.log('Received', { type: msg.type, componentId: msg.componentId })
+        this.handleMessage(msg)
+      }
+    } catch {
+      this.log('Failed to parse message')
+      this.setState({ error: 'Failed to parse message' })
     }
   }
 
@@ -304,9 +429,10 @@ export class LiveConnection {
       this.manualReconnectTimeout = null
     }
     this.stopHeartbeat()
-    if (this.ws) {
-      this.ws.close()
-      this.ws = null
+    if (this.transport) {
+      const t = this.transport
+      this.transport = null
+      t.close()
     }
     this.reconnectAttempts = this.options.maxReconnectAttempts
     this.setState({ connected: false, connecting: false, connectionId: null })
@@ -353,8 +479,8 @@ export class LiveConnection {
     this.stopHeartbeat()
     this.consecutiveHeartbeatFailures = 0
     this.heartbeatInterval = setInterval(() => {
-      if (this.ws?.readyState === WebSocket.OPEN) {
-        this.sendMessage({ type: 'PING' } as any).catch(() => {
+      if (this.transport?.isOpen) {
+        this.sendMessage(clientMessages.ping()).catch(() => {
           this.consecutiveHeartbeatFailures++
           this.log(`Heartbeat failed (${this.consecutiveHeartbeatFailures}/${LiveConnection.MAX_HEARTBEAT_FAILURES})`)
           if (this.consecutiveHeartbeatFailures >= LiveConnection.MAX_HEARTBEAT_FAILURES) {
@@ -378,23 +504,25 @@ export class LiveConnection {
   private handleMessage(response: WebSocketResponse): void {
     // Handle connection established
     if (response.type === 'CONNECTION_ESTABLISHED') {
+      // `authenticated` vem no topo do CONNECTION_ESTABLISHED (fora do tipo WebSocketResponse).
+      const established: unknown = response
       this.setState({
         connectionId: response.connectionId || null,
-        authenticated: (response as any).authenticated || false,
+        authenticated: isRecord(established) && established.authenticated === true,
       })
 
       // Send AUTH message if credentials provided (always via socket, never in URL)
       const auth = this.options.auth
       if (auth && Object.keys(auth).some(k => auth[k])) {
-        this.sendMessageAndWait({ type: 'AUTH', payload: auth } as any)
+        this.sendMessageAndWait(clientMessages.auth(auth))
           .then(authResp => {
-            const payload = (authResp as any).payload
-            if (payload?.authenticated) {
+            const result = readAuthPayload(authResp)
+            if (result.authenticated) {
               this.setState({
                 authenticated: true,
                 auth: {
                   authenticated: true,
-                  session: deepFreezeSession(payload.session ?? null) as Record<string, unknown> | null,
+                  session: freezeSession(result.session),
                 },
               })
             }
@@ -405,35 +533,33 @@ export class LiveConnection {
 
     // Handle auth response
     if (response.type === 'AUTH_RESPONSE') {
-      const payload = (response as any).payload
-      const authenticated = payload?.authenticated || false
+      const { authenticated, session } = readAuthPayload(response)
       this.setState({
         authenticated,
         auth: {
           authenticated,
           // Deep-freeze the mirror so consumer code cannot mutate locally
           // (mirrors the server-side AuthenticatedContext.freeze).
-          session: authenticated
-            ? (deepFreezeSession(payload?.session ?? null) as Record<string, unknown> | null)
-            : null,
+          session: authenticated ? freezeSession(session) : null,
         },
       })
     }
 
     // Handle pending requests (request-response pattern)
-    if (response.requestId && this.pendingRequests.has(response.requestId)) {
-      const request = this.pendingRequests.get(response.requestId)!
-      clearTimeout(request.timeout)
-      this.pendingRequests.delete(response.requestId)
+    const pendingId = response.requestId && this.pendingRequests.has(response.requestId)
+      ? response.requestId
+      : this.uploadRequestIdFor(response)
+    if (pendingId) {
+      const request = this.pendingRequests.get(pendingId)!
+      this.settlePending(pendingId)
 
-      if (response.success !== false) {
+      // Falha = `success: false` OU `type: 'ERROR'` (os erros de sala/posse do
+      // servidor vêm como ERROR sem `success`; antes resolviam como se fosse ok).
+      const failed = response.success === false || response.type === 'ERROR'
+      if (!failed || response.error?.includes('COMPONENT_REHYDRATION_REQUIRED')) {
         request.resolve(response)
       } else {
-        if (response.error?.includes?.('COMPONENT_REHYDRATION_REQUIRED')) {
-          request.resolve(response)
-        } else {
-          request.reject(new Error(response.error || 'Request failed'))
-        }
+        request.reject(new Error(response.error || 'Request failed'))
       }
       return
     }
@@ -454,36 +580,93 @@ export class LiveConnection {
       if (callback) {
         callback(response)
       } else {
-        this.log('No callback registered for component:', response.componentId)
+        this.bufferUnrouted(response.componentId, response)
       }
     }
   }
 
+  /** Remove um request pendente (e seu alias de upload), cancelando o timeout. */
+  private settlePending(requestId: string): void {
+    const request = this.pendingRequests.get(requestId)
+    if (!request) return
+    clearTimeout(request.timeout)
+    this.pendingRequests.delete(requestId)
+    if (request.uploadAlias && this.uploadAliases.get(request.uploadAlias) === requestId) {
+      this.uploadAliases.delete(request.uploadAlias)
+    }
+  }
+
+  /** requestId pendente correspondente a uma resposta de upload sem requestId. */
+  private uploadRequestIdFor(response: WebSocketResponse): string | undefined {
+    if (typeof response.uploadId !== 'string') return undefined
+    let key: string | undefined
+    if (response.type === 'FILE_UPLOAD_PROGRESS' && typeof response.chunkIndex === 'number') {
+      key = `${response.uploadId}:${response.chunkIndex}`
+    } else if (response.type === 'FILE_UPLOAD_COMPLETE') {
+      key = `${response.uploadId}:complete`
+    }
+    const requestId = key ? this.uploadAliases.get(key) : undefined
+    return requestId && this.pendingRequests.has(requestId) ? requestId : undefined
+  }
+
+  /** Registra um request pendente (com alias de upload, quando houver). */
+  private addPending(
+    requestId: string,
+    resolve: (value: WebSocketResponse) => void,
+    reject: (error: Error) => void,
+    timeoutMs: number,
+    timeoutMessage: string,
+    uploadAlias: string | undefined,
+  ): void {
+    const timeout = setTimeout(() => {
+      this.settlePending(requestId)
+      reject(new Error(timeoutMessage))
+    }, timeoutMs)
+    this.pendingRequests.set(requestId, { resolve, reject, timeout, uploadAlias })
+    if (uploadAlias) this.uploadAliases.set(uploadAlias, requestId)
+  }
+
+  /** Guarda mensagem de componente ainda sem callback (entregue no registerComponent). */
+  private bufferUnrouted(componentId: string, response: WebSocketResponse): void {
+    const now = Date.now()
+    // Descarta entradas vencidas antes de crescer.
+    for (const [id, entry] of this.unrouted) {
+      if (now - entry.at > UNROUTED_TTL_MS) this.unrouted.delete(id)
+    }
+    let entry = this.unrouted.get(componentId)
+    if (!entry) {
+      if (this.unrouted.size >= UNROUTED_MAX_COMPONENTS) {
+        const oldest = this.unrouted.keys().next().value
+        if (oldest !== undefined) this.unrouted.delete(oldest)
+      }
+      entry = { at: now, messages: [] }
+      this.unrouted.set(componentId, entry)
+    }
+    if (entry.messages.length >= UNROUTED_MAX_PER_COMPONENT) entry.messages.shift()
+    entry.messages.push(response)
+    this.log('No callback registered yet — buffered message for component:', componentId)
+  }
+
   /** Send message without waiting for response */
-  async sendMessage(message: WebSocketMessage): Promise<void> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+  async sendMessage(message: LiveOutgoingMessage): Promise<void> {
+    if (!this.transport?.isOpen) {
       throw new Error('WebSocket is not connected')
     }
-    this.ws.send(JSON.stringify(message))
-    this.log('Sent', { type: message.type, componentId: message.componentId })
+    this.transport.send(JSON.stringify(message))
+    this.log('Sent', { type: message.type, componentId: 'componentId' in message ? message.componentId : undefined })
   }
 
   /** Send message and wait for response */
-  async sendMessageAndWait(message: WebSocketMessage, timeout = 10000): Promise<WebSocketResponse> {
+  async sendMessageAndWait(message: LiveOutgoingMessage, timeout = 10000): Promise<WebSocketResponse> {
     return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      const transport = this.transport
+      if (!transport?.isOpen) {
         reject(new Error('WebSocket is not connected'))
         return
       }
 
       const requestId = this.generateRequestId()
-
-      const timeoutHandle = setTimeout(() => {
-        this.pendingRequests.delete(requestId)
-        reject(new Error(`Request timeout after ${timeout}ms`))
-      }, timeout)
-
-      this.pendingRequests.set(requestId, { resolve, reject, timeout: timeoutHandle })
+      this.addPending(requestId, resolve, reject, timeout, `Request timeout after ${timeout}ms`, uploadAliasOf(message))
 
       try {
         const messageWithRequestId = {
@@ -491,12 +674,11 @@ export class LiveConnection {
           requestId,
           expectResponse: true,
         }
-        this.ws.send(JSON.stringify(messageWithRequestId))
+        transport.send(JSON.stringify(messageWithRequestId))
         this.log('Sent with requestId', { requestId, type: message.type })
       } catch (error) {
-        clearTimeout(timeoutHandle)
-        this.pendingRequests.delete(requestId)
-        reject(error)
+        this.settlePending(requestId)
+        reject(toError(error))
       }
     })
   }
@@ -504,25 +686,20 @@ export class LiveConnection {
   /** Send binary data and wait for response (for file uploads) */
   async sendBinaryAndWait(data: ArrayBuffer, requestId: string, timeout = 10000): Promise<WebSocketResponse> {
     return new Promise((resolve, reject) => {
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      const transport = this.transport
+      if (!transport?.isOpen) {
         reject(new Error('WebSocket is not connected'))
         return
       }
 
-      const timeoutHandle = setTimeout(() => {
-        this.pendingRequests.delete(requestId)
-        reject(new Error(`Binary request timeout after ${timeout}ms`))
-      }, timeout)
-
-      this.pendingRequests.set(requestId, { resolve, reject, timeout: timeoutHandle })
+      this.addPending(requestId, resolve, reject, timeout, `Binary request timeout after ${timeout}ms`, uploadAliasOf(readBinaryChunkHeader(data)))
 
       try {
-        this.ws.send(data)
+        transport.send(data)
         this.log('Sent binary', { requestId, size: data.byteLength })
       } catch (error) {
-        clearTimeout(timeoutHandle)
-        this.pendingRequests.delete(requestId)
-        reject(error)
+        this.settlePending(requestId)
+        reject(toError(error))
       }
     })
   }
@@ -569,6 +746,18 @@ export class LiveConnection {
   registerComponent(componentId: string, callback: ComponentCallback): () => void {
     this.log('Registering component', componentId)
     this.componentCallbacks.set(componentId, callback)
+    // Entrega o que chegou antes do registro (ex.: STATE_REHYDRATED, deltas do onMount).
+    const buffered = this.unrouted.get(componentId)
+    if (buffered) {
+      this.unrouted.delete(componentId)
+      if (Date.now() - buffered.at <= UNROUTED_TTL_MS) {
+        for (const msg of buffered.messages) {
+          // O callback pode ter sido trocado/removido por uma mensagem anterior.
+          if (this.componentCallbacks.get(componentId) !== callback) break
+          callback(msg)
+        }
+      }
+    }
     return () => {
       this.componentCallbacks.delete(componentId)
       this.log('Unregistered component', componentId)
@@ -583,20 +772,14 @@ export class LiveConnection {
   /** Authenticate (or re-authenticate) the WebSocket connection */
   async authenticate(credentials: LiveAuthOptions): Promise<boolean> {
     try {
-      const response = await this.sendMessageAndWait(
-        { type: 'AUTH', payload: credentials } as any,
-        5000
-      )
-      const payload = (response as any).payload
-      const success = payload?.authenticated || false
+      const response = await this.sendMessageAndWait(clientMessages.auth(credentials), 5000)
+      const { authenticated: success, session } = readAuthPayload(response)
       this.setState({
         authenticated: success,
         auth: {
           authenticated: success,
           // Deep-freeze the mirror (see deepFreezeSession at top).
-          session: success
-            ? (deepFreezeSession(payload?.session ?? null) as Record<string, unknown> | null)
-            : null,
+          session: success ? freezeSession(session) : null,
         },
       })
       return success
@@ -605,9 +788,23 @@ export class LiveConnection {
     }
   }
 
-  /** Get the raw WebSocket instance */
+  /** Rejeita todos os pedidos pendentes (conexão caiu ou foi destruída). */
+  private rejectPendingRequests(message: string): void {
+    for (const [, req] of this.pendingRequests) {
+      clearTimeout(req.timeout)
+      req.reject(new Error(message))
+    }
+    this.pendingRequests.clear()
+  }
+
+  /** WebSocket nativo quando o transporte ativo é WebSocket (null em SSE/custom). */
   getWebSocket(): WebSocket | null {
-    return this.ws
+    return this.transport instanceof WebSocketClientTransport ? this.transport.socket : null
+  }
+
+  /** Transporte ativo (ou null quando desconectado). */
+  getTransport(): ClientTransport | null {
+    return this.transport
   }
 
   /** Destroy the connection and clean up all resources */
@@ -616,6 +813,7 @@ export class LiveConnection {
     this.removeNetworkListeners()
     this.disconnect()
     this.componentCallbacks.clear()
+    this.unrouted.clear()
     this.binaryCallbacks.clear()
     this.roomBinaryHandlers.clear()
     for (const [, req] of this.pendingRequests) {
@@ -623,6 +821,7 @@ export class LiveConnection {
       req.reject(new Error('Connection destroyed'))
     }
     this.pendingRequests.clear()
+    this.uploadAliases.clear()
     this.stateListeners.clear()
   }
 }

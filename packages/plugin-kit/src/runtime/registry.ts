@@ -15,35 +15,22 @@
  */
 
 import type {
-  FluxStack,
   PluginManifest,
   PluginLoadResult,
   PluginDiscoveryOptions,
   PluginPriority,
 } from '../types'
 import type { Logger } from '../types/logger'
+import type { ErasedPlugin } from './erased-plugin'
 import { PluginError } from './errors'
 import { PluginDependencyManager } from './dependency-manager'
 import { readdir, readFile } from 'fs/promises'
 import { join, resolve, sep } from 'path'
 import { existsSync, readFileSync } from 'fs'
 
-// Internal alias: a plugin with its config shape erased to the top type.
-// The registry stores plugins generically — it doesn't read host-app config
-// directly, so variance doesn't matter here. Host apps with specialized
-// Plugin<HostConfig> types pass them in via `registerSync`/`register` using
-// `as unknown as FluxStack.Plugin` at the call site (see FluxStack's
-// `FluxStackFramework.use()` for an example), or use the registry as-is.
-//
-// Using `any` here instead of `unknown` is intentional: TypeScript's
-// generic-function variance treats `unknown` contravariantly in hook
-// callback positions (e.g. `setup: (ctx: PluginContext<TConfig>) => void`),
-// which would block a consumer from passing `Plugin<HostConfig>` to
-// `registerSync` even though it's safe at runtime. `any` is bivariant
-// and matches the runtime guarantee (the registry never inspects
-// `context.config`).
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type FluxStackPlugin = FluxStack.Plugin<any>
+// Plugin com TConfig apagado. Host apps com Plugin<HostConfig> registram
+// direto via `registerSync`/`register` — ver erased-plugin.ts para o porquê.
+type FluxStackPlugin = ErasedPlugin
 
 /**
  * Minimal plugin-related settings the registry consumes from the host app.
@@ -78,6 +65,17 @@ export interface PluginRegistryConfig {
   /** Plugin-related settings from the host app's config */
   settings?: PluginRegistrySettings
   discoveryOptions?: PluginDiscoveryOptions
+}
+
+/** Arquivos de entrada aceitos, na ordem de preferência (igual ao PluginDiscovery). */
+const ENTRY_FILES = ['index.ts', 'index.js', 'plugin.ts', 'plugin.js', 'src/index.ts', 'src/index.js', 'dist/index.js']
+
+function findEntryFile(pluginDir: string): string | null {
+  for (const file of ENTRY_FILES) {
+    const candidate = join(pluginDir, file)
+    if (existsSync(candidate)) return candidate
+  }
+  return null
 }
 
 const PRIORITY_MAP: Record<string, number> = {
@@ -128,6 +126,9 @@ export class PluginRegistry {
       )
     }
 
+    // Mesmo contrato do registerSync: npm fora da whitelist não entra
+    // (antes só o caminho síncrono checava — PluginManager.registerPlugin() furava).
+    this.enforceWhitelist(plugin)
     this.validatePlugin(plugin)
 
     this.plugins.set(plugin.name, plugin)
@@ -744,7 +745,9 @@ export class PluginRegistry {
         }
       }
 
-      const pluginModule = await import(resolve(pluginPath))
+      // Importa o arquivo de entrada (não o diretório): import de diretório só
+      // resolve `index.*`, e `plugin.{ts,js}` — aceito na descoberta — falhava.
+      const pluginModule = await import(resolve(findEntryFile(pluginPath) ?? pluginPath))
       const plugin: FluxStackPlugin = pluginModule.default || pluginModule
 
       if (!plugin || typeof plugin !== 'object' || !plugin.name) {

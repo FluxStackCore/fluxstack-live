@@ -2,26 +2,29 @@
 //
 // Type inference system for Live Components (similar to Eden Treaty).
 
-import type { LiveComponent } from './LiveComponent'
+import type { AnyLiveComponent } from './LiveComponent'
+
+/** Qualquer função (checagem estrutural: `never[]` aceita qualquer lista de parâmetros). */
+type AnyFunction = (...args: never[]) => unknown
 
 // Utility types for better TypeScript experience
 export type ComponentActions<T> = {
-  [K in keyof T]: T[K] extends (...args: any[]) => any ? T[K] : never
+  [K in keyof T]: T[K] extends AnyFunction ? T[K] : never
 }
 
-export type ComponentProps<T extends LiveComponent> = T extends LiveComponent<infer TState> ? TState : never
+export type ComponentProps<T extends AnyLiveComponent> = T extends { state: infer TState } ? TState : never
 
-export type ActionParameters<T, K extends keyof T> = T[K] extends (...args: infer P) => any ? P : never
+export type ActionParameters<T, K extends keyof T> = T[K] extends (...args: infer P) => unknown ? P : never
 
-export type ActionReturnType<T, K extends keyof T> = T[K] extends (...args: any[]) => infer R ? R : never
+export type ActionReturnType<T, K extends keyof T> = T[K] extends (...args: never[]) => infer R ? R : never
 
 /**
  * Extract all public action methods from a LiveComponent class
  * Excludes constructor, destroy, lifecycle methods, and inherited methods
  */
-export type ExtractActions<T extends LiveComponent<any>> = {
+export type ExtractActions<T extends AnyLiveComponent> = {
   [K in keyof T as K extends string
-    ? T[K] extends (payload?: any) => Promise<any>
+    ? T[K] extends (payload: never) => Promise<unknown>
       ? K extends 'executeAction' | 'destroy' | 'getSerializableState' | 'setState'
         ? never
         : K
@@ -32,17 +35,17 @@ export type ExtractActions<T extends LiveComponent<any>> = {
 /**
  * Get all action names from a component
  */
-export type ActionNames<T extends LiveComponent<any>> = keyof ExtractActions<T>
+export type ActionNames<T extends AnyLiveComponent> = keyof ExtractActions<T>
 
 /**
  * Get the payload type for a specific action
  */
 export type ActionPayload<
-  T extends LiveComponent<any>,
+  T extends AnyLiveComponent,
   K extends ActionNames<T>
-> = ExtractActions<T>[K] extends (payload: infer P) => any
+> = ExtractActions<T>[K] extends (payload: infer P) => unknown
   ? P
-  : ExtractActions<T>[K] extends () => any
+  : ExtractActions<T>[K] extends () => unknown
     ? undefined
     : never
 
@@ -50,28 +53,29 @@ export type ActionPayload<
  * Get the return type for a specific action (unwrapped from Promise)
  */
 export type ActionReturn<
-  T extends LiveComponent<any>,
+  T extends AnyLiveComponent,
   K extends ActionNames<T>
-> = ExtractActions<T>[K] extends (...args: any[]) => Promise<infer R>
+> = ExtractActions<T>[K] extends (...args: never[]) => Promise<infer R>
   ? R
-  : ExtractActions<T>[K] extends (...args: any[]) => infer R
+  : ExtractActions<T>[K] extends (...args: never[]) => infer R
     ? R
     : never
 
 /**
  * Get the state type from a LiveComponent class
  */
-export type InferComponentState<T extends LiveComponent<any>> = T extends LiveComponent<infer S> ? S : never
+// Inferência pelos membros (não por `LiveComponent<infer S>`): independe do TPrivate.
+export type InferComponentState<T extends AnyLiveComponent> = T extends { state: infer S } ? S : never
 
 /**
  * Get the private state type from a LiveComponent class
  */
-export type InferPrivateState<T extends LiveComponent<any, any>> = T extends LiveComponent<any, infer P> ? P : never
+export type InferPrivateState<T extends AnyLiveComponent> = T extends { readonly $private: infer P } ? P : never
 
 /**
  * Type-safe call signature for a component
  */
-export type TypedCall<T extends LiveComponent<any>> = <K extends ActionNames<T>>(
+export type TypedCall<T extends AnyLiveComponent> = <K extends ActionNames<T>>(
   action: K,
   ...args: ActionPayload<T, K> extends undefined
     ? []
@@ -81,7 +85,7 @@ export type TypedCall<T extends LiveComponent<any>> = <K extends ActionNames<T>>
 /**
  * Type-safe callAndWait signature for a component
  */
-export type TypedCallAndWait<T extends LiveComponent<any>> = <K extends ActionNames<T>>(
+export type TypedCallAndWait<T extends AnyLiveComponent> = <K extends ActionNames<T>>(
   action: K,
   ...args: ActionPayload<T, K> extends undefined
     ? [payload?: undefined, timeout?: number]
@@ -91,7 +95,7 @@ export type TypedCallAndWait<T extends LiveComponent<any>> = <K extends ActionNa
 /**
  * Type-safe setValue signature for a component
  */
-export type TypedSetValue<T extends LiveComponent<any>> = <K extends keyof InferComponentState<T>>(
+export type TypedSetValue<T extends AnyLiveComponent> = <K extends keyof InferComponentState<T>>(
   key: K,
   value: InferComponentState<T>[K]
 ) => Promise<void>
@@ -99,7 +103,7 @@ export type TypedSetValue<T extends LiveComponent<any>> = <K extends keyof Infer
 /**
  * Return type for useTypedLiveComponent hook
  */
-export interface UseTypedLiveComponentReturn<T extends LiveComponent<any>> {
+export interface UseTypedLiveComponentReturn<T extends AnyLiveComponent> {
   state: InferComponentState<T>
   loading: boolean
   error: string | null

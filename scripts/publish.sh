@@ -51,6 +51,8 @@ PACKAGES=(
   "react"
   "vue"
   "redis"
+  "cli"
+  "spatial-room"
 )
 
 # Package name mapping
@@ -63,6 +65,8 @@ declare -A PKG_NAMES=(
   [react]="@fluxstack/live-react"
   [vue]="@fluxstack/live-vue"
   [redis]="@fluxstack/live-redis"
+  [cli]="@fluxstack/live-cli"
+  [spatial-room]="@fluxstack/spatial-room"
 )
 
 cd "$ROOT"
